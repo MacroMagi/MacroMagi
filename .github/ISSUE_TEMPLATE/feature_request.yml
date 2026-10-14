@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest a block, a setting, or a better way of doing something
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: The task you want to automate or the problem you ran into. A concrete example helps more than a general description.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help?
+      description: How you imagine it working. For a new block - what goes in, what comes out, what settings it has.
+  - type: textarea
+    id: today
+    attributes:
+      label: How do you do it today?
+      description: Any workaround you use now, in MacroMagi or with another tool.

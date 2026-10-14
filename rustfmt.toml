@@ -1,0 +1,3 @@
+# Wide enough for builder chains and UI code to stay readable on one line.
+max_width = 120
+use_small_heuristics = "Max"

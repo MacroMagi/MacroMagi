@@ -1,0 +1,33 @@
+[package]
+name = "magi-app"
+description = "MacroMagi desktop application."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "macromagi"
+path = "src/main.rs"
+
+[dependencies]
+magi-core.workspace = true
+magi-vision.workspace = true
+magi-platform.workspace = true
+magi-engine.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui-phosphor.workspace = true
+rfd.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+# Drives the UI headlessly: simulated pointer and keyboard, no window.
+egui_kittest.workspace = true
+
+[lints]
+workspace = true

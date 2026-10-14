@@ -1,0 +1,6 @@
+# Pinned so every contributor and CI job builds with the same compiler.
+# rustup picks this up automatically; bump it deliberately, in its own PR.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

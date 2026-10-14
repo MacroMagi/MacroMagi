@@ -1,0 +1,32 @@
+[package]
+name = "magi-platform"
+description = "MacroMagi operating-system layer: input injection, global input listening, gamepads, and screen capture."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+magi-core.workspace = true
+enigo.workspace = true
+gilrs.workspace = true
+xcap.workspace = true
+
+# Windows listens through its own low-level hooks (see src/listen/windows.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# Everything else listens through rdev.
+[target.'cfg(not(windows))'.dependencies]
+rdev = "0.5"
+
+[lints]
+workspace = true

@@ -1,0 +1,21 @@
+[package]
+name = "magi-engine"
+description = "MacroMagi execution engines: the native Rust interpreter and the Python runtime bridge."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+magi-core.workspace = true
+magi-vision.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+fastrand.workspace = true
+include_dir.workspace = true
+
+[lints]
+workspace = true

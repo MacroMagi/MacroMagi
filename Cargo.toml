@@ -1,0 +1,67 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+authors = ["MacroMagi contributors"]
+repository = "https://github.com/MacroMagi/MacroMagi"
+homepage = "https://github.com/MacroMagi/MacroMagi"
+publish = false
+
+[workspace.dependencies]
+# Internal crates. Dependency direction is strictly downwards:
+#   app -> engine -> { vision, core }      platform -> core
+magi-core = { path = "crates/magi-core" }
+magi-vision = { path = "crates/magi-vision" }
+magi-platform = { path = "crates/magi-platform" }
+magi-engine = { path = "crates/magi-engine" }
+
+# Data / formats
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+base64 = "0.22"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp", "webp", "gif"] }
+
+# Runtime
+rayon = "1"
+fastrand = "2"
+include_dir = "0.7"
+
+# Operating system access (only magi-platform may depend on these)
+enigo = "0.6"
+gilrs = { version = "0.11", default-features = false, features = ["xinput"] }
+xcap = "0.9"
+
+# UI (only magi-app may depend on these)
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
+egui-phosphor = "0.14"
+egui_kittest = "0.36"
+rfd = "0.17"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+# Dependencies are optimised even in debug builds: egui text layout and image
+# decoding are painfully slow at opt-level 0, and they rarely need debugging.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Template matching is a tight numeric loop; unoptimised it takes seconds.
+[profile.dev.package.magi-vision]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

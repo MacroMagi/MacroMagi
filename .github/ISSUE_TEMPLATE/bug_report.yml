@@ -1,0 +1,58 @@
+name: Bug report
+description: Something does not work the way it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: >
+        The shortest way to make it happen. If it involves a macro, attach the .magi file or describe the blocks.
+        Recordings contain what you typed – remove them or re-record something harmless before attaching.
+      placeholder: |
+        1. Add an Image Detection block
+        2. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: MacroMagi version
+      description: The output of `macromagi --version`, or the commit you built.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux (X11)
+        - Linux (Wayland)
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: engine
+    attributes:
+      label: Engine
+      description: Shown next to the lightning icon in the Macro tab's toolbar.
+      options:
+        - Python
+        - Native
+        - Not relevant / not sure
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: Anything the console (the terminal icon in the Macro tab) showed.
+      render: text

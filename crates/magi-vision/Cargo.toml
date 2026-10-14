@@ -1,0 +1,17 @@
+[package]
+name = "magi-vision"
+description = "MacroMagi screen analysis: template matching and colour search on raw pixel buffers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+image.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
