@@ -126,6 +126,19 @@ Sends input: a key, a mouse click, a move, a scroll or typed text. Add several i
 | Inputs | list of inputs | one left click |  |
 | Hold time | duration | 30 ms | How long taps and clicks stay pressed before they are released. |
 
+### Auto Click
+
+`input.autoclick`
+
+Clicks (or presses keys) over and over at a steady speed, with everything the Auto Clicker tab offers: speed variation, duty cycle, limits, corner and edge stops.
+
+- Flow in: yes
+- Flow out: yes
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Clicking | Auto Clicker settings | left click, 10 per second, until stopped |  |
+
 ### Play Recording
 
 `input.recording`
@@ -140,6 +153,7 @@ Replays recorded input with its original timing: every key and button is pressed
 | Recording | recording | none |  |
 | Speed | number | 1 × |  |
 | Replay mouse movement | on/off | on |  |
+| Mouse movement as | choice | As recorded (smart) | Games with a first-person camera lock the pointer and read how far the mouse moves. If the camera turns once and then stops, choose relative motion. Options: As recorded (smart); Screen positions; Relative motion – for games. |
 
 ## Vision
 
@@ -172,6 +186,27 @@ Looks for an image on screen. “Found” is true when a match at least as simil
 | Image | image | none |  |
 | Search area | screen area | whole screen | A smaller area is faster and avoids false matches elsewhere on screen. |
 | Accuracy | percentage | 80% | How closely the screen must match the image. 100% demands a pixel-perfect match. |
+
+## Window
+
+Working with program windows.
+
+### Switch to Window
+
+`window.focus`
+
+Brings a program's window to the front (restoring it if it is minimised) and waits until it is ready for input. Knows how windowed, borderless and exclusive fullscreen programs behave, or works it out itself.
+
+- Flow in: yes
+- Flow out: **Switched**, **Not found**
+- Value outputs: **Screen type** (text)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Window | text |  | Part of the window's title, or of the program's name, e.g. “Minecraft” or “game.exe”. |
+| Find it by | choice | Window title | Options: Window title; Program name. |
+| Screen type | choice | Detect automatically | Exclusive fullscreen programs need longer to come back after a switch. Options: Detect automatically; Windowed; Borderless fullscreen; Exclusive fullscreen. |
+| Keep looking for | duration | 2000 ms |  |
 
 ## Logic
 

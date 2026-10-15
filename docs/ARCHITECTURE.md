@@ -80,6 +80,8 @@ This is the contract both engines implement. If you change one, change the other
 
 **Busy loops.** A run that executes thousands of steps without ever waiting is made to yield briefly, so a loop with nothing to wait for cannot pin a CPU core.
 
+**Program rules.** Before any input that *presses* something is sent, the run checks which program is in front against the user's program rules (whitelist or blacklist, [`options.rs`](../crates/magi-core/src/options.rs)). A denied program either stops the run or pauses it until an allowed program is back in front. Releases are always sent, so nothing is left held. The check is cached for 25 ms, so a thousand clicks a second do not mean a thousand system calls.
+
 ## Two engines, one set of hands
 
 ```text
@@ -118,6 +120,11 @@ pub trait Host: Send + Sync {
     fn send(&self, event: &InputEvent) -> Result<(), HostError>;
     fn cursor(&self) -> Result<Point, HostError>;
     fn capture(&self, region: Option<Rect>) -> Result<Frame, HostError>;
+
+    // With defaults, so a minimal host only needs the three above:
+    fn screens(&self) -> Result<Vec<Rect>, HostError>;          // monitor rectangles
+    fn foreground_process(&self) -> Option<String>;            // for program rules
+    fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError>;
 }
 ```
 
@@ -127,7 +134,7 @@ Three implementations exist:
 - `SimHost` (`magi-core`) – a virtual pointer, a log of what was sent, and a picture standing in for the screen. Used by tests.
 - Dry-run hosts (`magi-app`) – real screen and pointer, input only logged.
 
-Adding a capability a macro can use (clipboard, window focus, sound) means adding a method here, implementing it in `SystemHost` and `SimHost`, and exposing it through an operation in `ops.rs`.
+Adding a capability a macro can use (clipboard, sound, …) means adding a method here, implementing it in `SystemHost` and `SimHost`, and exposing it through an operation in `ops.rs`. *Switch to Window* was added exactly this way.
 
 ## The application
 
@@ -142,6 +149,12 @@ A macro tool spends most of its life minimised behind a game, so nothing that ma
            ◄── running blocks, logs, finished recordings ─────────────────┘
 ```
 
+The hotkey table is rebuilt whenever the settings or the macro change: the stop-everything, record and extra stop hotkeys always; Alt+Tab and Win+Tab when *Stop on task switch* is on; the Auto Clicker's hotkey on its tab; the Run hotkey and every Start block's hotkey on the Macro tab. A change applies on the next key press – there is nothing to restart.
+
+A `magi-housekeeping` thread keeps memory low while nothing runs: an unused Python process is stopped after a few minutes (it starts again on the next run), and memory is handed back to the system once the window has been minimised for a while.
+
+**Listening reliably on Windows.** Windows silently removes a low-level hook that is slow to answer, once, and never says so – the classic "hotkeys stopped working" bug. The listener thread runs at time-critical priority, does nothing in the hook but queue the event, and a watchdog compares the system's last-input time with the last event the hooks saw. If input happened that the hooks missed, they are reinstalled. Relative mouse motion (what a game camera reads) comes from Raw Input on a message-only window.
+
 ### Documents and undo
 
 Editing code never reports changes. Once per frame [`Document::track`](../crates/magi-app/src/document.rs) compares the project with what it last saw. From that one comparison come the revision number (which tells the controller to pick up the new version), the unsaved-changes marker and the undo steps. A gesture in progress – a drag, a text field with focus – is folded into a single undo step.
@@ -149,6 +162,16 @@ Editing code never reports changes. Once per frame [`Document::track`](../crates
 ### UI modules
 
 Each tab and larger widget is a module under `magi-app/src/ui`. A module edits the data it is given and returns *requests* for anything beyond it (pick a point on screen, listen for a hotkey, open a file dialog). Modules do not reach into application state, which keeps them movable and replaceable.
+
+The Auto Clicker's form ([`clicker_form.rs`](../crates/magi-app/src/ui/clicker_form.rs)) edits a `ClickerSettings` and is shared by the Auto Clicker tab and the settings of the Auto Click block – the tab *is* that block, run on its own.
+
+### Look
+
+Every colour comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/theme.rs), built from three choices: light or dark (or the system's), the theme colour (none = monochrome), and how opaque panels are over a background picture. UI code asks for colours by role – `theme::text()`, `theme::accent()`, `theme::category_color(…)` – never by value, so changing the theme recolours everything at once, block categories and icons included.
+
+### Screen targets
+
+[`targets.rs`](../crates/magi-core/src/targets.rs) lists every position a macro clicks and every area it searches, in the order a run reaches them, and writes edits back to the blocks they came from. *View → Screen targets* draws them over a frozen screenshot; it knows nothing about individual blocks.
 
 The node editor draws nodes by hand instead of composing widgets. Geometry is computed up front, so wires can be drawn beneath nodes in the same frame and cost stays flat with hundreds of nodes.
 
@@ -158,7 +181,8 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | --- | --- |
 | UI | Draws; owns the document and settings |
 | `magi-controller` | Reacts to global input: hotkeys, recording |
-| `magi-listen` | Low-level keyboard and mouse hooks (must stay fast – the OS waits on it) |
+| `magi-listen` | Low-level keyboard and mouse hooks and Raw Input (must stay fast – the OS waits on it), with a watchdog |
+| `magi-housekeeping` | Stops an idle Python process; hands memory back while the window is hidden |
 | `magi-gamepad` | Polls controllers |
 | `magi-inject` | Owns the OS input connection; serialises everything sent |
 | `magi-run-N` | One per run on the native engine |
@@ -171,6 +195,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | --- | --- |
 | A block | A definition, a native function, a Python function – see [ADDING_A_NODE.md](ADDING_A_NODE.md) |
 | A kind of setting | A `ParamKind` variant and one editor in `ui/inspector.rs` |
+| A rule about when input may be sent | `AutomationOptions` in `magi-core/src/options.rs`, checked in `RunCx::send` |
 | Something a macro can do to the machine | `Host`, then an operation in `ops.rs` |
 | Another way of seeing the screen | A function in `magi-vision`, an operation, a value block |
 | An engine | Something that can start and stop runs behind `Session` |
@@ -186,7 +211,8 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 
 ## Portability rules
 
-- Write only inside `Paths::data_dir` (next to the executable, or `MACROMAGI_DATA_DIR`).
-- No registry keys, no files in the user profile, no background services. `eframe`'s own persistence is switched off.
+- Write only inside `Paths::data_dir` (next to the executable, or `MACROMAGI_DATA_DIR`). Background pictures are copied into it, so settings never point elsewhere.
+- No registry keys, no files in the user profile, no background services. `eframe`'s own persistence is switched off. The single exception is *Options → Create desktop shortcut*, which writes a shortcut when – and only when – the user asks for one.
+- No network access, except downloading a background picture from an address the user typed.
 - The Python engine sets `PYTHONDONTWRITEBYTECODE` so it leaves no caches behind.
 - Anything that needs something installed (Python, a driver) must be optional, detected at run time, and explained when missing.

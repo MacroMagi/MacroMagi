@@ -1,65 +1,334 @@
-//! MacroMagi's look: one dark palette, applied to egui once at startup.
+//! MacroMagi's look.
 //!
-//! Every colour used anywhere in the UI is named here. Widgets should take
-//! colours from this module rather than inventing their own.
+//! Every colour in the UI comes from one [`Palette`], built from three
+//! choices: light or dark, a theme colour, and how see-through panels are
+//! (for background images). The default theme colour is none at all –
+//! monochrome, mostly black – and picking one recolours everything, node
+//! categories and value types included, as variations around it.
+//!
+//! Widgets read colours through the functions here (`theme::text()`,
+//! `theme::accent()`, …) so that a theme change takes effect everywhere at once.
+
+use std::cell::Cell;
 
 use egui::epaint::Shadow;
 use egui::{Color32, CornerRadius, FontFamily, FontId, Margin, Stroke, TextStyle, Vec2};
 use magi_core::nodes::{Category, DataType, PortKind};
-
-pub const BG_APP: Color32 = Color32::from_rgb(0x12, 0x13, 0x18);
-pub const BG_PANEL: Color32 = Color32::from_rgb(0x17, 0x19, 0x1F);
-pub const BG_CANVAS: Color32 = Color32::from_rgb(0x10, 0x11, 0x15);
-pub const BG_RAISED: Color32 = Color32::from_rgb(0x1E, 0x21, 0x29);
-pub const BG_WIDGET: Color32 = Color32::from_rgb(0x26, 0x2A, 0x33);
-pub const BG_WIDGET_HOVER: Color32 = Color32::from_rgb(0x30, 0x35, 0x40);
-pub const BG_WIDGET_ACTIVE: Color32 = Color32::from_rgb(0x3A, 0x40, 0x4E);
-pub const BG_INPUT: Color32 = Color32::from_rgb(0x0E, 0x0F, 0x13);
-
-pub const STROKE: Color32 = Color32::from_rgb(0x2A, 0x2E, 0x38);
-pub const STROKE_STRONG: Color32 = Color32::from_rgb(0x3D, 0x43, 0x50);
-pub const GRID: Color32 = Color32::from_rgb(0x1E, 0x21, 0x28);
-
-pub const TEXT: Color32 = Color32::from_rgb(0xE8, 0xEA, 0xF0);
-pub const TEXT_DIM: Color32 = Color32::from_rgb(0x9E, 0xA6, 0xB6);
-pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x6A, 0x72, 0x84);
-
-pub const ACCENT: Color32 = Color32::from_rgb(0x9B, 0x6D, 0xFF);
-pub const ACCENT_BRIGHT: Color32 = Color32::from_rgb(0xB9, 0x97, 0xFF);
-pub const SUCCESS: Color32 = Color32::from_rgb(0x3D, 0xD6, 0x8C);
-pub const DANGER: Color32 = Color32::from_rgb(0xFF, 0x5C, 0x6C);
-pub const WARNING: Color32 = Color32::from_rgb(0xFF, 0xB5, 0x4A);
-
-/// Colour of flow wires and flow ports.
-pub const FLOW: Color32 = Color32::from_rgb(0xD5, 0xDA, 0xE5);
+use serde::{Deserialize, Serialize};
 
 pub const RADIUS: u8 = 6;
 pub const RADIUS_LARGE: u8 = 10;
 
-pub fn category_color(category: Category) -> Color32 {
-    match category {
-        Category::Flow => ACCENT,
-        Category::Input => Color32::from_rgb(0x4D, 0xA3, 0xFF),
-        Category::Vision => Color32::from_rgb(0x2D, 0xD4, 0xA7),
-        Category::Logic => Color32::from_rgb(0xFF, 0xB5, 0x4A),
-        Category::Script => Color32::from_rgb(0xFF, 0x7A, 0xB8),
-        Category::Addon => Color32::from_rgb(0x8E, 0x99, 0xAE),
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    /// Follow the operating system.
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+impl ThemeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            ThemeMode::System => "System",
+            ThemeMode::Light => "Light",
+            ThemeMode::Dark => "Dark",
+        }
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    pub dark: bool,
+    pub bg_app: Color32,
+    pub bg_panel: Color32,
+    pub bg_canvas: Color32,
+    pub bg_raised: Color32,
+    pub bg_widget: Color32,
+    pub bg_widget_hover: Color32,
+    pub bg_widget_active: Color32,
+    pub bg_input: Color32,
+    pub stroke: Color32,
+    pub stroke_strong: Color32,
+    pub grid: Color32,
+    pub text: Color32,
+    pub text_dim: Color32,
+    pub text_faint: Color32,
+    pub accent: Color32,
+    pub accent_bright: Color32,
+    /// Text drawn on top of the accent colour.
+    pub on_accent: Color32,
+    pub success: Color32,
+    pub danger: Color32,
+    pub warning: Color32,
+    pub flow: Color32,
+    categories: [Color32; 7],
+    data: [Color32; 5],
+}
+
+thread_local! {
+    static PALETTE: Cell<Palette> = Cell::new(Palette::build(true, None, 1.0));
+}
+
+/// The palette in use.
+pub fn palette() -> Palette {
+    PALETTE.get()
+}
+
+fn gray(level: u8) -> Color32 {
+    Color32::from_rgb(level, level, level)
+}
+
+fn hex(rgb: u32) -> Color32 {
+    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// HSV (all `0..=1`) to a colour.
+fn from_hsv(h: f32, s: f32, v: f32) -> Color32 {
+    let h = h.rem_euclid(1.0) * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - ((h % 2.0) - 1.0).abs());
+    let (r, g, b) = match h as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = v - c;
+    let to_u8 = |value: f32| ((value + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgb(to_u8(r), to_u8(g), to_u8(b))
+}
+
+/// A colour's hue, saturation and value, all `0..=1`.
+fn to_hsv(color: Color32) -> (f32, f32, f32) {
+    let [r, g, b] = [color.r(), color.g(), color.b()].map(|c| f32::from(c) / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let hue = if delta == 0.0 {
+        0.0
+    } else if max == r {
+        ((g - b) / delta).rem_euclid(6.0) / 6.0
+    } else if max == g {
+        ((b - r) / delta + 2.0) / 6.0
+    } else {
+        ((r - g) / delta + 4.0) / 6.0
+    };
+    (hue, if max == 0.0 { 0.0 } else { delta / max }, max)
+}
+
+fn luminance(color: Color32) -> f32 {
+    (0.2126 * f32::from(color.r()) + 0.7152 * f32::from(color.g()) + 0.0722 * f32::from(color.b())) / 255.0
+}
+
+impl Palette {
+    /// `accent`: the theme colour, or `None` for monochrome.
+    /// `panel_alpha`: how opaque panels are (below 1 to show a background image).
+    pub fn build(dark: bool, accent: Option<Color32>, panel_alpha: f32) -> Self {
+        let panel_alpha = panel_alpha.clamp(0.0, 1.0);
+        let see_through = |color: Color32, alpha: f32| color.gamma_multiply(alpha);
+        let base = if dark {
+            Palette {
+                dark,
+                bg_app: gray(0x0B),
+                bg_panel: gray(0x10),
+                bg_canvas: gray(0x0C),
+                bg_raised: gray(0x17),
+                bg_widget: gray(0x1F),
+                bg_widget_hover: gray(0x29),
+                bg_widget_active: gray(0x33),
+                bg_input: gray(0x08),
+                stroke: gray(0x24),
+                stroke_strong: gray(0x36),
+                grid: gray(0x16),
+                text: gray(0xEC),
+                text_dim: gray(0xA2),
+                text_faint: gray(0x6E),
+                accent: gray(0xE6),
+                accent_bright: Color32::WHITE,
+                on_accent: gray(0x0B),
+                success: hex(0x4C_C9_8A),
+                danger: hex(0xF0_5D_6A),
+                warning: hex(0xE9_B1_4F),
+                flow: gray(0xD6),
+                categories: [gray(0xD8), gray(0xBC), gray(0xA4), gray(0x94), gray(0xC8), gray(0xE4), gray(0x86)],
+                data: [gray(0xE0), gray(0xB0), gray(0xC8), gray(0x98), gray(0x80)],
+            }
+        } else {
+            Palette {
+                dark,
+                bg_app: gray(0xE9),
+                bg_panel: gray(0xF4),
+                bg_canvas: gray(0xEE),
+                bg_raised: gray(0xFF),
+                bg_widget: gray(0xE6),
+                bg_widget_hover: gray(0xDB),
+                bg_widget_active: gray(0xCE),
+                bg_input: gray(0xFF),
+                stroke: gray(0xD6),
+                stroke_strong: gray(0xBC),
+                grid: gray(0xE2),
+                text: gray(0x14),
+                text_dim: gray(0x55),
+                text_faint: gray(0x8A),
+                accent: gray(0x16),
+                accent_bright: Color32::BLACK,
+                on_accent: gray(0xF4),
+                success: hex(0x1E_8E_57),
+                danger: hex(0xC7_2C_3B),
+                warning: hex(0xA8_6A_00),
+                flow: gray(0x3A),
+                categories: [gray(0x2A), gray(0x48), gray(0x60), gray(0x72), gray(0x3A), gray(0x1E), gray(0x80)],
+                data: [gray(0x22), gray(0x50), gray(0x38), gray(0x66), gray(0x7C)],
+            }
+        };
+
+        let mut palette = base;
+        if let Some(accent) = accent {
+            let (hue, saturation, _) = to_hsv(accent);
+            let saturation = saturation.clamp(0.35, 0.85);
+            let value = if dark { 0.92 } else { 0.62 };
+            let around = |offset: f32| from_hsv(hue + offset, saturation, value);
+            palette.accent = accent;
+            palette.accent_bright =
+                if dark { mix(accent, Color32::WHITE, 0.3) } else { mix(accent, Color32::BLACK, 0.25) };
+            palette.on_accent = if luminance(accent) > 0.55 { gray(0x0B) } else { Color32::WHITE };
+            palette.categories = [
+                around(0.0),
+                around(0.58),
+                around(0.42),
+                around(0.11),
+                around(0.88),
+                around(0.72),
+                around(0.0).gamma_multiply(0.7),
+            ];
+            palette.data =
+                [around(0.95), around(0.5), around(0.14), around(0.75), mix(around(0.0), palette.text_dim, 0.6)];
+            // A hint of the theme colour in the greys keeps the whole UI in one key.
+            let tint = |color: Color32, amount: f32| mix(color, accent, amount);
+            palette.bg_app = tint(palette.bg_app, 0.03);
+            palette.bg_panel = tint(palette.bg_panel, 0.035);
+            palette.bg_raised = tint(palette.bg_raised, 0.04);
+            palette.bg_widget = tint(palette.bg_widget, 0.06);
+            palette.bg_widget_hover = tint(palette.bg_widget_hover, 0.08);
+            palette.bg_widget_active = tint(palette.bg_widget_active, 0.12);
+            palette.stroke_strong = tint(palette.stroke_strong, 0.1);
+            palette.flow = tint(palette.flow, 0.15);
+        }
+
+        if panel_alpha < 1.0 {
+            palette.bg_app = see_through(palette.bg_app, panel_alpha);
+            palette.bg_panel = see_through(palette.bg_panel, panel_alpha);
+            palette.bg_canvas = see_through(palette.bg_canvas, panel_alpha);
+            palette.bg_raised = see_through(palette.bg_raised, (panel_alpha * 0.5 + 0.5).min(1.0));
+        }
+        palette
+    }
+}
+
+pub fn bg_app() -> Color32 {
+    palette().bg_app
+}
+pub fn bg_panel() -> Color32 {
+    palette().bg_panel
+}
+pub fn bg_canvas() -> Color32 {
+    palette().bg_canvas
+}
+pub fn bg_raised() -> Color32 {
+    palette().bg_raised
+}
+pub fn bg_widget() -> Color32 {
+    palette().bg_widget
+}
+pub fn bg_widget_hover() -> Color32 {
+    palette().bg_widget_hover
+}
+pub fn bg_widget_active() -> Color32 {
+    palette().bg_widget_active
+}
+pub fn bg_input() -> Color32 {
+    palette().bg_input
+}
+pub fn stroke() -> Color32 {
+    palette().stroke
+}
+pub fn stroke_strong() -> Color32 {
+    palette().stroke_strong
+}
+pub fn grid() -> Color32 {
+    palette().grid
+}
+pub fn text() -> Color32 {
+    palette().text
+}
+pub fn text_dim() -> Color32 {
+    palette().text_dim
+}
+pub fn text_faint() -> Color32 {
+    palette().text_faint
+}
+pub fn accent() -> Color32 {
+    palette().accent
+}
+pub fn accent_bright() -> Color32 {
+    palette().accent_bright
+}
+pub fn on_accent() -> Color32 {
+    palette().on_accent
+}
+pub fn success() -> Color32 {
+    palette().success
+}
+pub fn danger() -> Color32 {
+    palette().danger
+}
+pub fn warning() -> Color32 {
+    palette().warning
+}
+pub fn flow() -> Color32 {
+    palette().flow
+}
+
+/// Black or white, whichever reads better on `background`.
+pub fn text_on(background: Color32) -> Color32 {
+    if background == palette().accent {
+        palette().on_accent
+    } else if luminance(background) > 0.55 {
+        gray(0x0B)
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// The theme colour as stored in the settings.
+pub fn accent_from(rgb: Option<[u8; 3]>) -> Option<Color32> {
+    rgb.map(|[r, g, b]| Color32::from_rgb(r, g, b))
+}
+
+pub fn category_color(category: Category) -> Color32 {
+    let index = Category::ALL.iter().position(|c| *c == category).unwrap_or(0);
+    palette().categories[index.min(6)]
+}
+
 pub fn data_color(ty: DataType) -> Color32 {
+    let colors = palette().data;
     match ty {
-        DataType::Bool => Color32::from_rgb(0xFF, 0x7A, 0x8A),
-        DataType::Number => Color32::from_rgb(0x5B, 0xD6, 0xFF),
-        DataType::Point => Color32::from_rgb(0xFF, 0xD1, 0x66),
-        DataType::Text => Color32::from_rgb(0xC4, 0xA7, 0xFF),
-        DataType::Any => Color32::from_rgb(0xA9, 0xB1, 0xC1),
+        DataType::Bool => colors[0],
+        DataType::Number => colors[1],
+        DataType::Point => colors[2],
+        DataType::Text => colors[3],
+        DataType::Any => colors[4],
     }
 }
 
 pub fn port_color(kind: PortKind) -> Color32 {
     match kind {
-        PortKind::Flow => FLOW,
+        PortKind::Flow => flow(),
         PortKind::Data(ty) => data_color(ty),
     }
 }
@@ -76,15 +345,22 @@ pub fn with_alpha(color: Color32, alpha: f32) -> Color32 {
 
 /// The soft shadow under floating things (nodes, popups).
 pub fn drop_shadow() -> Shadow {
-    Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(110) }
+    let alpha = if palette().dark { 120 } else { 40 };
+    Shadow { offset: [0, 6], blur: 18, spread: 0, color: Color32::from_black_alpha(alpha) }
 }
 
-pub fn apply(ctx: &egui::Context) {
+/// Fonts are set once; the icon font is part of them.
+pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
     ctx.set_fonts(fonts);
+}
 
-    ctx.set_theme(egui::Theme::Dark);
+/// Makes `palette` current and styles egui with it.
+pub fn apply(ctx: &egui::Context, palette: Palette) {
+    PALETTE.set(palette);
+    let p = palette;
+    ctx.set_theme(if p.dark { egui::Theme::Dark } else { egui::Theme::Light });
     ctx.all_styles_mut(|style| {
         style.text_styles = [
             (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
@@ -109,59 +385,87 @@ pub fn apply(ctx: &egui::Context) {
 
         let radius = CornerRadius::same(RADIUS);
         let visuals = &mut style.visuals;
-        visuals.dark_mode = true;
-        visuals.override_text_color = None;
-        visuals.panel_fill = BG_PANEL;
-        visuals.window_fill = BG_PANEL;
-        visuals.window_stroke = Stroke::new(1.0, STROKE_STRONG);
+        visuals.dark_mode = p.dark;
+        visuals.override_text_color = Some(p.text);
+        visuals.panel_fill = p.bg_panel;
+        visuals.window_fill = p.bg_panel.to_opaque();
+        visuals.window_stroke = Stroke::new(1.0, p.stroke_strong);
         visuals.window_corner_radius = CornerRadius::same(RADIUS_LARGE);
         visuals.menu_corner_radius = CornerRadius::same(8);
         visuals.window_shadow = drop_shadow();
         visuals.popup_shadow = drop_shadow();
-        visuals.extreme_bg_color = BG_INPUT;
-        visuals.text_edit_bg_color = Some(BG_INPUT);
-        visuals.faint_bg_color = BG_RAISED;
-        visuals.code_bg_color = BG_INPUT;
-        visuals.hyperlink_color = ACCENT_BRIGHT;
-        visuals.warn_fg_color = WARNING;
-        visuals.error_fg_color = DANGER;
-        visuals.selection.bg_fill = with_alpha(ACCENT, 0.45);
-        visuals.selection.stroke = Stroke::new(1.0, ACCENT_BRIGHT);
+        visuals.extreme_bg_color = p.bg_input;
+        visuals.text_edit_bg_color = Some(p.bg_input);
+        visuals.faint_bg_color = p.bg_raised;
+        visuals.code_bg_color = p.bg_input;
+        visuals.hyperlink_color = p.accent_bright;
+        visuals.warn_fg_color = p.warning;
+        visuals.error_fg_color = p.danger;
+        visuals.selection.bg_fill = with_alpha(p.accent, 0.4);
+        visuals.selection.stroke = Stroke::new(1.0, p.accent_bright);
         visuals.slider_trailing_fill = true;
-        visuals.striped = false;
+        visuals.striped = true;
 
         let widgets = &mut visuals.widgets;
-        widgets.noninteractive.bg_fill = BG_PANEL;
-        widgets.noninteractive.weak_bg_fill = BG_PANEL;
-        widgets.noninteractive.bg_stroke = Stroke::new(1.0, STROKE);
-        widgets.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
+        widgets.noninteractive.bg_fill = p.bg_panel;
+        widgets.noninteractive.weak_bg_fill = p.bg_panel;
+        widgets.noninteractive.bg_stroke = Stroke::new(1.0, p.stroke);
+        widgets.noninteractive.fg_stroke = Stroke::new(1.0, p.text_dim);
         widgets.noninteractive.corner_radius = radius;
 
-        widgets.inactive.bg_fill = BG_WIDGET;
-        widgets.inactive.weak_bg_fill = BG_WIDGET;
-        widgets.inactive.bg_stroke = Stroke::new(1.0, STROKE);
-        widgets.inactive.fg_stroke = Stroke::new(1.0, TEXT);
-        widgets.inactive.corner_radius = radius;
-        widgets.inactive.expansion = 0.0;
-
-        widgets.hovered.bg_fill = BG_WIDGET_HOVER;
-        widgets.hovered.weak_bg_fill = BG_WIDGET_HOVER;
-        widgets.hovered.bg_stroke = Stroke::new(1.0, STROKE_STRONG);
-        widgets.hovered.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-        widgets.hovered.corner_radius = radius;
-        widgets.hovered.expansion = 0.0;
-
-        widgets.active.bg_fill = BG_WIDGET_ACTIVE;
-        widgets.active.weak_bg_fill = BG_WIDGET_ACTIVE;
-        widgets.active.bg_stroke = Stroke::new(1.0, ACCENT);
-        widgets.active.fg_stroke = Stroke::new(1.0, Color32::WHITE);
-        widgets.active.corner_radius = radius;
-        widgets.active.expansion = 0.0;
-
-        widgets.open.bg_fill = BG_WIDGET_ACTIVE;
-        widgets.open.weak_bg_fill = BG_WIDGET_ACTIVE;
-        widgets.open.bg_stroke = Stroke::new(1.0, STROKE_STRONG);
-        widgets.open.fg_stroke = Stroke::new(1.0, TEXT);
-        widgets.open.corner_radius = radius;
+        for (state, fill, stroke, fg) in [
+            (&mut widgets.inactive, p.bg_widget, p.stroke, p.text),
+            (&mut widgets.hovered, p.bg_widget_hover, p.stroke_strong, p.text),
+            (&mut widgets.active, p.bg_widget_active, p.accent, p.text),
+            (&mut widgets.open, p.bg_widget_active, p.stroke_strong, p.text),
+        ] {
+            state.bg_fill = fill;
+            state.weak_bg_fill = fill;
+            state.bg_stroke = Stroke::new(1.0, stroke);
+            state.fg_stroke = Stroke::new(1.0, fg);
+            state.corner_radius = radius;
+            state.expansion = 0.0;
+        }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn colours_survive_the_hsv_round_trip() {
+        for color in [hex(0x9B_6D_FF), hex(0x2D_D4_A7), hex(0xFF_B5_4A), gray(0x80)] {
+            let (h, s, v) = to_hsv(color);
+            let back = from_hsv(h, s, v);
+            for (a, b) in [(color.r(), back.r()), (color.g(), back.g()), (color.b(), back.b())] {
+                assert!(a.abs_diff(b) <= 1, "{color:?} -> {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn monochrome_is_grey_and_a_theme_colour_tints_everything() {
+        let mono = Palette::build(true, None, 1.0);
+        assert!(mono.categories.iter().all(|c| c.r() == c.g() && c.g() == c.b()));
+        let violet = Palette::build(true, Some(hex(0x9B_6D_FF)), 1.0);
+        assert_eq!(violet.accent, hex(0x9B_6D_FF));
+        assert!(violet.categories.iter().any(|c| c.r() != c.g()));
+        assert_ne!(mono.bg_panel, violet.bg_panel);
+    }
+
+    #[test]
+    fn text_on_the_accent_stays_readable() {
+        assert!(luminance(Palette::build(true, Some(hex(0xFF_FF_80)), 1.0).on_accent) < 0.2);
+        assert!(luminance(Palette::build(true, Some(hex(0x20_20_80)), 1.0).on_accent) > 0.8);
+        assert!(luminance(Palette::build(false, None, 1.0).text) < 0.2, "light mode has dark text");
+    }
+
+    #[test]
+    fn see_through_panels_only_affect_backgrounds() {
+        let solid = Palette::build(true, None, 1.0);
+        let glass = Palette::build(true, None, 0.5);
+        assert!(glass.bg_panel.a() < solid.bg_panel.a());
+        assert_eq!(glass.text, solid.text);
+    }
 }

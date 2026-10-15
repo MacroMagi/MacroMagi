@@ -8,7 +8,7 @@ use magi_core::autoclicker::AutoClickerConfig;
 use magi_core::geom::Point;
 use magi_core::graph::{NodeId, PortRef};
 use magi_core::hotkey::Hotkey;
-use magi_core::input::{InputEvent, Key, MouseButton};
+use magi_core::input::{Button, InputEvent, Key, MouseButton};
 use magi_core::nodes::{Registry, ids, ports};
 use magi_core::project::Project;
 use magi_core::recording::{RecordOptions, RecordingBuilder};
@@ -16,6 +16,11 @@ use magi_vision::ImageRef;
 use serde_json::{Value, json};
 
 pub const NAMES: [&str; 3] = ["React to what is on screen", "Auto clicker, as blocks", "Replay a recording"];
+
+/// The examples' Start hotkey. Plain F7 is the Run hotkey.
+fn shift_f7() -> Hotkey {
+    Hotkey::from_buttons([Button::Key(Key::ShiftLeft), Button::Key(Key::F7)])
+}
 
 pub fn build(index: usize, registry: &Registry) -> Project {
     match index {
@@ -85,7 +90,7 @@ fn react_to_screen(registry: &Registry) -> Project {
     let accept = b.project.assets.add_image("Accept button", button_image([46, 190, 120]));
     let decline = b.project.assets.add_image("Decline button", button_image([225, 70, 80]));
 
-    let start = b.node(ids::START, [372.0, 0.0], "", json!({ "hotkey": Hotkey::key(Key::F7) }));
+    let start = b.node(ids::START, [372.0, 0.0], "", json!({ "hotkey": shift_f7() }));
     let repeat = b.node(ids::REPEAT, [372.0, 110.0], "Keep watching", json!({ "mode": "forever" }));
     let decision = b.node(
         ids::DECISION,
@@ -149,7 +154,7 @@ fn replay_recording(registry: &Registry) -> Project {
     recorder.push(t + 300.0, &InputEvent::Scroll { dx: 0, dy: -2 });
     let recording = b.project.assets.add_recording("Type and click", recorder.finish(t + 500.0, Some((1920, 1080))));
 
-    let start = b.node(ids::START, [0.0, 0.0], "", json!({ "hotkey": Hotkey::key(Key::F7), "mode": "press" }));
+    let start = b.node(ids::START, [0.0, 0.0], "", json!({ "hotkey": shift_f7(), "mode": "press" }));
     let play = b.node(ids::PLAY_RECORDING, [0.0, 120.0], "", json!({ "recording": recording }));
     let done = b.node(ids::LOG, [0.0, 290.0], "", json!({ "message": "Replay finished" }));
     b.flow(start, ports::OUT, play);

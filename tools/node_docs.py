@@ -16,6 +16,7 @@ CATEGORIES = [
     ("input", "Input", "Sending keyboard and mouse input."),
     ("vision", "Vision", "Looking at the screen. These are value blocks: they have no place in the "
      "order of execution and are evaluated whenever another block reads them."),
+    ("window", "Window", "Working with program windows."),
     ("logic", "Logic", "Combining and producing true/false values."),
     ("script", "Script", "Your own code as a step of the macro."),
     ("addon", "Add-ons", "Blocks contributed by add-ons."),
@@ -28,7 +29,7 @@ KIND_NAMES = {
     "percent": "percentage", "text": "text", "code": "code", "choice": "choice", "key": "key",
     "mouse_button": "mouse button", "hotkey": "hotkey", "point": "screen position",
     "region": "screen area", "color": "colour", "image": "image", "recording": "recording",
-    "actions": "list of inputs", "cases": "list of cases",
+    "actions": "list of inputs", "cases": "list of cases", "clicker": "Auto Clicker settings",
 }
 
 
@@ -53,6 +54,8 @@ def default_text(param):
         return "one left click"
     if kind == "cases":
         return "one case"
+    if kind == "clicker":
+        return "left click, 10 per second, until stopped"
     if kind == "code":
         return "a commented starter script"
     if kind in ("int", "float") and param.get("unit"):

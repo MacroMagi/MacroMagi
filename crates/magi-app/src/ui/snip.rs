@@ -102,7 +102,7 @@ impl Snip {
             SnipMode::Point | SnipMode::Color => {
                 painter.rect_filled(area, 0.0, Color32::from_black_alpha(50));
                 if let (Some(pos), Some(px)) = (hover, hover_px) {
-                    let line = Stroke::new(1.0, theme::ACCENT_BRIGHT);
+                    let line = Stroke::new(1.0, theme::accent_bright());
                     painter.hline(area.x_range(), pos.y, line);
                     painter.vline(pos.x, area.y_range(), line);
                     let point = screen_point(px);
@@ -154,7 +154,7 @@ impl Snip {
                         ] {
                             painter.rect_filled(piece, 0.0, shade);
                         }
-                        painter.rect_stroke(shown, 0.0, Stroke::new(1.5, theme::ACCENT_BRIGHT), StrokeKind::Outside);
+                        painter.rect_stroke(shown, 0.0, Stroke::new(1.5, theme::accent_bright()), StrokeKind::Outside);
                         let region = self.region(px);
                         let label = format!("{} × {}", region.w, region.h);
                         self.tag(&painter, area, shown.left_bottom() + vec2(0.0, 8.0), &label, None);
@@ -169,7 +169,7 @@ impl Snip {
                     None => {
                         painter.rect_filled(area, 0.0, shade);
                         if let Some(pos) = hover {
-                            let line = Stroke::new(1.0, theme::with_alpha(theme::ACCENT_BRIGHT, 0.7));
+                            let line = Stroke::new(1.0, theme::with_alpha(theme::accent_bright(), 0.7));
                             painter.hline(area.x_range(), pos.y, line);
                             painter.vline(pos.x, area.y_range(), line);
                         }
@@ -184,7 +184,7 @@ impl Snip {
         let size = galley.size() + vec2(28.0, 16.0);
         let banner = egui::Rect::from_center_size(pos2(area.center().x, area.top() + 44.0), size);
         painter.rect_filled(banner, 10.0, Color32::from_black_alpha(200));
-        painter.rect_stroke(banner, 10.0, Stroke::new(1.0, theme::STROKE_STRONG), StrokeKind::Inside);
+        painter.rect_stroke(banner, 10.0, Stroke::new(1.0, theme::stroke_strong()), StrokeKind::Inside);
         painter.galley(banner.center() - galley.size() / 2.0, galley, Color32::WHITE);
 
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);

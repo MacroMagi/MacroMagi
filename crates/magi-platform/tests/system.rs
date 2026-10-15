@@ -72,3 +72,84 @@ fn the_listener_sees_input_and_recognises_our_own() {
         assert!(seen_own, "the hook should report our injected move, marked as synthetic");
     }
 }
+
+/// Presses keys the way a person would (no MacroMagi marker) and checks the
+/// hook reports them. F13 and F14 have no default action anywhere, so this is
+/// harmless to whatever has focus.
+#[test]
+#[ignore = "needs a desktop session"]
+fn the_listener_reports_real_key_presses() {
+    use enigo::{Direction, Enigo, Keyboard, Settings};
+    use magi_core::input::Key;
+
+    magi_platform::init();
+    let hub = InputHub::start();
+    let events = hub.subscribe();
+    std::thread::sleep(Duration::from_millis(300));
+
+    let mut user = Enigo::new(&Settings::default()).expect("connecting to the input system");
+    let f13 = enigo::Key::Other(0x7C);
+    let ctrl = enigo::Key::Other(0xA2);
+    user.key(ctrl, Direction::Press).unwrap();
+    user.key(f13, Direction::Press).unwrap();
+    user.key(f13, Direction::Release).unwrap();
+    user.key(ctrl, Direction::Release).unwrap();
+
+    let mut seen = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline && seen.len() < 4 {
+        // Only the keys this test pressed; the person at the keyboard may be typing too.
+        if let Ok(observed) = events.recv_timeout(Duration::from_millis(50))
+            && matches!(
+                observed.event.button_edge(),
+                Some((magi_core::input::Button::Key(Key::F13 | Key::ControlLeft), _))
+            )
+        {
+            assert!(!observed.synthetic, "input without our marker is the user's");
+            seen.push(observed.event);
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![
+            InputEvent::KeyDown { key: Key::ControlLeft },
+            InputEvent::KeyDown { key: Key::F13 },
+            InputEvent::KeyUp { key: Key::F13 },
+            InputEvent::KeyUp { key: Key::ControlLeft },
+        ]
+    );
+}
+
+/// Raw Input reports relative motion, which smart recordings use for games.
+#[test]
+#[ignore = "needs a desktop session"]
+fn relative_motion_is_reported() {
+    magi_platform::init();
+    let hub = InputHub::start();
+    let events = hub.subscribe();
+    std::thread::sleep(Duration::from_millis(300));
+    let host = SystemHost::new();
+    // There and back: the pointer ends where it was.
+    host.send(&InputEvent::MoveBy { dx: 1, dy: 0 }).unwrap();
+    host.send(&InputEvent::MoveBy { dx: -1, dy: 0 }).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut relative = 0;
+    while Instant::now() < deadline && relative < 2 {
+        if let Ok(observed) = events.recv_timeout(Duration::from_millis(50))
+            && matches!(observed.event, InputEvent::MoveBy { .. })
+        {
+            relative += 1;
+        }
+    }
+    assert_eq!(relative, 2, "both relative moves are reported");
+}
+
+#[test]
+#[ignore = "needs a desktop session"]
+fn the_program_in_front_and_running_programs_are_known() {
+    let foreground = magi_platform::system::foreground_process();
+    assert!(foreground.as_deref().is_some_and(|name| !name.is_empty()), "{foreground:?}");
+    let processes = magi_platform::system::running_processes();
+    assert!(processes.len() > 5);
+    assert!(processes.iter().any(|p| p.has_window));
+}

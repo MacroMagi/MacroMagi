@@ -20,14 +20,18 @@ magi-engine.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui-phosphor.workspace = true
+egui_extras.workspace = true
 rfd.workspace = true
+ureq.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 # Drives the UI headlessly: simulated pointer and keyboard, no window.
-egui_kittest.workspace = true
+egui_kittest = { workspace = true, features = ["eframe"] }
+# Real-machine tests press keys "as the user".
+enigo.workspace = true
 
 [lints]
 workspace = true

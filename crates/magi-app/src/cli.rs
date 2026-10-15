@@ -55,8 +55,15 @@ pub enum Command {
 }
 
 pub fn parse(args: &[String]) -> Result<Command, String> {
-    let mut options =
-        StartupOptions { open: None, example: None, tab: None, screenshot: None, show_cards: false, select_kind: None };
+    let mut options = StartupOptions {
+        open: None,
+        example: None,
+        tab: None,
+        screenshot: None,
+        show_cards: false,
+        select_kind: None,
+        settings_page: None,
+    };
     let mut positional: Vec<&str> = Vec::new();
     let mut engine = None;
     let mut dry_run = false;
@@ -92,6 +99,15 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             "--cards" => options.show_cards = true,
             "--select" => options.select_kind = Some(value("--select")?.to_owned()),
+            "--settings" => {
+                let page = value("--settings")?.to_lowercase();
+                options.settings_page = Some(
+                    crate::settings::SettingsPage::ALL
+                        .into_iter()
+                        .find(|p| p.label().to_lowercase() == page)
+                        .ok_or_else(|| format!("unknown settings page `{page}`"))?,
+                );
+            }
             "--size" => {
                 let text = value("--size")?;
                 let parsed = text.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?]));

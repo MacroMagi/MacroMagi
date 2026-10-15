@@ -2,6 +2,8 @@
 
 Thanks for wanting to help. This page covers how to get set up, how the project is organised, and what a good change looks like.
 
+MacroMagi is source available under the [MacroMagi Terms](TERMS.md). By contributing you agree to the contribution terms in section 3 of that document, and to its code of conduct. If you work with an AI coding agent, point it at [AGENTS.md](AGENTS.md).
+
 - [Ways to help](#ways-to-help)
 - [Getting set up](#getting-set-up)
 - [Everyday commands](#everyday-commands)
@@ -10,6 +12,7 @@ Thanks for wanting to help. This page covers how to get set up, how the project 
 - [Code guidelines](#code-guidelines)
 - [Testing](#testing)
 - [Reporting bugs](#reporting-bugs)
+- [Releasing](#releasing)
 
 ## Ways to help
 
@@ -46,10 +49,11 @@ cargo clippy --workspace --all-targets     # lint; must be warning-free
 cargo build --release                      # the optimised single-file build
 ```
 
-Tests that touch the real machine are ignored by default. They move the pointer by zero pixels and measure a screenshot without keeping it:
+Tests that touch the real machine are ignored by default. The platform tests move the pointer by zero pixels and measure a screenshot without keeping it; the hotkey tests press F13 and F14 (keys with no default action) with the controller in dry-run mode:
 
 ```bash
 cargo test -p magi-platform --test system -- --ignored --test-threads=1
+cargo test -p magi-app system_tests -- --ignored --test-threads=1
 ```
 
 To edit the Python runtime without rebuilding:
@@ -58,13 +62,16 @@ To edit the Python runtime without rebuilding:
 MACROMAGI_PYTHON_RUNTIME="$PWD/runtime/python" cargo run -p magi-app
 ```
 
-Documentation screenshots are produced by the app itself and only ever show its own window:
+Documentation screenshots are produced by the app itself and only ever show its own window. Point `MACROMAGI_DATA_DIR` at an empty folder first, so your own settings and theme do not end up in them:
 
 ```bash
-cargo run --release -p magi-app -- --screenshot docs/images/auto-clicker.png --tab clicker --size 440x660
+export MACROMAGI_DATA_DIR="$(mktemp -d)"
+cargo run --release -p magi-app -- --screenshot docs/images/auto-clicker.png --tab clicker --size 440x760
 cargo run --release -p magi-app -- --screenshot docs/images/macro-editor.png --tab macro --example 0 --size 1280x860 --select vision.find_image
-cargo run --release -p magi-app -- --screenshot docs/images/recording.png --tab macro --example 2 --size 1000x640 --cards
+cargo run --release -p magi-app -- --screenshot docs/images/recording.png --tab macro --example 2 --size 1100x680 --cards
 ```
+
+`--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`).
 
 ## Where things live
 
@@ -91,7 +98,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before a change that crosses c
 
 1. Fork, and branch from `main`.
 2. Make the change, with tests.
-3. Run `cargo fmt --all`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`. CI runs the same three on Windows, Linux and macOS.
+3. Run `cargo fmt --all`, `cargo clippy --workspace --all-targets` and `cargo test --workspace`, and say in the pull request on which operating system. There is no automatic test run, so this step is yours.
 4. Add a line under *Unreleased* in [CHANGELOG.md](CHANGELOG.md) if a user would notice the change.
 5. Open a pull request. Say what it changes and why, how you tested it, and on which operating system. Screenshots help for anything visible.
 
@@ -117,6 +124,7 @@ Tests sit next to the code they test (`#[cfg(test)] mod tests`), plus:
 
 - `crates/magi-engine/tests/engines.rs` – macros run end to end on both engines against a simulated machine. Any new block or change to execution belongs here.
 - the tests at the bottom of `crates/magi-app/src/ui/graph.rs` – the node editor driven headlessly with a simulated pointer and keyboard (dragging wires, moving and selecting blocks, shortcuts, zooming).
+- the tests at the bottom of `crates/magi-app/src/app.rs` – the whole app driven headlessly, with key presses fed to the controller exactly as the system listener would (assigning hotkeys and using them at once, opening the block list).
 - `crates/magi-platform/tests/system.rs` – ignored by default; checks against the real machine.
 
 Guidelines:
@@ -139,3 +147,18 @@ Open an [issue](https://github.com/MacroMagi/MacroMagi/issues) with:
 Recordings contain what you typed. Remove them from a `.magi` file, or re-record something harmless, before attaching it.
 
 Security problems – for example a file that makes MacroMagi do something on opening – should be reported privately; see [SECURITY.md](SECURITY.md).
+
+## Releasing
+
+Releases are built and published by [`.github/workflows/release.yml`](.github/workflows/release.yml):
+
+1. Move the *Unreleased* entries in [CHANGELOG.md](CHANGELOG.md) under a new version heading, and set `version` in the workspace `Cargo.toml`.
+2. Tag the commit and push the tag:
+
+   ```bash
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+   or run the workflow from *Actions → Release → Run workflow* with the tag name.
+3. The workflow builds Windows, Linux and macOS (Apple silicon and Intel) packages. If – and only if – all of them build, it publishes a GitHub release with the packages and a `SHA256SUMS.txt`. A failed build publishes nothing; fix it and run the workflow again for the same tag.

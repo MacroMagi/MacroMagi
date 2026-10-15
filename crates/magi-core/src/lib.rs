@@ -21,9 +21,11 @@ pub mod host;
 pub mod hotkey;
 pub mod input;
 pub mod nodes;
+pub mod options;
 pub mod preset;
 pub mod project;
 pub mod recording;
+pub mod targets;
 pub mod text;
 
 pub use error::{Error, Result};

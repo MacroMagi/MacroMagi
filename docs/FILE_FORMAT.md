@@ -46,7 +46,8 @@ presets/<nn>-<name>.mp bundled presets (optional)
   "assets": [
     { "id": "img-9f2c61d0a4b7e113", "name": "Ready button", "kind": "image", "file": "assets/img-9f2c61d0a4b7e113.png" }
   ],
-  "presets": []
+  "presets": [],
+  "options": { "stop_on_task_switch": true, "stop_hotkeys": ["Escape"] }
 }
 ```
 
@@ -60,6 +61,38 @@ presets/<nn>-<name>.mp bundled presets (optional)
 | `graph` | The nodes and wires. |
 | `assets` | One entry per file under `assets/`. |
 | `presets` | Paths of bundled `.mp` files inside the archive. |
+| `options` | Optional. [Automation options](#automation-options) that travel with the macro. |
+| `clicker` | Optional. [Auto Clicker settings](#kind-auto_clicker) that travel with the macro. |
+
+`options` and `clicker` are written only when the user chooses to include them in the Export dialog. When a file that has them is opened, MacroMagi offers to use them.
+
+### Automation options
+
+Rules about when MacroMagi may act. All fields are optional.
+
+```json
+{
+  "strict_modifiers": false,
+  "stop_on_task_switch": false,
+  "stop_hotkeys": ["Escape", "ControlLeft+AltLeft+KeyY"],
+  "stop_when_editing_hotkey": true,
+  "process_rules": {
+    "enabled": true,
+    "mode": "whitelist",
+    "whitelist": [ { "name": "game.exe", "enabled": true, "action": "pause" } ],
+    "blacklist": []
+  }
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `strict_modifiers` | `true`: a hotkey fires only when exactly its modifier keys are held. |
+| `stop_on_task_switch` | Stop everything on Alt+Tab or Win+Tab. |
+| `stop_hotkeys` | More [hotkeys](#shared-vocabulary) that stop everything. |
+| `stop_when_editing_hotkey` | Stop the Auto Clicker when a hotkey field starts listening. |
+| `process_rules.mode` | `whitelist` (input only reaches the listed programs) or `blacklist` (never reaches them). |
+| `process_rules.*list` | Executable names, matched without regard to case, each with `action` `stop` or `pause`. |
 
 ### Nodes
 
@@ -109,7 +142,9 @@ A recording is a list of **strokes** – one per thing the user did – rather t
     { "at": 610.0, "hold": 420.0, "type": "move",   "path": [[0.0, 640, 360], [14.0, 648, 369]] },
     { "at": 1080.0,"hold": 85.0,  "type": "mouse",  "button": "Left", "x": 900, "y": 360 },
     { "at": 1100.0,"hold": 300.0, "type": "mouse",  "button": "Left", "x": 10, "y": 10, "end": { "x": 200, "y": 90 } },
-    { "at": 1380.0,"hold": 0.0,   "type": "scroll", "dx": 0, "dy": -2 }
+    { "at": 1380.0,"hold": 0.0,   "type": "scroll", "dx": 0, "dy": -2 },
+    { "at": 1500.0,"hold": 90.0,  "type": "look",   "path": [[0.0, 12, -3], [8.0, 15, -2]] },
+    { "at": 1530.0,"hold": 40.0,  "type": "mouse",  "button": "Left", "x": 960, "y": 540, "here": true }
   ]
 }
 ```
@@ -122,13 +157,16 @@ Every stroke has:
 | `type` | Extra fields | Notes |
 | --- | --- | --- |
 | `key` | `key` | |
-| `mouse` | `button`, `x`, `y`, optional `end` | With `end`, a drag: pressed at `x, y`, released at `end`. |
-| `move` | `path` | A list of `[ms since the stroke began, x, y]`. |
+| `mouse` | `button`, `x`, `y`, optional `end`, optional `here` | With `end`, a drag: pressed at `x, y`, released at `end`. With `here: true`, clicked wherever the pointer is (recorded while a game had the pointer locked). |
+| `move` | `path` | A list of `[ms since the stroke began, x, y]` screen positions. |
+| `look` | `path` | A list of `[ms since the stroke began, dx, dy]`: relative mouse motion, as a game camera reads it. |
 | `scroll` | `dx`, `dy` | Wheel notches. Positive `dy` is up, positive `dx` is right. |
 | `pad_button` | `button` | |
 | `pad_axis` | `axis`, `value` | |
 
-Strokes need not be sorted; playback orders events by time. `screen` is the size of the primary screen at recording time, kept for future rescaling.
+Strokes need not be sorted; playback orders events by time. `screen` is the size of the primary screen at recording time, used to find the centre a game re-centres the pointer on, and kept for future rescaling.
+
+A Play Recording block's `mouse` parameter says how movement is replayed: `recorded` (each stroke as it was recorded), `absolute` (`move` strokes only) or `relative` (everything as relative motion).
 
 ## `.mp` – presets
 
@@ -148,31 +186,51 @@ A preset is a single JSON file.
 
 ### `"kind": "auto_clicker"`
 
-`data` is the Auto Clicker's settings:
+`data` is the Auto Clicker's settings – the same object as a project's `clicker` field, and, without `hotkey` and `activation`, the `clicker` parameter of an Auto Click block:
 
 ```json
 {
-  "target":     { "kind": "mouse", "button": "Left" },
-  "clicks":     1,
-  "interval_ms": 100.0,
-  "jitter_ms":  0.0,
-  "hold_ms":    10.0,
-  "limit":      { "kind": "forever" },
-  "position":   { "kind": "cursor" },
-  "hotkey":     "F6",
-  "activation": "toggle"
+  "target":       { "kind": "mouse", "button": "Left" },
+  "clicks":       1,
+  "double_click_delay_ms": 40.0,
+  "speed_mode":   "rate",
+  "interval_ms":  100.0,
+  "rate_unit":    "seconds",
+  "interval_unit": "ms",
+  "variation":    { "on": false, "value": 15.0 },
+  "hold_ms":      10.0,
+  "duty_cycle":   { "on": false, "value": { "min": 30.0, "max": 50.0 } },
+  "limit":        { "kind": "forever" },
+  "time_limit":   { "on": false, "value": 60000.0 },
+  "time_limit_unit": "seconds",
+  "position":     { "kind": "cursor" },
+  "corner_stop":  { "on": false, "value": [25, 25, 25, 25] },
+  "edge_stop":    { "on": false, "value": [5, 5, 5, 5] },
+  "course_correction": true,
+  "high_speed":   false,
+  "hotkey":       "F6",
+  "activation":   "toggle"
 }
 ```
 
 | Field | Values |
 | --- | --- |
-| `target` | `{ "kind": "mouse", "button": … }` or `{ "kind": "key", "key": … }` |
-| `clicks` | `1`, `2` or `3` (mouse only) |
+| `target` | `{ "kind": "mouse", "button": … }`, `{ "kind": "key", "key": … }` or `{ "kind": "dual_keys", "first": …, "second": …, "mode": "together" \| "alternate" }` |
+| `clicks` | `1`, `2` or `3` (mouse only); `double_click_delay_ms` is the pause between them |
+| `interval_ms` | Time from one click to the next. This is the speed; `speed_mode`, `rate_unit` and `interval_unit` only say how it is shown. |
+| `*_unit` | `ms`, `seconds`, `minutes`, `hours` or `days` |
+| `variation` | Vary each interval by up to this many percent |
+| `duty_cycle` | Hold each click for a random share (percent) of the interval, instead of `hold_ms` |
 | `limit` | `{ "kind": "forever" }` or `{ "kind": "count", "count": 100 }` |
+| `time_limit` | Stop after this many milliseconds (at most 365 days) |
 | `position` | `{ "kind": "cursor" }` or `{ "kind": "fixed", "x": 300, "y": 400 }` |
+| `corner_stop` | Stop within this many pixels of a corner: top-left, top-right, bottom-left, bottom-right |
+| `edge_stop` | Stop within this many pixels of an edge: top, right, bottom, left |
+| `course_correction` | Keep clicks on schedule by shortening the wait after a late click |
+| `high_speed` | Allow up to 1000 clicks per second instead of 100 |
 | `activation` | `toggle` or `hold` |
 
-Missing fields take their defaults.
+Missing fields take their defaults. Files from the first version, which had only `target`, `clicks`, `interval_ms`, `jitter_ms`, `hold_ms`, `limit`, `position`, `hotkey` and `activation`, load unchanged.
 
 ### `"kind": "nodes"`
 
@@ -212,5 +270,5 @@ When a nodes preset is inserted, its nodes get fresh ids and its assets are impo
 `version` is a single integer per format, currently `1` for both.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know.
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

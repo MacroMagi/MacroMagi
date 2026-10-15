@@ -2,7 +2,7 @@
 //!
 //! MacroMagi is portable: everything it writes goes into a `data` folder next
 //! to the executable. Nothing is written to the registry, the user profile or
-//! any system location, so deleting the app's folder removes every trace.
+//! any system location – except a desktop shortcut, when the user asks for one.
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +34,11 @@ impl Paths {
     /// The user's preset library: one `.mp` file per preset.
     pub fn presets_dir(&self) -> PathBuf {
         self.data_dir.join("presets")
+    }
+
+    /// Background pictures chosen in Settings → Appearance.
+    pub fn backgrounds_dir(&self) -> PathBuf {
+        self.data_dir.join("backgrounds")
     }
 
     /// Creates the data folder. Returns a message if it cannot be written to,

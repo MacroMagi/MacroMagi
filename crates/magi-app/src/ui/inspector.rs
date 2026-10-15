@@ -14,7 +14,7 @@ use magi_core::graph::{Node, NodeId};
 use magi_core::hotkey::Hotkey;
 use magi_core::input::{Key, MouseButton};
 use magi_core::nodes::flow::Case;
-use magi_core::nodes::{EngineSupport, ParamDef, ParamKind, Registry};
+use magi_core::nodes::{EngineSupport, ParamDef, ParamKind, Registry, ids};
 use magi_core::project::Project;
 use magi_core::text::{format_hex_color, parse_hex_color};
 use serde::de::DeserializeOwned;
@@ -23,7 +23,7 @@ use serde_json::Value;
 use super::graph::node_icon;
 use super::images::{ImageCache, fit_size};
 use super::widgets::{self, HotkeyAction};
-use super::{HotkeyTarget, SnipMode, SnipTarget, UiRequest, recording_editor};
+use super::{HotkeyTarget, SnipMode, SnipTarget, UiRequest, clicker_form, options, recording_editor};
 use crate::theme;
 
 pub struct InspectorEnv<'a> {
@@ -47,7 +47,7 @@ pub fn show(ui: &mut Ui, project: &mut Project, node_id: NodeId, env: &mut Inspe
         return requests;
     };
     let Some(def) = env.registry.get(&node.kind).cloned() else {
-        ui.colored_label(theme::WARNING, format!("Unknown block type “{}”", node.kind));
+        ui.colored_label(theme::warning(), format!("Unknown block type “{}”", node.kind));
         ui.weak(
             "It probably comes from an add-on that is not installed. It is kept as it is, but cannot be edited or run.",
         );
@@ -64,10 +64,10 @@ pub fn show(ui: &mut Ui, project: &mut Project, node_id: NodeId, env: &mut Inspe
             ui.label(RichText::new(def.category.label()).size(11.0).color(accent));
         });
     });
-    ui.label(RichText::new(&def.description).size(12.0).color(theme::TEXT_DIM));
+    ui.label(RichText::new(&def.description).size(12.0).color(theme::text_dim()));
     if def.engines == EngineSupport::PythonOnly {
         ui.label(
-            RichText::new(format!("{}  Runs on the Python engine only", icon::INFO)).size(11.5).color(theme::WARNING),
+            RichText::new(format!("{}  Runs on the Python engine only", icon::INFO)).size(11.5).color(theme::warning()),
         );
     }
     ui.add_space(4.0);
@@ -153,14 +153,23 @@ fn edit_param(
         }
         ParamKind::Text { multiline } => {
             let mut value: String = read(node, param);
-            let field = if *multiline {
-                egui::TextEdit::multiline(&mut value).desired_rows(3)
-            } else {
-                egui::TextEdit::singleline(&mut value)
-            };
-            if ui.add(field.desired_width(f32::INFINITY)).changed() {
-                node.set_param(key, value);
-            }
+            // The window to switch to can be picked from the running programs.
+            let pick_program = node.kind == ids::FOCUS_WINDOW && key == "target";
+            ui.horizontal(|ui| {
+                let width = if pick_program { ui.available_width() - 34.0 } else { f32::INFINITY };
+                let field = if *multiline {
+                    egui::TextEdit::multiline(&mut value).desired_rows(3)
+                } else {
+                    egui::TextEdit::singleline(&mut value)
+                };
+                if ui.add(field.desired_width(width)).changed() {
+                    node.set_param(key, value.clone());
+                }
+                if pick_program && let Some(name) = options::program_picker(ui, "window-program") {
+                    node.set_param(key, name);
+                    node.set_param("match_by", "process");
+                }
+            });
         }
         ParamKind::Code { .. } => {
             let mut value: String = read(node, param);
@@ -196,7 +205,7 @@ fn edit_param(
         }
         ParamKind::MouseButton => {
             let mut value = node.param::<MouseButton>(key).unwrap_or(MouseButton::Left);
-            if mouse_button_picker(ui, "button", &mut value) {
+            if widgets::mouse_button_picker(ui, "button", &mut value) {
                 node.set_param(key, value);
             }
         }
@@ -206,7 +215,9 @@ fn edit_param(
             let pending = env.capturing.filter(|(active, _)| **active == target).map(|(_, pending)| pending);
             match widgets::hotkey_button(ui, &hotkey, pending) {
                 HotkeyAction::Capture => requests.push(UiRequest::CaptureHotkey(target)),
+                HotkeyAction::Cancel => requests.push(UiRequest::CancelCapture),
                 HotkeyAction::Clear => node.set_param(key, Hotkey::none()),
+                HotkeyAction::Set(hotkey) => node.set_param(key, hotkey),
                 HotkeyAction::None => {}
             }
         }
@@ -281,25 +292,20 @@ fn edit_param(
         ParamKind::Recording => edit_recording(ui, project, node_id, key, env, requests),
         ParamKind::Actions => edit_actions(ui, node, key, requests),
         ParamKind::Cases => return edit_cases(ui, node, key),
+        ParamKind::Clicker => {
+            let original: magi_core::autoclicker::ClickerSettings = read(node, param);
+            let mut settings = original.clone();
+            requests.extend(clicker_form::show(ui, &mut settings, "node-clicker", SnipTarget::ClickerNode(node_id)));
+            if settings != original {
+                node.set_param(key, settings);
+            }
+        }
     }
     false
 }
 
 fn pad_unit(unit: &str) -> String {
     if unit.is_empty() { String::new() } else { format!(" {unit}") }
-}
-
-fn mouse_button_picker(ui: &mut Ui, id: &str, button: &mut MouseButton) -> bool {
-    let mut changed = false;
-    egui::ComboBox::from_id_salt(id).width(90.0).selected_text(button.label()).show_ui(ui, |ui| {
-        for &option in MouseButton::ALL {
-            if ui.selectable_label(option == *button, option.label()).clicked() {
-                *button = option;
-                changed = true;
-            }
-        }
-    });
-    changed
 }
 
 /// Lets the user pick one of the project's assets of a kind, and rename it.
@@ -348,13 +354,13 @@ fn edit_image(
 ) {
     let current: String = project.graph.node(node_id).and_then(|n| n.param(key)).unwrap_or_default();
     if let Some(texture) = env.images.get(ui.ctx(), &project.assets, &current) {
-        egui::Frame::new().fill(theme::BG_INPUT).corner_radius(theme::RADIUS).inner_margin(6).show(ui, |ui| {
+        egui::Frame::new().fill(theme::bg_input()).corner_radius(theme::RADIUS).inner_margin(6).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.vertical_centered(|ui| {
                 let size = fit_size(&texture, vec2(ui.available_width(), 120.0), 6.0);
                 ui.image((texture.id(), size));
                 let [w, h] = texture.size();
-                ui.label(RichText::new(format!("{w} × {h} px")).size(11.0).color(theme::TEXT_FAINT));
+                ui.label(RichText::new(format!("{w} × {h} px")).size(11.0).color(theme::text_faint()));
             });
         });
     }
@@ -391,10 +397,14 @@ fn edit_recording(
     if let Some(recording) = project.assets.recording(&current).cloned() {
         ui.add_space(4.0);
         ui.push_id("inspector-recording", |ui| {
-            if let Some(edit) = recording_editor::show(ui, &recording, 260.0)
+            let response = recording_editor::show(ui, &recording, 260.0, false);
+            if let Some(edit) = response.edit
                 && let Some(target) = project.assets.recording_mut(&current)
             {
                 edit.apply(target);
+            }
+            if response.pop_out {
+                requests.push(UiRequest::EditRecording(current.clone()));
             }
         });
     }
@@ -423,7 +433,7 @@ fn edit_actions(ui: &mut Ui, node: &mut Node, key: &str, requests: &mut Vec<UiRe
 
     for (index, action) in actions.iter_mut().enumerate() {
         ui.push_id(index, |ui| {
-            egui::Frame::new().fill(theme::BG_RAISED).corner_radius(theme::RADIUS).inner_margin(7).show(ui, |ui| {
+            egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(7).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -462,7 +472,7 @@ fn edit_actions(ui: &mut Ui, node: &mut Node, key: &str, requests: &mut Vec<UiRe
                             changed |= press_mode_picker(ui, mode);
                         }
                         Action::Mouse { button, mode, clicks, at } => {
-                            changed |= mouse_button_picker(ui, "button", button);
+                            changed |= widgets::mouse_button_picker(ui, "button", button);
                             changed |= press_mode_picker(ui, mode);
                             if *mode == PressMode::Tap {
                                 changed |= ui
@@ -504,7 +514,7 @@ fn edit_actions(ui: &mut Ui, node: &mut Node, key: &str, requests: &mut Vec<UiRe
                                 .on_hover_text("Move by this much from the current position")
                                 .changed();
                             let mut glide = *duration_ms as f64;
-                            ui.label(RichText::new("over").color(theme::TEXT_DIM));
+                            ui.label(RichText::new("over").color(theme::text_dim()));
                             if widgets::duration_edit(ui, &mut glide).changed() {
                                 *duration_ms = glide.round() as u64;
                                 changed = true;
@@ -575,7 +585,7 @@ fn edit_cases(ui: &mut Ui, node: &mut Node, key: &str) -> bool {
         ui.push_id(&case.id, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(RichText::new(format!("{}.", index + 1)).color(theme::TEXT_FAINT));
+                ui.label(RichText::new(format!("{}.", index + 1)).color(theme::text_faint()));
                 let width = (ui.available_width() - 84.0).max(60.0);
                 changed |= ui.add(egui::TextEdit::singleline(&mut case.label).desired_width(width)).changed();
                 if index > 0 && widgets::icon_button(ui, icon::ARROW_UP, "Check earlier").clicked() {
@@ -591,7 +601,7 @@ fn edit_cases(ui: &mut Ui, node: &mut Node, key: &str) -> bool {
         });
     }
     ui.label(
-        RichText::new("Checked top to bottom; the first true case is followed.").size(11.0).color(theme::TEXT_FAINT),
+        RichText::new("Checked top to bottom; the first true case is followed.").size(11.0).color(theme::text_faint()),
     );
 
     if ui.button(format!("{}  Add case", icon::PLUS)).clicked() {

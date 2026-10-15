@@ -21,9 +21,11 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::assets::{Asset, AssetData, AssetKind, AssetStore};
+use crate::autoclicker::AutoClickerConfig;
 use crate::error::{Error, Result};
 use crate::graph::Graph;
 use crate::nodes::{Registry, ids};
+use crate::options::AutomationOptions;
 use crate::preset::Preset;
 
 pub const FORMAT: &str = "macromagi.project";
@@ -68,6 +70,11 @@ pub struct Project {
     pub assets: AssetStore,
     /// Presets bundled with the project.
     pub presets: Vec<Preset>,
+    /// Automation options (process rules, auto-stop keys, …) saved with the
+    /// project. Applied when the project is opened.
+    pub options: Option<AutomationOptions>,
+    /// Auto Clicker settings saved with the project.
+    pub clicker: Option<AutoClickerConfig>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -87,6 +94,10 @@ struct Manifest {
     /// Paths of bundled presets inside the archive.
     #[serde(default)]
     presets: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    options: Option<AutomationOptions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    clicker: Option<AutoClickerConfig>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -150,6 +161,8 @@ impl Project {
             graph: self.graph.clone(),
             assets: entries,
             presets: preset_files,
+            options: self.options.clone(),
+            clicker: self.clicker.clone(),
         };
         zip.start_file(MANIFEST, text)?;
         zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
@@ -194,7 +207,15 @@ impl Project {
             presets.push(Preset::from_json(&json)?);
         }
 
-        Ok(Project { meta: manifest.meta, engine: manifest.engine, graph: manifest.graph, assets, presets })
+        Ok(Project {
+            meta: manifest.meta,
+            engine: manifest.engine,
+            graph: manifest.graph,
+            assets,
+            presets,
+            options: manifest.options,
+            clicker: manifest.clicker,
+        })
     }
 
     /// Saves atomically: the file at `path` is either the old project or the
@@ -257,6 +278,8 @@ mod tests {
         let image = project.assets.add_image("button.png", vec![0x89, b'P', b'N', b'G', 1, 2, 3]);
         project.graph.node_mut(find).unwrap().set_param("image", image);
 
+        project.options = Some(AutomationOptions { stop_on_task_switch: true, ..AutomationOptions::default() });
+        project.clicker = Some(AutoClickerConfig::default());
         project.presets.push(Preset {
             name: "Clicker".into(),
             description: "bundled".into(),

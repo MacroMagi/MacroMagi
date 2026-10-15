@@ -5,6 +5,7 @@
 //! speed cannot grow memory even if nobody is looking.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -45,6 +46,9 @@ type Waker = Arc<dyn Fn() + Send + Sync>;
 #[derive(Default)]
 pub struct Monitor {
     state: Mutex<State>,
+    /// Clicks made by Auto Click blocks. Counted outside the lock: at a
+    /// thousand clicks a second, every bit of contention shows.
+    clicks: AtomicU64,
 }
 
 #[derive(Default)]
@@ -153,5 +157,15 @@ impl Monitor {
 
     pub fn clear_activity(&self) {
         self.lock().activity.clear();
+        self.clicks.store(0, Ordering::Relaxed);
+    }
+
+    pub fn add_clicks(&self, count: u64) {
+        self.clicks.fetch_add(count, Ordering::Relaxed);
+    }
+
+    /// Clicks made since the activity was last cleared.
+    pub fn clicks(&self) -> u64 {
+        self.clicks.load(Ordering::Relaxed)
     }
 }

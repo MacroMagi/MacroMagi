@@ -118,11 +118,12 @@ pub struct HotkeyTracker<T> {
     bindings: Vec<(Hotkey, T)>,
     down: Vec<Button>,
     active: Vec<usize>,
+    strict: bool,
 }
 
 impl<T> Default for HotkeyTracker<T> {
     fn default() -> Self {
-        Self { bindings: Vec::new(), down: Vec::new(), active: Vec::new() }
+        Self { bindings: Vec::new(), down: Vec::new(), active: Vec::new(), strict: false }
     }
 }
 
@@ -136,6 +137,19 @@ impl<T: Clone> HotkeyTracker<T> {
     pub fn set_bindings(&mut self, bindings: Vec<(Hotkey, T)>) {
         self.bindings = bindings.into_iter().filter(|(hotkey, _)| !hotkey.is_none()).collect();
         self.active.clear();
+    }
+
+    /// Strict matching: a hotkey fires only when the held modifier keys are
+    /// exactly its own. `Ctrl + F6` then never fires `F6`, and `F6` does not
+    /// fire while Shift is held.
+    pub fn set_strict(&mut self, strict: bool) {
+        self.strict = strict;
+    }
+
+    fn modifiers_match(&self, hotkey: &Hotkey) -> bool {
+        let held = self.down.iter().filter(|b| b.is_modifier());
+        let wanted = hotkey.buttons().iter().filter(|b| b.is_modifier());
+        held.clone().all(|b| hotkey.contains(*b)) && wanted.clone().count() == held.count()
     }
 
     /// Buttons currently held, in the order they went down.
@@ -166,7 +180,9 @@ impl<T: Clone> HotkeyTracker<T> {
                 .filter(|i| !self.active.contains(i))
                 .filter(|&i| {
                     let hotkey = &self.bindings[i].0;
-                    hotkey.contains(button) && hotkey.buttons().iter().all(|b| self.down.contains(b))
+                    hotkey.contains(button)
+                        && hotkey.buttons().iter().all(|b| self.down.contains(b))
+                        && (!self.strict || self.modifiers_match(hotkey))
                 })
                 .collect();
             let most_specific = matches.iter().map(|&i| self.bindings[i].0.buttons().len()).max();
@@ -194,8 +210,12 @@ impl<T: Clone> HotkeyTracker<T> {
 /// Records the chord a user presses when rebinding a hotkey.
 ///
 /// The chord is complete as soon as a button is released: whatever was held at
-/// its peak becomes the hotkey. `Esc` alone cancels. Left and right mouse
-/// clicks are ignored so that clicking elsewhere can never bind "click".
+/// its peak becomes the hotkey. Every key can be bound, `Esc` included; the UI
+/// offers its own way to cancel.
+///
+/// A plain left or right click is not captured, because that is how people
+/// click "Cancel". Held together with a key (`Ctrl` + left click) it is. A
+/// plain click can still be bound by picking it from the UI's mouse menu.
 #[derive(Clone, Debug, Default)]
 pub struct ChordCapture {
     down: Vec<Button>,
@@ -219,7 +239,9 @@ impl ChordCapture {
         let Some((button, is_down)) = event.button_edge() else {
             return self.pending();
         };
-        if matches!(button, Button::Mouse(MouseButton::Left | MouseButton::Right)) {
+        let plain_click = matches!(button, Button::Mouse(MouseButton::Left | MouseButton::Right))
+            && !self.down.iter().any(|held| matches!(held, Button::Key(_)));
+        if plain_click {
             return self.pending();
         }
         let button = button.canonical();
@@ -229,11 +251,9 @@ impl ChordCapture {
                 self.peak = self.down.clone();
             }
             self.pending()
-        } else if self.peak.is_empty() {
+        } else if self.peak.is_empty() || !self.peak.contains(&button) {
             // A release of something pressed before the capture began.
             self.pending()
-        } else if self.peak == [Button::Key(Key::Escape)] {
-            CaptureResult::Cancelled
         } else {
             CaptureResult::Done(Hotkey::from_buttons(self.peak.iter().copied()))
         }
@@ -301,11 +321,59 @@ mod tests {
     }
 
     #[test]
-    fn capture_cancels_on_escape_and_ignores_clicks() {
+    fn escape_and_function_keys_can_be_bound() {
+        for key in [Key::Escape, Key::F6, Key::F12] {
+            let mut capture = ChordCapture::new();
+            capture.feed(&down(key));
+            assert_eq!(capture.feed(&up(key)), CaptureResult::Done(Hotkey::key(key)));
+        }
+    }
+
+    #[test]
+    fn three_key_chords_can_be_bound() {
         let mut capture = ChordCapture::new();
-        let click = InputEvent::ButtonDown { button: MouseButton::Left };
-        assert_eq!(capture.feed(&click), CaptureResult::Pending(Hotkey::none()));
-        capture.feed(&down(Key::Escape));
-        assert_eq!(capture.feed(&up(Key::Escape)), CaptureResult::Cancelled);
+        for key in [Key::ControlLeft, Key::AltLeft, Key::KeyY] {
+            capture.feed(&down(key));
+        }
+        assert_eq!(capture.feed(&up(Key::KeyY)), CaptureResult::Done("ControlLeft+AltLeft+KeyY".parse().unwrap()));
+    }
+
+    #[test]
+    fn plain_clicks_are_skipped_but_clicks_with_a_key_are_captured() {
+        let mut capture = ChordCapture::new();
+        let left = InputEvent::ButtonDown { button: MouseButton::Left };
+        assert_eq!(capture.feed(&left), CaptureResult::Pending(Hotkey::none()));
+        assert_eq!(
+            capture.feed(&InputEvent::ButtonUp { button: MouseButton::Left }),
+            CaptureResult::Pending(Hotkey::none())
+        );
+
+        capture.feed(&down(Key::ControlLeft));
+        capture.feed(&left);
+        let result = capture.feed(&InputEvent::ButtonUp { button: MouseButton::Left });
+        assert_eq!(result, CaptureResult::Done("ControlLeft+Mouse:Left".parse().unwrap()));
+    }
+
+    #[test]
+    fn side_buttons_alone_can_be_bound() {
+        let mut capture = ChordCapture::new();
+        capture.feed(&InputEvent::ButtonDown { button: MouseButton::Back });
+        let result = capture.feed(&InputEvent::ButtonUp { button: MouseButton::Back });
+        assert_eq!(result, CaptureResult::Done("Mouse:Back".parse().unwrap()));
+    }
+
+    #[test]
+    fn strict_matching_needs_exact_modifiers() {
+        let mut tracker = HotkeyTracker::new();
+        tracker.set_strict(true);
+        tracker.set_bindings(vec![(Hotkey::key(Key::F6), 1), ("ControlLeft+KeyY".parse().unwrap(), 2)]);
+        tracker.feed(&down(Key::ShiftLeft));
+        assert!(tracker.feed(&down(Key::F6)).is_empty(), "Shift is held, F6 alone was bound");
+        tracker.feed(&up(Key::F6));
+        tracker.feed(&up(Key::ShiftLeft));
+        assert_eq!(tracker.feed(&down(Key::F6)), vec![(1, HotkeyEdge::Pressed)]);
+        tracker.feed(&up(Key::F6));
+        tracker.feed(&down(Key::ControlRight));
+        assert_eq!(tracker.feed(&down(Key::KeyY)), vec![(2, HotkeyEdge::Pressed)]);
     }
 }

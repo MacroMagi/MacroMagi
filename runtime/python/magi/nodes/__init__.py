@@ -40,3 +40,4 @@ from . import input as _input  # noqa: E402,F401
 from . import logic as _logic  # noqa: E402,F401
 from . import script as _script  # noqa: E402,F401
 from . import vision as _vision  # noqa: E402,F401
+from . import window as _window  # noqa: E402,F401

@@ -33,7 +33,7 @@ use thiserror::Error;
 
 pub use monitor::{Activity, LogEntry, LogLevel, Monitor};
 pub use native::NativeNodes;
-pub use ops::RunCx;
+pub use ops::{RunCx, SharedRules};
 pub use program::Program;
 pub use python::{PythonConfig, PythonRuntime, PythonStatus};
 pub use timing::StopToken;
@@ -126,6 +126,7 @@ struct Shared {
     program: Arc<Program>,
     host: Arc<dyn Host>,
     monitor: Arc<Monitor>,
+    rules: Mutex<Option<ops::SharedRules>>,
     backend: Backend,
     runs: Mutex<HashMap<RunId, ActiveRun>>,
     idle: Condvar,
@@ -202,11 +203,19 @@ impl Session {
             program,
             host,
             monitor,
+            rules: Mutex::new(None),
             backend,
             runs: Mutex::new(HashMap::new()),
             idle: Condvar::new(),
         });
         Self { shared }
+    }
+
+    /// Makes every run of this session obey these process rules. Call before
+    /// starting runs; the rules themselves can change at any time.
+    pub fn with_rules(self, rules: ops::SharedRules) -> Self {
+        *self.shared.rules.lock().unwrap_or_else(|p| p.into_inner()) = Some(rules);
+        self
     }
 
     pub fn engine(&self) -> EngineKind {
@@ -243,7 +252,8 @@ impl Session {
             Arc::clone(&shared.monitor),
             stop.clone(),
             stop_everything,
-        );
+        )
+        .with_rules(shared.rules.lock().unwrap_or_else(|p| p.into_inner()).clone());
         shared.runs().insert(run, ActiveRun { node, stop });
 
         let for_run = Arc::clone(shared);

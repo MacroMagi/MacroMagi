@@ -6,26 +6,38 @@
 //! owns them, on its own thread, behind a thread-safe handle. The UI is one
 //! client of the controller (it publishes what the user is editing and shows
 //! what the controller reports); a global hotkey is another.
+//!
+//! A housekeeping thread keeps memory low while nothing happens: an idle
+//! Python process is stopped (it starts again on the next run), and memory
+//! is handed back to the system while the window is hidden.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::time::{Duration, Instant};
 
 use magi_core::autoclicker::AutoClickerConfig;
 use magi_core::geom::{Point, Rect};
 use magi_core::graph::NodeId;
-use magi_core::host::{Frame, Host, HostError};
+use magi_core::host::{Frame, Host, HostError, WindowInfo, WindowQuery};
 use magi_core::hotkey::{CaptureResult, ChordCapture, Hotkey, HotkeyEdge, HotkeyTracker};
-use magi_core::input::InputEvent;
+use magi_core::input::{Button, InputEvent, Key};
 use magi_core::nodes::Registry;
 use magi_core::nodes::flow::{StartMode, StartParams};
+use magi_core::options::AutomationOptions;
 use magi_core::project::{EnginePreference, Project};
 use magi_core::recording::{RecordOptions, Recording, RecordingBuilder};
-use magi_engine::{EngineKind, Monitor, Program, PythonConfig, PythonRuntime, PythonStatus, Session};
+use magi_engine::{EngineKind, Monitor, Program, PythonConfig, PythonRuntime, PythonStatus, Session, SharedRules};
 use magi_platform::{InputHub, Observed, SystemHost};
 
 use crate::paths::Paths;
 use crate::settings::{Settings, Tab};
+
+/// An unused Python process is stopped after this long.
+const PYTHON_IDLE: Duration = Duration::from_secs(180);
+/// Memory is handed back once the window has been hidden this long.
+const TRIM_AFTER_HIDDEN: Duration = Duration::from_secs(15);
+const HOUSEKEEPING_INTERVAL: Duration = Duration::from_secs(5);
 
 /// The parts of the settings the controller acts on.
 #[derive(Clone, Debug, PartialEq)]
@@ -33,6 +45,8 @@ pub struct ControllerConfig {
     pub tab: Tab,
     pub stop_hotkey: Hotkey,
     pub record_hotkey: Hotkey,
+    pub run_hotkey: Hotkey,
+    pub options: AutomationOptions,
     pub engine: EnginePreference,
     pub python_path: Option<PathBuf>,
     pub dry_run: bool,
@@ -46,6 +60,8 @@ impl ControllerConfig {
             tab: settings.tab,
             stop_hotkey: settings.stop_hotkey.clone(),
             record_hotkey: settings.record_hotkey.clone(),
+            run_hotkey: settings.run_hotkey.clone(),
+            options: settings.options.clone(),
             engine: settings.engine,
             python_path: settings.python_path.clone(),
             dry_run: settings.dry_run,
@@ -60,8 +76,19 @@ impl ControllerConfig {
 enum Binding {
     StopEverything,
     Record,
+    RunMacro,
     Clicker(StartMode),
     Start(NodeId, StartMode),
+}
+
+/// The chords that switch tasks: Alt+Tab and Win+Tab, with or without Shift.
+fn task_switch_hotkeys() -> Vec<Hotkey> {
+    let mut hotkeys = Vec::new();
+    for modifier in [Key::AltLeft, Key::MetaLeft] {
+        hotkeys.push(Hotkey::from_buttons([Button::Key(modifier), Button::Key(Key::Tab)]));
+        hotkeys.push(Hotkey::from_buttons([Button::Key(modifier), Button::Key(Key::ShiftLeft), Button::Key(Key::Tab)]));
+    }
+    hotkeys
 }
 
 /// The macro the user is editing, as last handed over by the UI.
@@ -98,6 +125,11 @@ struct State {
     python: Arc<PythonRuntime>,
     /// So "Python is unavailable, using the native engine" is said once, not on every run.
     warned_no_python: bool,
+    /// When something last ran, for stopping an idle Python process.
+    last_busy: Instant,
+    /// Since when the window has been hidden, and whether memory was trimmed since.
+    hidden_since: Option<Instant>,
+    trimmed: bool,
 }
 
 struct Inner {
@@ -110,7 +142,10 @@ struct Inner {
     /// The Auto Clicker reports separately: its node ids would otherwise
     /// collide with the macro's and light up the wrong blocks in the editor.
     clicker_monitor: Arc<Monitor>,
+    /// Process rules, shared with every session so changes apply at once.
+    rules: SharedRules,
     state: Mutex<State>,
+    closing: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -137,6 +172,19 @@ impl Host for DryRunHost {
     fn capture(&self, region: Option<Rect>) -> Result<Frame, HostError> {
         self.real.capture(region)
     }
+
+    fn screens(&self) -> Result<Vec<Rect>, HostError> {
+        self.real.screens()
+    }
+
+    fn foreground_process(&self) -> Option<String> {
+        self.real.foreground_process()
+    }
+
+    fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError> {
+        self.monitor.info(format!("Dry run – would switch to “{}”", query.text));
+        Ok(None)
+    }
 }
 
 fn python_runtime(paths: &Paths, interpreter: Option<PathBuf>, monitor: &Arc<Monitor>) -> Arc<PythonRuntime> {
@@ -149,6 +197,7 @@ impl Controller {
         let monitor = Arc::new(Monitor::new());
         let hub = InputHub::start();
         let python = python_runtime(&paths, config.python_path.clone(), &monitor);
+        let rules = Arc::new(RwLock::new(config.options.process_rules.clone()));
         let mut state = State {
             config,
             tracker: HotkeyTracker::new(),
@@ -161,6 +210,9 @@ impl Controller {
             capture_result: None,
             python,
             warned_no_python: false,
+            last_busy: Instant::now(),
+            hidden_since: None,
+            trimmed: false,
         };
         state.rebind();
 
@@ -171,7 +223,9 @@ impl Controller {
             hub: hub.clone(),
             monitor,
             clicker_monitor: Arc::new(Monitor::new()),
+            rules,
             state: Mutex::new(state),
+            closing: AtomicBool::new(false),
         });
 
         let events = hub.subscribe();
@@ -181,6 +235,21 @@ impl Controller {
             .spawn(move || {
                 for observed in events {
                     for_thread.on_input(&observed);
+                }
+            })
+            .expect("the OS refused to start a thread");
+
+        let weak = Arc::downgrade(&inner);
+        std::thread::Builder::new()
+            .name("magi-housekeeping".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(HOUSEKEEPING_INTERVAL);
+                    let Some(inner) = weak.upgrade() else { return };
+                    if inner.closing.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    inner.housekeeping();
                 }
             })
             .expect("the OS refused to start a thread");
@@ -201,6 +270,28 @@ impl Controller {
         self.inner.hub.listener_error()
     }
 
+    /// Tells the controller whether the window can be seen, so memory can be
+    /// handed back while it cannot.
+    pub fn set_window_hidden(&self, hidden: bool) {
+        let mut state = self.inner.state();
+        match (hidden, state.hidden_since) {
+            (true, None) => state.hidden_since = Some(Instant::now()),
+            (false, Some(_)) => {
+                state.hidden_since = None;
+                state.trimmed = false;
+            }
+            _ => {}
+        }
+    }
+
+    /// Stops everything and the background threads. Call when the app closes.
+    pub fn shut_down(&self) {
+        self.inner.closing.store(true, Ordering::Relaxed);
+        self.inner.stop_everything();
+        let python = Arc::clone(&self.inner.state().python);
+        python.shutdown();
+    }
+
     // ---- configuration ----------------------------------------------------
 
     pub fn set_config(&self, config: ControllerConfig) {
@@ -216,6 +307,9 @@ impl Controller {
         if state.config.dry_run != config.dry_run || state.config.engine != config.engine {
             // Sessions bake in their host and engine; rebuild on next start.
             state.session = None;
+        }
+        if state.config.options.process_rules != config.options.process_rules {
+            *self.inner.rules.write().unwrap_or_else(|p| p.into_inner()) = config.options.process_rules.clone();
         }
         state.config = config;
         state.rebind();
@@ -258,15 +352,11 @@ impl Controller {
     }
 
     pub fn stop_node(&self, node: NodeId) {
-        if let Some((_, session)) = &self.inner.state().session {
-            session.stop_node(node);
-        }
+        self.inner.stop_node(node);
     }
 
     pub fn stop_macro(&self) {
-        if let Some((_, session)) = &self.inner.state().session {
-            session.stop_all();
-        }
+        self.inner.stop_macro();
     }
 
     /// Start blocks that are currently running.
@@ -301,8 +391,12 @@ impl Controller {
 
     // ---- auto clicker -----------------------------------------------------
 
-    pub fn toggle_clicker(&self) {
-        if self.clicker_running() { self.inner.stop_clicker() } else { self.inner.start_clicker() }
+    pub fn start_clicker(&self) {
+        self.inner.start_clicker();
+    }
+
+    pub fn stop_clicker(&self) {
+        self.inner.stop_clicker();
     }
 
     pub fn clicker_running(&self) -> bool {
@@ -343,9 +437,30 @@ impl Controller {
 
     /// Starts listening for the next chord instead of acting on hotkeys.
     pub fn begin_capture(&self) {
+        let stop_clicker = {
+            let mut state = self.inner.state();
+            state.capture = Some(ChordCapture::new());
+            state.capture_result = None;
+            state.config.options.stop_when_editing_hotkey
+        };
+        // A clicker clicking away would make it impossible to press anything.
+        if stop_clicker {
+            self.inner.stop_clicker();
+        }
+    }
+
+    /// Stops listening for a chord.
+    pub fn cancel_capture(&self) {
         let mut state = self.inner.state();
-        state.capture = Some(ChordCapture::new());
+        state.capture = None;
         state.capture_result = None;
+        state.tracker.reset();
+    }
+
+    /// Feeds an event as if the user had pressed it.
+    #[cfg(test)]
+    pub fn inject(&self, event: InputEvent) {
+        self.inner.on_input(&Observed { event, at: Instant::now(), synthetic: false });
     }
 
     /// Progress of the capture. A finished result is returned once.
@@ -361,16 +476,22 @@ impl Controller {
 impl State {
     /// Rebuilds the hotkey table from the current configuration and macro.
     fn rebind(&mut self) {
+        let options = &self.config.options;
         let mut bindings = vec![
             (self.config.stop_hotkey.clone(), Binding::StopEverything),
             (self.config.record_hotkey.clone(), Binding::Record),
         ];
+        bindings.extend(options.stop_hotkeys.iter().map(|hotkey| (hotkey.clone(), Binding::StopEverything)));
+        if options.stop_on_task_switch {
+            bindings.extend(task_switch_hotkeys().into_iter().map(|hotkey| (hotkey, Binding::StopEverything)));
+        }
         match self.config.tab {
             Tab::AutoClicker => {
                 let clicker = &self.config.clicker;
                 bindings.push((clicker.hotkey.clone(), Binding::Clicker(clicker.activation)));
             }
             Tab::Macro => {
+                bindings.push((self.config.run_hotkey.clone(), Binding::RunMacro));
                 if let Some(published) = &self.published {
                     bindings.extend(
                         published
@@ -381,7 +502,14 @@ impl State {
                 }
             }
         }
+        self.tracker.set_strict(options.strict_modifiers);
         self.tracker.set_bindings(bindings);
+    }
+
+    fn busy(&self) -> bool {
+        self.clicker.as_ref().is_some_and(|s| s.active_runs() > 0)
+            || self.session.as_ref().is_some_and(|(_, s)| s.active_runs() > 0)
+            || self.recording.is_some()
     }
 }
 
@@ -427,7 +555,11 @@ impl Inner {
             Binding::StopEverything if pressed => self.stop_everything(),
             Binding::Record if pressed => self.toggle_recording(),
             // While recording, the user's keys are being captured, not obeyed.
-            Binding::Clicker(_) | Binding::Start(..) if recording => {}
+            Binding::Clicker(_) | Binding::Start(..) | Binding::RunMacro if recording => {}
+            Binding::RunMacro if pressed => {
+                let running = self.state().session.as_ref().is_some_and(|(_, s)| s.active_runs() > 0);
+                if running { self.stop_macro() } else { self.start_macro(None) }
+            }
             Binding::Clicker(mode) => {
                 let running = self.state().clicker.as_ref().is_some_and(|s| s.active_runs() > 0);
                 match (mode, pressed, running) {
@@ -454,9 +586,40 @@ impl Inner {
         self.clicker_monitor.wake();
     }
 
+    /// Runs every few seconds: stops an idle Python process and hands memory back.
+    fn housekeeping(&self) {
+        let mut state = self.state();
+        if state.busy() {
+            state.last_busy = Instant::now();
+            return;
+        }
+        let mut freed = false;
+        let python_session = state.session.as_ref().is_some_and(|(_, s)| s.engine() == EngineKind::Python);
+        if python_session && state.last_busy.elapsed() >= PYTHON_IDLE {
+            state.session = None;
+            let python = Arc::clone(&state.python);
+            drop(state);
+            python.shutdown();
+            state = self.state();
+            freed = true;
+        }
+        let hidden_long = state.hidden_since.is_some_and(|since| since.elapsed() >= TRIM_AFTER_HIDDEN);
+        if freed || (hidden_long && !state.trimmed) {
+            state.trimmed = hidden_long;
+            drop(state);
+            magi_platform::system::trim_memory();
+        }
+    }
+
     fn stop_node(&self, node: NodeId) {
         if let Some((_, session)) = &self.state().session {
             session.stop_node(node);
+        }
+    }
+
+    fn stop_macro(&self) {
+        if let Some((_, session)) = &self.state().session {
+            session.stop_all();
         }
     }
 
@@ -473,7 +636,8 @@ impl Inner {
         // Decide what is needed while holding the lock, build it without the
         // lock (starting Python can take a moment), then store it.
         let (published, config, python, warned) = {
-            let state = self.state();
+            let mut state = self.state();
+            state.last_busy = Instant::now();
             let Some(published) = state.published.clone() else { return };
             if let Some((revision, session)) = &state.session
                 && *revision == published.revision
@@ -514,6 +678,7 @@ impl Inner {
                 }
             },
         };
+        let session = session.with_rules(Arc::clone(&self.rules));
 
         let mut state = self.state();
         state.warned_no_python |= warned_now;
@@ -541,24 +706,30 @@ impl Inner {
         if state.clicker.as_ref().is_some_and(|session| session.active_runs() > 0) {
             return;
         }
+        state.last_busy = Instant::now();
         let graph = state.config.clicker.to_graph(&self.registry);
         let Some(start) = graph.starts().next().map(|node| node.id) else { return };
         let program = Arc::new(Program::new(graph, Default::default(), Arc::clone(&self.registry)));
         let host = self.host(state.config.dry_run, &self.clicker_monitor);
         self.clicker_monitor.clear_activity();
+        self.clicker_monitor.clear_logs();
         // The Auto Clicker always runs natively: it needs no scripting, and it
         // must work on machines without Python.
-        let session = Session::native(program, host, Arc::clone(&self.clicker_monitor));
+        let session =
+            Session::native(program, host, Arc::clone(&self.clicker_monitor)).with_rules(Arc::clone(&self.rules));
         if let Err(error) = session.start(start) {
             self.clicker_monitor.error(error.message);
         }
         state.clicker = Some(session);
+        drop(state);
+        self.clicker_monitor.wake();
     }
 
     fn stop_clicker(&self) {
         if let Some(session) = &self.state().clicker {
             session.stop_all();
         }
+        self.clicker_monitor.wake();
     }
 
     fn stop_everything(&self) {
@@ -603,7 +774,112 @@ impl Inner {
                 });
             }
         }
+        state.last_busy = Instant::now();
         drop(state);
         self.monitor.wake();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn task_switch_chords_include_shift_variants() {
+        let hotkeys = task_switch_hotkeys();
+        assert_eq!(hotkeys.len(), 4);
+        let alt_tab = Hotkey::from_buttons([Button::Key(Key::AltLeft), Button::Key(Key::Tab)]);
+        assert!(hotkeys.contains(&alt_tab));
+        assert!(hotkeys.iter().any(|h| h.contains(Button::Key(Key::ShiftLeft))));
+    }
+}
+
+#[cfg(test)]
+mod system_tests {
+    //! Against the real machine; ignored by default. Keys used are F13/F14,
+    //! which have no default action. The controller runs in dry-run mode, so
+    //! nothing is ever clicked.
+
+    use std::time::{Duration, Instant};
+
+    use enigo::{Direction, Enigo, Keyboard, Settings as EnigoSettings};
+    use magi_core::input::Key;
+
+    use super::*;
+
+    fn press(user: &mut Enigo, vks: &[u32]) {
+        for vk in vks {
+            user.key(enigo::Key::Other(*vk), Direction::Press).unwrap();
+        }
+        for vk in vks.iter().rev() {
+            user.key(enigo::Key::Other(*vk), Direction::Release).unwrap();
+        }
+    }
+
+    fn controller() -> Controller {
+        magi_platform::init();
+        let paths =
+            Paths { app_dir: std::env::temp_dir(), data_dir: std::env::temp_dir().join("magi-controller-test") };
+        let mut settings = Settings { dry_run: true, ..Settings::default() };
+        settings.clicker.hotkey = Hotkey::key(Key::F14);
+        let controller =
+            Controller::new(Arc::new(Registry::builtin()), paths, ControllerConfig::from_settings(&settings));
+        std::thread::sleep(Duration::from_millis(300));
+        controller
+    }
+
+    #[test]
+    #[ignore = "needs a desktop session"]
+    fn a_pressed_chord_is_captured() {
+        let controller = controller();
+        let mut user = Enigo::new(&EnigoSettings::default()).unwrap();
+        controller.begin_capture();
+        press(&mut user, &[0xA2, 0x7C]); // Ctrl + F13
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut result = None;
+        while Instant::now() < deadline {
+            match controller.poll_capture() {
+                Some(CaptureResult::Pending(_)) | None => std::thread::sleep(Duration::from_millis(20)),
+                done => {
+                    result = done;
+                    break;
+                }
+            }
+        }
+        assert_eq!(result, Some(CaptureResult::Done("ControlLeft+F13".parse().unwrap())));
+    }
+
+    #[test]
+    #[ignore = "needs a desktop session"]
+    fn a_changed_hotkey_works_immediately() {
+        let controller = controller();
+        let mut user = Enigo::new(&EnigoSettings::default()).unwrap();
+        // Rebind the clicker from F14 to F13 at run time, as the UI does.
+        let mut settings = Settings { dry_run: true, ..Settings::default() };
+        settings.clicker.hotkey = Hotkey::key(Key::F13);
+        controller.set_config(ControllerConfig::from_settings(&settings));
+        press(&mut user, &[0x7C]);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(controller.clicker_running(), "F13 should start the clicker");
+        press(&mut user, &[0x7C]);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!controller.clicker_running(), "F13 again should stop it");
+    }
+
+    #[test]
+    #[ignore = "needs a desktop session"]
+    fn custom_stop_hotkeys_and_task_switching_stop_the_clicker() {
+        let controller = controller();
+        let mut user = Enigo::new(&EnigoSettings::default()).unwrap();
+        let mut settings = Settings { dry_run: true, ..Settings::default() };
+        settings.clicker.hotkey = Hotkey::key(Key::F14);
+        settings.options.stop_hotkeys = vec![Hotkey::key(Key::F13)];
+        controller.set_config(ControllerConfig::from_settings(&settings));
+        controller.start_clicker();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(controller.clicker_running());
+        press(&mut user, &[0x7C]); // F13
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!controller.clicker_running(), "the extra stop hotkey stops the clicker");
     }
 }

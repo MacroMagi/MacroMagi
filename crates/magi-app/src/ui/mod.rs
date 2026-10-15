@@ -6,10 +6,13 @@
 //! [`UiRequest`] and the app carries it out.
 
 pub mod autoclicker;
+pub mod clicker_form;
 pub mod graph;
 pub mod images;
 pub mod inspector;
 pub mod macro_tab;
+pub mod options;
+pub mod overlay;
 pub mod recording_editor;
 pub mod settings_window;
 pub mod snip;
@@ -23,6 +26,9 @@ pub enum HotkeyTarget {
     Clicker,
     StopEverything,
     Record,
+    Run,
+    /// One of the extra stop hotkeys; `None` adds a new one.
+    ExtraStop(Option<usize>),
     /// A hotkey parameter of a block (the parameter's key).
     Node(NodeId, String),
 }
@@ -47,15 +53,20 @@ pub enum SnipTarget {
     NodeParam(NodeId, String),
     /// The position of one input inside an Input block.
     Action(NodeId, usize),
-    /// The Auto Clicker's fixed click position.
+    /// The Auto Clicker tab's fixed click position.
     ClickerPosition,
+    /// The fixed click position of an Auto Click block.
+    ClickerNode(NodeId),
 }
 
 pub enum UiRequest {
     Snip(SnipMode, SnipTarget),
     CaptureHotkey(HotkeyTarget),
+    CancelCapture,
     /// Load an image file into a block's image parameter.
     LoadImage(NodeId, String),
     /// Start (or stop) recording; the result is linked to this block's recording parameter.
     RecordInto(NodeId, String),
+    /// Open a recording in its own editor window.
+    EditRecording(String),
 }

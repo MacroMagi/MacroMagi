@@ -15,14 +15,14 @@ Include what you found, how to reproduce it, and which version or commit and ope
 Reports about, for example:
 
 - a `.magi` or `.mp` file that does something **merely by being opened** – running code, writing outside the data folder, crashing the app;
-- MacroMagi writing anywhere outside its own data folder;
+- MacroMagi writing anywhere outside its own data folder (other than a desktop shortcut you asked for);
 - the Python engine being reachable by, or loading code from, anything other than MacroMagi itself.
 
 ## What is by design
 
 - **Running a macro runs it.** A macro can click, type and, through a Python Script block, execute arbitrary Python with your permissions. Opening a macro is safe; pressing Run on one you have not read is your decision. Treat a `.magi` file from a stranger like a script from a stranger.
 - **Recordings contain what was typed**, in readable form, inside the `.magi` file.
-- **MacroMagi observes all keyboard and mouse input while it is open.** That is how global hotkeys and recording work. Input is only kept while you are recording, and nothing is ever sent over the network – MacroMagi makes no network connections at all.
+- **MacroMagi observes all keyboard and mouse input while it is open.** That is how global hotkeys and recording work. Input is only kept while you are recording, and nothing is ever sent over the network. The only network connection MacroMagi makes is downloading a background picture from an address you enter in *Settings → Appearance*.
 
 ## Supported versions
 

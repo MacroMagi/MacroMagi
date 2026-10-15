@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use super::{Category, DataType, NodeDef, ParamDef, ParamKind, Registry, ids, ports};
 use crate::action::Action;
+use crate::autoclicker::{AutoClickParams, ClickerSettings};
 use crate::input::MouseButton;
+use crate::recording::MouseReplay;
 use crate::text::{format_ms, trim_float};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -31,11 +33,13 @@ pub struct PlayRecordingParams {
     pub speed: f64,
     /// Replay recorded pointer movement, not only clicks and keys.
     pub moves: bool,
+    /// How pointer movement is replayed.
+    pub mouse: MouseReplay,
 }
 
 impl Default for PlayRecordingParams {
     fn default() -> Self {
-        Self { recording: String::new(), speed: 1.0, moves: true }
+        Self { recording: String::new(), speed: 1.0, moves: true, mouse: MouseReplay::Recorded }
     }
 }
 
@@ -88,6 +92,22 @@ pub(super) fn register(registry: &mut Registry) {
         .param(ParamDef::new("recording", "Recording", ParamKind::Recording))
         .param(ParamDef::new("speed", "Speed", ParamKind::float(0.1, 20.0, "×")))
         .param(ParamDef::new("moves", "Replay mouse movement", ParamKind::Bool))
+        .param(
+            ParamDef::new(
+                "mouse",
+                "Mouse movement as",
+                ParamKind::choice(&[
+                    ("recorded", "As recorded (smart)"),
+                    ("absolute", "Screen positions"),
+                    ("relative", "Relative motion – for games"),
+                ]),
+            )
+            .help(
+                "Games with a first-person camera lock the pointer and read how far the mouse moves. \
+                 If the camera turns once and then stops, choose relative motion.",
+            )
+            .show_if("moves", true),
+        )
         .defaults(&PlayRecordingParams::default())
         .summarize(|node, assets| {
             let p: PlayRecordingParams = node.params_or_default();
@@ -102,6 +122,33 @@ pub(super) fn register(registry: &mut Registry) {
                 timing.push_str(&format!(" at {}×", trim_float(p.speed, 2)));
             }
             vec![asset.name.clone(), recording.summary(), timing]
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::AUTOCLICK,
+            "Auto Click",
+            Category::Input,
+            "Clicks (or presses keys) over and over at a steady speed, with everything the Auto \
+             Clicker tab offers: speed variation, duty cycle, limits, corner and edge stops.",
+        )
+        .keywords(&["auto clicker", "autoclick", "spam", "rapid", "repeat click", "cps"])
+        .flow_in()
+        .flow_out(ports::OUT, "")
+        .param(ParamDef::new("clicker", "Clicking", ParamKind::Clicker))
+        .defaults(&AutoClickParams::default())
+        .summarize(|node, _| {
+            let settings: ClickerSettings = node.params_or_default::<AutoClickParams>().clicker;
+            let mut lines = vec![settings.summary()];
+            match settings.limit {
+                crate::autoclicker::ClickLimit::Count { count } => lines.push(format!("{count} times")),
+                crate::autoclicker::ClickLimit::Forever => lines.push("Until stopped".into()),
+            }
+            if let Some(limit) = settings.time_limit.get() {
+                lines.push(format!("At most {}", format_ms(*limit)));
+            }
+            lines
         }),
     );
 }

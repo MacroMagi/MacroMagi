@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use crate::geom::{Point, Rect};
 use crate::input::InputEvent;
+use crate::nodes::window::{ScreenKind, WindowMatch};
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 #[error("{0}")]
@@ -78,6 +79,25 @@ impl Frame {
     }
 }
 
+/// Which window to look for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowQuery {
+    pub text: String,
+    pub by: WindowMatch,
+}
+
+/// A window that was found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub title: String,
+    /// Executable name, e.g. `game.exe`.
+    pub process: String,
+    /// How the window occupies the screen, as detected. Never `Smart`.
+    pub kind: ScreenKind,
+    /// Whether it is the window receiving input right now.
+    pub foreground: bool,
+}
+
 pub trait Host: Send + Sync {
     /// Sends one input event to the system.
     fn send(&self, event: &InputEvent) -> Result<(), HostError>;
@@ -87,6 +107,24 @@ pub trait Host: Send + Sync {
 
     /// Captures a region of the screen, or the whole primary screen for `None`.
     fn capture(&self, region: Option<Rect>) -> Result<Frame, HostError>;
+
+    /// The rectangles of all monitors, primary first.
+    fn screens(&self) -> Result<Vec<Rect>, HostError> {
+        Ok(vec![self.capture(None)?.rect()])
+    }
+
+    /// The executable name of the program whose window has keyboard focus,
+    /// e.g. `game.exe`. `None` where this cannot be determined.
+    fn foreground_process(&self) -> Option<String> {
+        None
+    }
+
+    /// Finds a window and brings it to the front, restoring it if minimised.
+    /// `Ok(None)` if no window matches.
+    fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError> {
+        let _ = query;
+        Err(HostError::new("switching windows is not supported on this system yet"))
+    }
 }
 
 /// A host that sends nothing. It keeps a virtual pointer and a log of
@@ -101,6 +139,8 @@ struct SimState {
     cursor: Point,
     sent: Vec<InputEvent>,
     screen: Option<Frame>,
+    foreground: Option<String>,
+    windows: Vec<WindowInfo>,
 }
 
 impl SimHost {
@@ -117,6 +157,16 @@ impl SimHost {
 
     pub fn set_screen(&self, screen: Option<Frame>) {
         self.lock().screen = screen;
+    }
+
+    /// Pretends this program has keyboard focus.
+    pub fn set_foreground(&self, process: Option<&str>) {
+        self.lock().foreground = process.map(str::to_owned);
+    }
+
+    /// Pretends these windows exist, for Switch to Window.
+    pub fn set_windows(&self, windows: Vec<WindowInfo>) {
+        self.lock().windows = windows;
     }
 
     /// Everything sent so far.
@@ -159,6 +209,22 @@ impl Host for SimHost {
             None => Ok(screen.clone()),
             Some(region) => screen.crop(region).ok_or_else(|| HostError::new("the search area is outside the screen")),
         }
+    }
+
+    fn foreground_process(&self) -> Option<String> {
+        self.lock().foreground.clone()
+    }
+
+    fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError> {
+        let mut state = self.lock();
+        let needle = query.text.to_lowercase();
+        let found = state.windows.iter().find(|w| match query.by {
+            WindowMatch::Title => w.title.to_lowercase().contains(&needle),
+            WindowMatch::Process => w.process.to_lowercase().contains(&needle),
+        });
+        let Some(found) = found.cloned() else { return Ok(None) };
+        state.foreground = Some(found.process.clone());
+        Ok(Some(WindowInfo { foreground: true, ..found }))
     }
 }
 

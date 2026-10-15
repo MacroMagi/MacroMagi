@@ -17,6 +17,7 @@ pub mod input;
 pub mod logic;
 pub mod script;
 pub mod vision;
+pub mod window;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -43,6 +44,8 @@ pub mod ids {
     pub const GATE: &str = "logic.gate";
     pub const CHANCE: &str = "logic.chance";
     pub const PYTHON: &str = "script.python";
+    pub const AUTOCLICK: &str = "input.autoclick";
+    pub const FOCUS_WINDOW: &str = "window.focus";
 }
 
 /// Ids of ports that engines and the editor refer to by name.
@@ -73,20 +76,29 @@ pub enum Category {
     Flow,
     Input,
     Vision,
+    Window,
     Logic,
     Script,
     Addon,
 }
 
 impl Category {
-    pub const ALL: [Category; 6] =
-        [Category::Flow, Category::Input, Category::Vision, Category::Logic, Category::Script, Category::Addon];
+    pub const ALL: [Category; 7] = [
+        Category::Flow,
+        Category::Input,
+        Category::Vision,
+        Category::Window,
+        Category::Logic,
+        Category::Script,
+        Category::Addon,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Category::Flow => "Flow",
             Category::Input => "Input",
             Category::Vision => "Vision",
+            Category::Window => "Window",
             Category::Logic => "Logic",
             Category::Script => "Script",
             Category::Addon => "Add-ons",
@@ -232,6 +244,8 @@ pub enum ParamKind {
     Actions,
     /// A list of Decision [`Case`](flow::Case)s.
     Cases,
+    /// Auto Clicker settings ([`ClickerSettings`](crate::autoclicker::ClickerSettings)).
+    Clicker,
 }
 
 impl ParamKind {
@@ -469,6 +483,7 @@ impl Registry {
         vision::register(&mut registry);
         logic::register(&mut registry);
         script::register(&mut registry);
+        window::register(&mut registry);
         registry
     }
 

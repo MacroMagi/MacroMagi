@@ -204,4 +204,4 @@ cargo test -p magi-engine --test engines
 
 **Something drawn on the block itself**, like the thumbnail on Image Detection or the card on Play Recording. That is the one case with UI code: see `Layout::compute` and `GraphView::show` in `ui/graph.rs`.
 
-**A new capability** (clipboard, window focus, sound). Add a method to the `Host` trait in `magi-core`, implement it for `SystemHost` and `SimHost`, add an operation to `ops.rs` and to `perform` in `python.rs`, then write the block on top.
+**A new capability** (clipboard, sound, …). Add a method to the `Host` trait in `magi-core` (with a default that reports it as unsupported), implement it for `SystemHost` and `SimHost`, add an operation to `ops.rs` and to `perform` in `python.rs`, then write the block on top.

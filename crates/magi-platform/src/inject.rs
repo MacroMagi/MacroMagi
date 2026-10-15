@@ -8,7 +8,9 @@
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Sender, SyncSender};
 
-use enigo::{Axis, Coordinate, Direction, Enigo, Keyboard as _, Mouse as _, Settings};
+#[cfg(not(windows))]
+use enigo::Coordinate;
+use enigo::{Axis, Direction, Enigo, Keyboard as _, Mouse as _, Settings};
 use magi_core::geom::Point;
 use magi_core::host::HostError;
 use magi_core::input::{InputEvent, Key, MouseButton};
@@ -107,7 +109,13 @@ impl Backend {
             InputEvent::KeyUp { key } => key_event(enigo, *key, Direction::Release),
             InputEvent::ButtonDown { button } => enigo.button(mouse_button(*button), Direction::Press).map_err(error),
             InputEvent::ButtonUp { button } => enigo.button(mouse_button(*button), Direction::Release).map_err(error),
+            #[cfg(windows)]
+            InputEvent::MoveTo { x, y } => windows_mouse::move_to(*x, *y),
+            #[cfg(windows)]
+            InputEvent::MoveBy { dx, dy } => windows_mouse::move_by(*dx, *dy),
+            #[cfg(not(windows))]
             InputEvent::MoveTo { x, y } => enigo.move_mouse(*x, *y, Coordinate::Abs).map_err(error),
+            #[cfg(not(windows))]
             InputEvent::MoveBy { dx, dy } => enigo.move_mouse(*dx, *dy, Coordinate::Rel).map_err(error),
             InputEvent::Scroll { dx, dy } => {
                 // enigo counts "down" as positive; MacroMagi counts "up" as positive.
@@ -152,5 +160,86 @@ fn mouse_button(button: MouseButton) -> enigo::Button {
         MouseButton::Middle => enigo::Button::Middle,
         MouseButton::Back => enigo::Button::Back,
         MouseButton::Forward => enigo::Button::Forward,
+    }
+}
+
+/// Pointer movement on Windows, sent directly rather than through enigo.
+///
+/// * Absolute moves are mapped over the whole virtual desktop, so positions on
+///   any monitor work (enigo maps them over the primary monitor only).
+/// * Relative moves are sent as genuine relative motion. enigo turns them into
+///   absolute moves to avoid pointer acceleration, but a game with a locked
+///   pointer only reacts to relative motion – that is what turns its camera.
+#[cfg(windows)]
+mod windows_mouse {
+    use magi_core::host::HostError;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
+        SendInput,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    use super::INJECTION_MARKER;
+
+    fn send(dx: i32, dy: i32, flags: u32) -> Result<(), HostError> {
+        let input = INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: INPUT_0 {
+                mi: MOUSEINPUT { dx, dy, mouseData: 0, dwFlags: flags, time: 0, dwExtraInfo: INJECTION_MARKER },
+            },
+        };
+        // SAFETY: one fully initialised INPUT, with its size.
+        let sent = unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) };
+        if sent == 1 {
+            Ok(())
+        } else {
+            Err(HostError::new(format!("the system rejected the pointer move ({})", std::io::Error::last_os_error())))
+        }
+    }
+
+    /// Windows maps an absolute coordinate `n` (0–65535) to pixel
+    /// `n × size / 65536`, rounded down; this is the smallest `n` that lands on `pixel`.
+    pub(super) fn normalize(pixel: i32, origin: i32, size: i32) -> i32 {
+        let offset = i64::from((pixel - origin).clamp(0, size.max(1) - 1));
+        ((offset * 65536 + i64::from(size.max(1)) - 1) / i64::from(size.max(1))) as i32
+    }
+
+    pub(super) fn move_to(x: i32, y: i32) -> Result<(), HostError> {
+        // SAFETY: plain metric queries.
+        let (vx, vy, vw, vh) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                GetSystemMetrics(SM_CYVIRTUALSCREEN),
+            )
+        };
+        send(
+            normalize(x, vx, vw),
+            normalize(y, vy, vh),
+            MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+        )
+    }
+
+    pub(super) fn move_by(dx: i32, dy: i32) -> Result<(), HostError> {
+        send(dx, dy, MOUSEEVENTF_MOVE)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::normalize;
+
+        #[test]
+        fn normalised_coordinates_land_on_the_requested_pixel() {
+            for size in [1920, 2560, 3840 + 1920, 1366] {
+                for pixel in [0, 1, size / 2, size - 2, size - 1] {
+                    let n = i64::from(normalize(pixel, 0, size));
+                    assert_eq!((n * i64::from(size)) >> 16, i64::from(pixel), "size {size}, pixel {pixel}");
+                }
+            }
+            assert_eq!(normalize(-1920, -1920, 3840), 0, "monitors left of the primary have negative x");
+        }
     }
 }

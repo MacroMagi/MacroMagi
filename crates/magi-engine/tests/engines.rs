@@ -9,18 +9,22 @@
 //! screen" is a picture built in memory.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use magi_core::action::{Action, PressMode};
-use magi_core::autoclicker::{AutoClickerConfig, ClickLimit};
+use magi_core::autoclicker::{
+    AutoClickerConfig, ClickLimit, ClickPosition, ClickTarget, ClickerSettings, DualMode, Toggled,
+};
 use magi_core::geom::{Point, Rect};
 use magi_core::graph::{NodeId, PortRef};
-use magi_core::host::{Frame, SimHost};
+use magi_core::host::{Frame, SimHost, WindowInfo};
 use magi_core::input::{InputEvent, Key, MouseButton};
+use magi_core::nodes::window::ScreenKind;
 use magi_core::nodes::{Registry, ids, ports};
+use magi_core::options::{ProcessRule, ProcessRules, RuleAction, RuleMode};
 use magi_core::project::Project;
-use magi_core::recording::{RecordOptions, RecordingBuilder};
+use magi_core::recording::{LookPoint, PathPoint, RecordOptions, Recording, RecordingBuilder, Stroke, StrokeInput};
 use magi_engine::{EngineKind, LogLevel, Monitor, Program, PythonConfig, PythonRuntime, PythonStatus, Session};
 use magi_vision::ImageRef;
 use serde_json::json;
@@ -579,18 +583,215 @@ fn recordings_replay_press_and_release_in_time() {
 
 #[test]
 fn the_auto_clicker_graph_clicks_the_requested_number_of_times() {
-    let config = AutoClickerConfig {
-        interval_ms: 2.0,
+    let settings = ClickerSettings {
+        interval_ms: 10.0,
         hold_ms: 0.5,
         limit: ClickLimit::Count { count: 25 },
-        ..AutoClickerConfig::default()
+        ..ClickerSettings::default()
     };
+    let config = AutoClickerConfig { settings, ..AutoClickerConfig::default() };
     let mut project = Project::new();
     project.graph = config.to_graph(&registry());
     let start = project.graph.starts().next().unwrap().id;
 
-    on_all(&project, start, SimHost::new, |kind, outcome| {
+    for kind in engines() {
+        let began = std::time::Instant::now();
+        let outcome = run_on(kind, &project, start, SimHost::new());
+        let elapsed = began.elapsed();
         assert_eq!(outcome.clicks(), 25, "{kind:?}");
+        // Course correction keeps 25 clicks at 100/s to about a quarter of a second.
+        assert!(elapsed >= Duration::from_millis(230), "{kind:?}: too fast ({elapsed:?})");
+        assert!(elapsed < Duration::from_millis(600), "{kind:?}: too slow ({elapsed:?})");
+    }
+}
+
+fn clicker_project(change: impl FnOnce(&mut AutoClickerConfig)) -> (Project, NodeId) {
+    let settings = ClickerSettings {
+        interval_ms: 10.0,
+        hold_ms: 1.0,
+        limit: ClickLimit::Count { count: 4 },
+        ..ClickerSettings::default()
+    };
+    let mut config = AutoClickerConfig { settings, ..AutoClickerConfig::default() };
+    change(&mut config);
+    let mut project = Project::new();
+    project.graph = config.to_graph(&registry());
+    let start = project.graph.starts().next().unwrap().id;
+    (project, start)
+}
+
+#[test]
+fn dual_keys_alternate_or_go_together() {
+    let (project, start) = clicker_project(|c| {
+        c.target = ClickTarget::DualKeys { first: Key::KeyA, second: Key::KeyD, mode: DualMode::Alternate };
+    });
+    on_all(&project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyA, Key::KeyD, Key::KeyA, Key::KeyD], "{kind:?}");
+    });
+
+    let (project, start) = clicker_project(|c| {
+        c.target = ClickTarget::DualKeys { first: Key::KeyA, second: Key::KeyD, mode: DualMode::Together };
+        c.limit = ClickLimit::Count { count: 1 };
+    });
+    on_all(&project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(
+            outcome.sent,
+            vec![
+                InputEvent::KeyDown { key: Key::KeyA },
+                InputEvent::KeyDown { key: Key::KeyD },
+                InputEvent::KeyUp { key: Key::KeyD },
+                InputEvent::KeyUp { key: Key::KeyA },
+            ],
+            "{kind:?}"
+        );
+    });
+}
+
+#[test]
+fn double_clicks_and_fixed_positions() {
+    let (project, start) = clicker_project(|c| {
+        c.clicks = 2;
+        c.double_click_delay_ms = 5.0;
+        c.position = ClickPosition::Fixed { x: 40, y: 50 };
+        c.limit = ClickLimit::Count { count: 2 };
+    });
+    on_all(&project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.clicks(), 4, "{kind:?}");
+        assert_eq!(outcome.sent.first(), Some(&InputEvent::MoveTo { x: 40, y: 50 }), "{kind:?}");
+    });
+}
+
+#[test]
+fn the_time_limit_and_corner_stop_end_clicking() {
+    let (project, start) = clicker_project(|c| {
+        c.limit = ClickLimit::Forever;
+        c.time_limit = Toggled { on: true, value: 60.0 };
+    });
+    on_all(&project, start, SimHost::new, |kind, outcome| {
+        let clicks = outcome.clicks();
+        assert!((4..=9).contains(&clicks), "{kind:?}: {clicks} clicks in 60 ms at 100/s");
+        assert!(outcome.logs.iter().any(|l| l.contains("time limit")), "{kind:?}");
+    });
+
+    let (project, start) = clicker_project(|c| {
+        c.limit = ClickLimit::Forever;
+        c.corner_stop = Toggled { on: true, value: [25; 4] };
+    });
+    // The pointer starts in the top-left corner of a 320×200 screen.
+    on_all(
+        &project,
+        start,
+        || screen(None),
+        |kind, outcome| {
+            assert_eq!(outcome.clicks(), 0, "{kind:?}");
+            assert!(outcome.logs.iter().any(|l| l.contains("top-left corner")), "{kind:?}");
+        },
+    );
+}
+
+#[test]
+fn process_rules_stop_or_pause() {
+    let (project, start) = clicker_project(|c| c.limit = ClickLimit::Forever);
+    let rules = |action| {
+        Arc::new(RwLock::new(ProcessRules {
+            enabled: true,
+            mode: RuleMode::Blacklist,
+            blacklist: vec![ProcessRule { name: "chat.exe".into(), enabled: true, action }],
+            ..ProcessRules::default()
+        }))
+    };
+
+    for kind in engines() {
+        // Stop: nothing reaches a blacklisted program, and the run ends.
+        let host = Arc::new(SimHost::new());
+        host.set_foreground(Some("Chat.exe"));
+        let monitor = Arc::new(Monitor::new());
+        let stopping =
+            session(kind, &project, Arc::clone(&host), Arc::clone(&monitor)).with_rules(rules(RuleAction::Stop));
+        stopping.start(start).unwrap();
+        assert!(stopping.wait_idle(Some(TIMEOUT)), "{kind:?}");
+        assert!(host.sent().is_empty(), "{kind:?}");
+
+        // Pause: waits while the program is in front, carries on when it is not.
+        let host = Arc::new(SimHost::new());
+        host.set_foreground(Some("chat.exe"));
+        let monitor = Arc::new(Monitor::new());
+        let pausing =
+            session(kind, &project, Arc::clone(&host), Arc::clone(&monitor)).with_rules(rules(RuleAction::Pause));
+        pausing.start(start).unwrap();
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(host.sent().is_empty(), "{kind:?}: paused");
+        host.set_foreground(Some("game.exe"));
+        std::thread::sleep(Duration::from_millis(250));
+        pausing.stop_all();
+        assert!(pausing.wait_idle(Some(TIMEOUT)), "{kind:?}");
+        assert!(!host.sent().is_empty(), "{kind:?}: resumed");
+    }
+}
+
+#[test]
+fn switch_to_window_finds_reports_and_falls_through() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let focus = b.node(ids::FOCUS_WINDOW, json!({ "target": "notepad", "match_by": "process", "timeout_ms": 0.0 }));
+    let found = b.node(ids::LOG, json!({ "message": "screen" }));
+    let missing = b.tap(Key::KeyM);
+    b.flow(start, ports::OUT, focus).flow(focus, ports::OUT, found).flow(focus, "missing", missing);
+    b.wire(focus, "screen", found, "value");
+
+    let with_window = || {
+        let host = SimHost::new();
+        host.set_windows(vec![WindowInfo {
+            title: "Untitled - Notepad".into(),
+            process: "Notepad.exe".into(),
+            kind: ScreenKind::Windowed,
+            foreground: false,
+        }]);
+        host
+    };
+    on_all(&b.project, start, with_window, |kind, outcome| {
+        assert_eq!(outcome.logs, ["screen windowed"], "{kind:?}");
+        assert!(outcome.taps().is_empty(), "{kind:?}");
+    });
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyM], "{kind:?}");
+    });
+}
+
+#[test]
+fn recordings_can_replay_movement_as_relative_motion() {
+    let recording = Recording {
+        duration_ms: 20.0,
+        screen: None,
+        strokes: vec![
+            Stroke {
+                at: 0.0,
+                hold: 4.0,
+                input: StrokeInput::Move { path: vec![PathPoint(0.0, 100, 100), PathPoint(4.0, 130, 90)] },
+            },
+            Stroke {
+                at: 6.0,
+                hold: 2.0,
+                input: StrokeInput::Look { path: vec![LookPoint(0.0, 5, -5), LookPoint(2.0, 5, 0)] },
+            },
+        ],
+    };
+    let mut b = Builder::new();
+    let asset = b.project.assets.add_recording("look", recording);
+    let start = b.node(ids::START, json!({}));
+    let play = b.node(ids::PLAY_RECORDING, json!({ "recording": asset, "mouse": "relative" }));
+    b.chain(&[start, play]);
+
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(
+            outcome.sent,
+            vec![
+                InputEvent::MoveBy { dx: 30, dy: -10 },
+                InputEvent::MoveBy { dx: 5, dy: -5 },
+                InputEvent::MoveBy { dx: 5, dy: 0 },
+            ],
+            "{kind:?}"
+        );
     });
 }
 

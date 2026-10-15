@@ -54,7 +54,7 @@ const PORT_RADIUS: f32 = 5.0;
 const PORT_HIT: f32 = 20.0;
 const NODE_RADIUS: u8 = 10;
 
-const CARD_SIZE: Vec2 = vec2(330.0, 262.0);
+const CARD_SIZE: Vec2 = vec2(360.0, 310.0);
 const CARD_GAP: f32 = 34.0;
 
 const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.25..=2.0;
@@ -70,6 +70,9 @@ pub enum GraphEvent {
     RunFrom(NodeId),
     /// A block was double-clicked: show its settings.
     Inspect(NodeId),
+    /// Open a recording in the pop-out editor.
+    EditRecording(String),
+    Toast(String),
 }
 
 /// What the editor needs to know about the outside world to draw a frame.
@@ -100,7 +103,11 @@ struct Palette {
     query: String,
     /// A dangling wire to attach to the new block.
     wire: Option<WireDrag>,
+    /// Set on the frame the list opens. The click that opened it must not
+    /// count as a click elsewhere, which would close it again at once.
     just_opened: bool,
+    /// The row chosen with the arrow keys.
+    highlight: usize,
 }
 
 pub struct GraphView {
@@ -126,6 +133,8 @@ pub struct GraphView {
     /// Where the canvas was on screen last frame.
     canvas: Rect,
     pub images: ImageCache,
+    /// Size of the block list; the app keeps it in the settings.
+    pub palette_size: Vec2,
 }
 
 impl Default for GraphView {
@@ -145,6 +154,7 @@ impl Default for GraphView {
             fit_requested: true,
             canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)),
             images: ImageCache::default(),
+            palette_size: vec2(280.0, 420.0),
         }
     }
 }
@@ -277,6 +287,8 @@ pub fn node_icon(kind: &str) -> &'static str {
         ids::GATE => icon::TOGGLE_RIGHT,
         ids::CHANCE => icon::DICE_FIVE,
         ids::PYTHON => icon::CODE,
+        ids::AUTOCLICK => icon::HAND_TAP,
+        ids::FOCUS_WINDOW => icon::APP_WINDOW,
         _ => icon::SPARKLE,
     }
 }
@@ -322,7 +334,7 @@ fn paint_wire(painter: &Painter, points: [Pos2; 4], color: Color32, width: f32) 
 
 fn paint_port(painter: &Painter, spot: &Spot, connected: bool, emphasis: f32) {
     let color = theme::port_color(spot.port.kind);
-    let fill = if connected { color } else { theme::BG_CANVAS };
+    let fill = if connected { color } else { theme::bg_canvas() };
     let stroke = Stroke::new(1.6, color);
     let grow = 1.0 + 0.35 * emphasis;
     match spot.port.kind {
@@ -478,7 +490,32 @@ impl GraphView {
             query: String::new(),
             wire: None,
             just_opened: true,
+            highlight: 0,
         });
+    }
+
+    /// Opens the block list near the top-left of the canvas; the new block
+    /// goes in the middle of the view.
+    pub fn open_palette_in_view(&mut self) {
+        self.open_palette(self.canvas.min + vec2(16.0, 16.0));
+        let center = self.view_center() - vec2(0.0, 40.0);
+        if let Some(palette) = &mut self.palette {
+            palette.scene_pos = center;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn palette_is_open(&self) -> bool {
+        self.palette.is_some()
+    }
+
+    pub fn request_fit(&mut self) {
+        self.fit_requested = true;
+    }
+
+    pub fn reset_zoom(&mut self) {
+        let factor = 1.0 / self.zoom;
+        self.zoom_about(self.canvas, self.canvas.center(), factor);
     }
 
     /// Draws the editor into the remaining space of `ui`.
@@ -486,7 +523,7 @@ impl GraphView {
         let mut events = Vec::new();
         let (canvas, background) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         self.canvas = canvas;
-        ui.painter().rect_filled(canvas, 0.0, theme::BG_CANVAS);
+        ui.painter().rect_filled(canvas, 0.0, theme::bg_canvas());
 
         // Keep the draw order in step with the graph.
         self.order.retain(|id| project.graph.contains(*id));
@@ -613,7 +650,7 @@ impl GraphView {
             if let Some((rect, asset)) = &layout.thumbnail
                 && let Some(texture) = self.images.get(ui.ctx(), &project.assets, asset)
             {
-                painter.rect_filled(*rect, 5.0, theme::BG_INPUT);
+                painter.rect_filled(*rect, 5.0, theme::bg_input());
                 let size = fit_size(&texture, rect.size() - Vec2::splat(6.0), 4.0);
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                 let tint = if node.enabled { Color32::WHITE } else { Color32::from_white_alpha(90) };
@@ -632,9 +669,9 @@ impl GraphView {
                 let rect = layout.header_button();
                 let response = scene.interact(rect, id.with("header-button"), Sense::click());
                 let color = match (node.kind.as_str(), running) {
-                    (ids::START, true) => theme::DANGER,
-                    (ids::START, false) => theme::SUCCESS,
-                    _ => theme::TEXT_DIM,
+                    (ids::START, true) => theme::danger(),
+                    (ids::START, false) => theme::success(),
+                    _ => theme::text_dim(),
                 };
                 if response.hovered() {
                     painter.rect_filled(rect, 5.0, theme::with_alpha(color, 0.18));
@@ -658,14 +695,14 @@ impl GraphView {
             // "Add input" / "Add case".
             if let Some((rect, label)) = layout.button {
                 let response = scene.interact(rect, id.with("add"), Sense::click());
-                let fill = if response.hovered() { theme::BG_WIDGET_HOVER } else { theme::BG_WIDGET };
+                let fill = if response.hovered() { theme::bg_widget_hover() } else { theme::bg_widget() };
                 painter.rect_filled(rect, 5.0, fill);
                 painter.text(
                     rect.center(),
                     Align2::CENTER_CENTER,
                     format!("{}  {label}", icon::PLUS),
                     FontId::proportional(11.5),
-                    theme::TEXT_DIM,
+                    theme::text_dim(),
                 );
                 if node.kind == ids::DECISION {
                     if response.clicked()
@@ -749,7 +786,7 @@ impl GraphView {
             if node.kind == ids::PLAY_RECORDING && self.cards.contains(&layout.id) {
                 let rect = Rect::from_min_size(pos2(layout.rect.right() + CARD_GAP, layout.rect.top()), CARD_SIZE);
                 card_rects.push(rect);
-                self.recording_card(&mut scene, &painter, project, layout, &node, rect);
+                self.recording_card(&mut scene, &painter, project, layout, &node, rect, &mut events);
             }
         }
         self.card_rects = card_rects;
@@ -805,6 +842,7 @@ impl GraphView {
                             query: String::new(),
                             wire: Some(drag),
                             just_opened: true,
+                            highlight: 0,
                         });
                     }
                     _ => {}
@@ -867,8 +905,8 @@ impl GraphView {
             step *= 2.0;
         }
         let origin = canvas.min + self.pan;
-        let minor = Stroke::new(1.0, theme::mix(theme::BG_CANVAS, theme::GRID, 0.6));
-        let major = Stroke::new(1.0, theme::mix(theme::GRID, theme::STROKE, 0.45));
+        let minor = Stroke::new(1.0, theme::mix(theme::bg_canvas(), theme::grid(), 0.6));
+        let major = Stroke::new(1.0, theme::mix(theme::grid(), theme::stroke(), 0.45));
         let first_x = ((canvas.left() - origin.x) / step).floor() as i32;
         let first_y = ((canvas.top() - origin.y) / step).floor() as i32;
         let mut index = first_x;
@@ -905,12 +943,13 @@ impl GraphView {
             painter.add(halo.as_shape(rect, radius));
         }
 
-        let body = if look.hovered { theme::mix(theme::BG_RAISED, theme::BG_WIDGET, 0.5) } else { theme::BG_RAISED };
+        let body =
+            if look.hovered { theme::mix(theme::bg_raised(), theme::bg_widget(), 0.5) } else { theme::bg_raised() };
         painter.rect_filled(rect, radius, body);
         let header = layout.header();
         let header_radius = CornerRadius { nw: NODE_RADIUS, ne: NODE_RADIUS, sw: 0, se: 0 };
-        painter.rect_filled(header, header_radius, theme::mix(theme::BG_RAISED, dim(accent), 0.2));
-        painter.hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::STROKE));
+        painter.rect_filled(header, header_radius, theme::mix(theme::bg_raised(), dim(accent), 0.2));
+        painter.hline(rect.x_range(), header.bottom(), Stroke::new(1.0, theme::stroke()));
 
         painter.text(
             pos2(rect.left() + 11.0, header.center().y),
@@ -921,15 +960,15 @@ impl GraphView {
         );
         let has_button = matches!(node.kind.as_str(), ids::START | ids::PLAY_RECORDING);
         let title_width = rect.width() - 36.0 - if has_button { 34.0 } else { 10.0 };
-        let title = fit_text(painter, &layout.title, FontId::proportional(13.5), dim(theme::TEXT), title_width);
-        painter.galley(pos2(rect.left() + 34.0, header.center().y - title.size().y / 2.0), title, theme::TEXT);
+        let title = fit_text(painter, &layout.title, FontId::proportional(13.5), dim(theme::text()), title_width);
+        painter.galley(pos2(rect.left() + 34.0, header.center().y - title.size().y / 2.0), title, theme::text());
         if !node.enabled {
             painter.text(
                 pos2(rect.right() - if has_button { 40.0 } else { 12.0 }, header.center().y),
                 Align2::RIGHT_CENTER,
                 "off",
                 FontId::proportional(10.5),
-                theme::TEXT_FAINT,
+                theme::text_faint(),
             );
         }
 
@@ -939,24 +978,24 @@ impl GraphView {
         for spot in &layout.spots {
             match (spot.port.kind, spot.is_input) {
                 (PortKind::Data(_), true) => {
-                    let text = fit_text(painter, &spot.port.label, label_font.clone(), dim(theme::TEXT_DIM), half);
-                    painter.galley(pos2(spot.pos.x + 12.0, spot.pos.y - text.size().y / 2.0), text, theme::TEXT_DIM);
+                    let text = fit_text(painter, &spot.port.label, label_font.clone(), dim(theme::text_dim()), half);
+                    painter.galley(pos2(spot.pos.x + 12.0, spot.pos.y - text.size().y / 2.0), text, theme::text_dim());
                 }
                 (PortKind::Data(_), false) => {
-                    let text = fit_text(painter, &spot.port.label, label_font.clone(), dim(theme::TEXT_DIM), half);
+                    let text = fit_text(painter, &spot.port.label, label_font.clone(), dim(theme::text_dim()), half);
                     let x = spot.pos.x - 12.0 - text.size().x;
-                    painter.galley(pos2(x, spot.pos.y - text.size().y / 2.0), text, theme::TEXT_DIM);
+                    painter.galley(pos2(x, spot.pos.y - text.size().y / 2.0), text, theme::text_dim());
                 }
                 (PortKind::Flow, false) if !spot.port.label.is_empty() => {
                     let text = fit_text(
                         painter,
                         &spot.port.label,
                         FontId::proportional(11.0),
-                        dim(theme::TEXT_DIM),
+                        dim(theme::text_dim()),
                         FLOW_SLOT - 10.0,
                     );
                     let x = spot.pos.x - text.size().x / 2.0;
-                    painter.galley(pos2(x, spot.pos.y - 8.0 - text.size().y), text, theme::TEXT_DIM);
+                    painter.galley(pos2(x, spot.pos.y - 8.0 - text.size().y), text, theme::text_dim());
                 }
                 _ => {}
             }
@@ -964,20 +1003,20 @@ impl GraphView {
 
         // Summary lines: the first is the headline, the rest are detail.
         for (i, line) in layout.lines.iter().enumerate() {
-            let color = if i == 0 { theme::TEXT } else { theme::TEXT_DIM };
+            let color = if i == 0 { theme::text() } else { theme::text_dim() };
             let text = fit_text(painter, line, FontId::proportional(12.0), dim(color), rect.width() - 2.0 * PAD);
             painter.galley(pos2(rect.left() + PAD, layout.lines_top + i as f32 * LINE), text, color);
         }
         let _ = layout.rows_top;
 
         let outline = if look.error {
-            Stroke::new(1.8, theme::DANGER)
+            Stroke::new(1.8, theme::danger())
         } else if look.selected {
-            Stroke::new(1.8, theme::ACCENT_BRIGHT)
+            Stroke::new(1.8, theme::accent_bright())
         } else if look.running {
             Stroke::new(1.4, theme::with_alpha(accent, 0.9))
         } else {
-            Stroke::new(1.0, theme::STROKE_STRONG)
+            Stroke::new(1.0, theme::stroke_strong())
         };
         painter.rect_stroke(rect, radius, outline, StrokeKind::Outside);
     }
@@ -1003,6 +1042,36 @@ impl GraphView {
             if ui.add_enabled(is_flow, egui::Button::new(format!("{}  Run from here", icon::PLAY))).clicked() {
                 events.push(GraphEvent::RunFrom(node.id));
                 ui.close();
+            }
+            if node.kind == ids::PLAY_RECORDING {
+                let asset = node.params_or_default::<PlayRecordingParams>().recording;
+                let has = project.assets.recording(&asset).is_some();
+                if ui
+                    .add_enabled(has, egui::Button::new(format!("{}  Open recording editor", icon::ARROW_SQUARE_OUT)))
+                    .clicked()
+                {
+                    events.push(GraphEvent::EditRecording(asset.clone()));
+                    ui.close();
+                }
+                let convert = egui::Button::new(format!("{}  Convert to Smart Recording", icon::CROSSHAIR));
+                if ui
+                    .add_enabled(has, convert)
+                    .on_hover_text(
+                        "Movement made in a game that keeps re-centring the pointer becomes relative motion, \
+                         so the camera turns when the recording plays.",
+                    )
+                    .clicked()
+                {
+                    if let Some(recording) = project.assets.recording_mut(&asset) {
+                        let converted = recording.make_smart();
+                        events.push(GraphEvent::Toast(match converted {
+                            0 => "No game-camera movement found; the recording is unchanged.".to_owned(),
+                            1 => "1 movement now replays as relative motion.".to_owned(),
+                            n => format!("{n} movements now replay as relative motion."),
+                        }));
+                    }
+                    ui.close();
+                }
             }
             ui.separator();
         }
@@ -1071,8 +1140,8 @@ impl GraphView {
         }
         if let (Some(start), Some(end)) = (self.band_start, pointer) {
             let band = Rect::from_two_pos(start, end);
-            painter.rect_filled(band, 3.0, theme::with_alpha(theme::ACCENT, 0.12));
-            painter.rect_stroke(band, 3.0, Stroke::new(1.0 / self.zoom, theme::ACCENT_BRIGHT), StrokeKind::Inside);
+            painter.rect_filled(band, 3.0, theme::with_alpha(theme::accent(), 0.12));
+            painter.rect_stroke(band, 3.0, Stroke::new(1.0 / self.zoom, theme::accent_bright()), StrokeKind::Inside);
             if background.drag_stopped() {
                 if !modifiers.shift {
                     self.selection.clear();
@@ -1176,11 +1245,56 @@ impl GraphView {
         }
     }
 
-    /// The searchable list of blocks that can be added.
+    /// The searchable list of blocks that can be added. Arrow keys move
+    /// through it, Enter adds the highlighted block; it can be resized.
     fn palette_popup(&mut self, ui: &Ui, project: &mut Project, registry: &Registry) {
         let Some(palette) = &mut self.palette else { return };
+        let fresh = palette.just_opened;
         let mut chosen: Option<String> = None;
-        let mut close = false;
+        let mut size = self.palette_size;
+
+        // Everything that matches, in category order.
+        let query = palette.query.trim().to_lowercase();
+        let fits_wire = |def: &NodeDef| match &palette.wire {
+            None => true,
+            Some(drag) => match (drag.kind, drag.from_output) {
+                (PortKind::Flow, true) => def.flow_in,
+                (PortKind::Flow, false) => !def.flow_out.is_empty() || def.dynamic_ports.is_some(),
+                (PortKind::Data(ty), true) => def.data_in.iter().any(|p| ty.fits(p.ty)) || def.dynamic_ports.is_some(),
+                (PortKind::Data(ty), false) => def.data_out.iter().any(|p| p.ty.fits(ty)),
+            },
+        };
+        let matches = |def: &NodeDef| {
+            query.is_empty()
+                || def.name.to_lowercase().contains(&query)
+                || def.keywords.iter().any(|k| k.contains(&query))
+                || def.category.label().to_lowercase().contains(&query)
+        };
+        let mut listed: Vec<Arc<NodeDef>> = Vec::new();
+        for category in Category::ALL {
+            listed.extend(
+                registry.iter().filter(|def| def.category == category && matches(def) && fits_wire(def)).cloned(),
+            );
+        }
+
+        // Arrow keys move the highlight; they are taken before the search box sees them.
+        let (up, down, enter) = ui.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, Key::ArrowUp),
+                i.consume_key(egui::Modifiers::NONE, Key::ArrowDown),
+                i.key_pressed(Key::Enter),
+            )
+        });
+        if !listed.is_empty() {
+            if down {
+                palette.highlight = (palette.highlight + 1).min(listed.len() - 1);
+            }
+            if up {
+                palette.highlight = palette.highlight.saturating_sub(1);
+            }
+        }
+        palette.highlight = palette.highlight.min(listed.len().saturating_sub(1));
+        let moved = up || down;
 
         let area = egui::Area::new(Id::new("magi-palette"))
             .order(Order::Foreground)
@@ -1188,77 +1302,62 @@ impl GraphView {
             .constrain(true)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_width(232.0);
-                    let search = ui.add(
-                        egui::TextEdit::singleline(&mut palette.query)
-                            .hint_text(format!("{}  Search blocks", icon::MAGNIFYING_GLASS))
-                            .desired_width(f32::INFINITY),
-                    );
-                    if std::mem::take(&mut palette.just_opened) {
-                        search.request_focus();
-                    }
-                    let query = palette.query.trim().to_lowercase();
-                    let fits_wire = |def: &NodeDef| match &palette.wire {
-                        None => true,
-                        Some(drag) => match (drag.kind, drag.from_output) {
-                            (PortKind::Flow, true) => def.flow_in,
-                            (PortKind::Flow, false) => !def.flow_out.is_empty() || def.dynamic_ports.is_some(),
-                            (PortKind::Data(ty), true) => {
-                                def.data_in.iter().any(|p| ty.fits(p.ty)) || def.dynamic_ports.is_some()
-                            }
-                            (PortKind::Data(ty), false) => def.data_out.iter().any(|p| p.ty.fits(ty)),
-                        },
-                    };
-                    let matches = |def: &NodeDef| {
-                        query.is_empty()
-                            || def.name.to_lowercase().contains(&query)
-                            || def.keywords.iter().any(|k| k.contains(&query))
-                    };
-
-                    let mut first_match: Option<String> = None;
-                    egui::ScrollArea::vertical().max_height(330.0).show(ui, |ui| {
-                        for category in Category::ALL {
-                            let defs: Vec<_> = registry
-                                .iter()
-                                .filter(|def| def.category == category && matches(def) && fits_wire(def))
-                                .collect();
-                            if defs.is_empty() {
-                                continue;
-                            }
-                            ui.add_space(2.0);
-                            ui.label(
-                                egui::RichText::new(category.label().to_uppercase())
-                                    .size(10.0)
-                                    .color(theme::category_color(category)),
-                            );
-                            for def in defs {
-                                first_match.get_or_insert_with(|| def.id.clone());
-                                let text = format!("{}  {}", node_icon(&def.id), def.name);
-                                let button =
-                                    egui::Button::new(text).frame(false).min_size(vec2(ui.available_width(), 0.0));
-                                let response = ui
-                                    .with_layout(
-                                        egui::Layout::left_to_right(egui::Align::Center).with_main_justify(true),
-                                        |ui| ui.add(button),
-                                    )
-                                    .inner;
-                                if response.on_hover_text(&def.description).clicked() {
+                    let resize = egui::Resize::default()
+                        .id_salt("magi-palette-size")
+                        .default_size(size)
+                        .min_size(vec2(220.0, 200.0))
+                        .max_size(vec2(640.0, 900.0));
+                    resize.show(ui, |ui| {
+                        size = ui.available_size();
+                        let search = ui.add(
+                            egui::TextEdit::singleline(&mut palette.query)
+                                .hint_text(format!("{}  Search blocks", icon::MAGNIFYING_GLASS))
+                                .desired_width(f32::INFINITY),
+                        );
+                        if std::mem::take(&mut palette.just_opened) {
+                            search.request_focus();
+                        }
+                        if search.changed() {
+                            palette.highlight = 0;
+                        }
+                        ui.add_space(2.0);
+                        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                            let mut last_category = None;
+                            for (index, def) in listed.iter().enumerate() {
+                                if last_category != Some(def.category) {
+                                    last_category = Some(def.category);
+                                    ui.add_space(3.0);
+                                    ui.label(
+                                        egui::RichText::new(def.category.label().to_uppercase())
+                                            .size(10.0)
+                                            .color(theme::category_color(def.category)),
+                                    );
+                                }
+                                let highlighted = index == palette.highlight;
+                                let row = palette_row(ui, def, highlighted);
+                                if highlighted && moved {
+                                    row.scroll_to_me(None);
+                                }
+                                if row.hovered() && !moved {
+                                    palette.highlight = index;
+                                }
+                                if row.on_hover_text(&def.description).clicked() {
                                     chosen = Some(def.id.clone());
                                 }
                             }
-                        }
-                        if first_match.is_none() {
-                            ui.weak("No block matches.");
-                        }
+                            if listed.is_empty() {
+                                ui.weak("No block matches.");
+                            }
+                        });
                     });
-                    if search.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-                        chosen = chosen.take().or(first_match);
-                    }
                 });
             });
-        if ui.input(|i| i.key_pressed(Key::Escape)) || area.response.clicked_elsewhere() {
-            close = true;
+        self.palette_size = size;
+
+        if enter && chosen.is_none() {
+            chosen = listed.get(palette.highlight).map(|def| def.id.clone());
         }
+        let close = !fresh && (ui.input(|i| i.key_pressed(Key::Escape)) || area.response.clicked_elsewhere());
 
         if let Some(kind) = chosen {
             let palette = self.palette.take().expect("the palette is open");
@@ -1280,7 +1379,7 @@ impl GraphView {
                 Align2::CENTER_CENTER,
                 "Double-click or right-click to add a block",
                 FontId::proportional(14.0),
-                theme::TEXT_FAINT,
+                theme::text_faint(),
             );
         }
         egui::Area::new(Id::new("magi-zoom"))
@@ -1288,8 +1387,8 @@ impl GraphView {
             .fixed_pos(pos2(canvas.left() + 10.0, canvas.bottom() - 40.0))
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
-                    .fill(theme::with_alpha(theme::BG_PANEL, 0.92))
-                    .stroke(Stroke::new(1.0, theme::STROKE))
+                    .fill(theme::with_alpha(theme::bg_panel(), 0.92))
+                    .stroke(Stroke::new(1.0, theme::stroke()))
                     .corner_radius(8)
                     .inner_margin(3)
                     .show(ui, |ui| {
@@ -1317,6 +1416,7 @@ impl GraphView {
     }
 
     /// The "recording information" card attached to a Play Recording block.
+    #[allow(clippy::too_many_arguments)]
     fn recording_card(
         &mut self,
         scene: &mut Ui,
@@ -1325,18 +1425,19 @@ impl GraphView {
         layout: &Layout,
         node: &Node,
         rect: Rect,
+        events: &mut Vec<GraphEvent>,
     ) {
         // The tether from the block to its card.
         let from = pos2(layout.rect.right(), layout.rect.top() + HEADER / 2.0);
         let to = pos2(rect.left(), from.y);
-        painter.line_segment([from, to], Stroke::new(1.5, theme::STROKE_STRONG));
-        painter.circle_filled(to, 3.0, theme::STROKE_STRONG);
+        painter.line_segment([from, to], Stroke::new(1.5, theme::stroke_strong()));
+        painter.circle_filled(to, 3.0, theme::stroke_strong());
 
         // Swallow clicks and drags so they do not reach the canvas underneath.
         scene.interact(rect, scene.id().with(("card", node.id)), Sense::click_and_drag());
         painter.add(theme::drop_shadow().as_shape(rect, CornerRadius::same(NODE_RADIUS)));
-        painter.rect_filled(rect, NODE_RADIUS, theme::BG_PANEL);
-        painter.rect_stroke(rect, NODE_RADIUS, Stroke::new(1.0, theme::STROKE_STRONG), StrokeKind::Outside);
+        painter.rect_filled(rect, NODE_RADIUS, theme::bg_panel());
+        painter.rect_stroke(rect, NODE_RADIUS, Stroke::new(1.0, theme::stroke_strong()), StrokeKind::Outside);
 
         let params: PlayRecordingParams = node.params_or_default();
         let mut card = scene.new_child(
@@ -1346,13 +1447,17 @@ impl GraphView {
                 .layout(egui::Layout::top_down(egui::Align::Min)),
         );
         card.set_clip_rect(rect.intersect(scene.clip_rect()));
-        card.label(egui::RichText::new("RECORDING INFORMATION").size(10.0).color(theme::TEXT_FAINT));
+        card.label(egui::RichText::new("RECORDING INFORMATION").size(10.0).color(theme::text_faint()));
         match project.assets.recording(&params.recording).cloned() {
             Some(recording) => {
-                if let Some(edit) = recording_editor::show(&mut card, &recording, 150.0)
+                let response = recording_editor::show(&mut card, &recording, 120.0, false);
+                if let Some(edit) = response.edit
                     && let Some(target) = project.assets.recording_mut(&params.recording)
                 {
                     edit.apply(target);
+                }
+                if response.pop_out {
+                    events.push(GraphEvent::EditRecording(params.recording.clone()));
                 }
             }
             None => {
@@ -1361,6 +1466,28 @@ impl GraphView {
             }
         }
     }
+}
+
+/// One block in the block list: icon and name, left-aligned, one line tall.
+fn palette_row(ui: &mut Ui, def: &NodeDef, highlighted: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if highlighted || response.hovered() {
+            let fill = if highlighted { theme::with_alpha(theme::accent(), 0.28) } else { theme::bg_widget_hover() };
+            painter.rect_filled(rect, 4.0, fill);
+        }
+        painter.text(
+            pos2(rect.left() + 8.0, rect.center().y),
+            Align2::LEFT_CENTER,
+            node_icon(&def.id),
+            FontId::proportional(14.0),
+            theme::category_color(def.category),
+        );
+        let name = fit_text(painter, &def.name, FontId::proportional(13.0), theme::text(), rect.width() - 36.0);
+        painter.galley(pos2(rect.left() + 30.0, rect.center().y - name.size().y / 2.0), name, theme::text());
+    }
+    response
 }
 
 /// How a node should be drawn this frame.

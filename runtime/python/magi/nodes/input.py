@@ -31,3 +31,10 @@ def recording(run, node):
 
 def _is_point(value):
     return isinstance(value, dict) and "x" in value and "y" in value
+
+
+@flow_node("input.autoclick")
+def autoclick(run, node):
+    run.waited = True
+    run.host.call("autoclick", params=node["params"])
+    return OUT

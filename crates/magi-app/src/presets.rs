@@ -69,7 +69,7 @@ impl PresetLibrary {
 
 #[cfg(test)]
 mod tests {
-    use magi_core::autoclicker::AutoClickerConfig;
+    use magi_core::autoclicker::{AutoClickerConfig, ClickerSettings};
     use magi_core::preset::PresetBody;
 
     use super::*;
@@ -81,11 +81,10 @@ mod tests {
         let mut library = PresetLibrary::load(dir.clone());
         assert!(library.entries().is_empty());
 
-        let preset = Preset {
-            name: "Rapid fire".into(),
-            description: String::new(),
-            body: PresetBody::AutoClicker(AutoClickerConfig { interval_ms: 20.0, ..Default::default() }),
-        };
+        let settings = ClickerSettings { interval_ms: 20.0, ..ClickerSettings::default() };
+        let config = AutoClickerConfig { settings, ..AutoClickerConfig::default() };
+        let preset =
+            Preset { name: "Rapid fire".into(), description: String::new(), body: PresetBody::AutoClicker(config) };
         let path = library.save(&preset).unwrap();
         assert_eq!(path.file_name().unwrap(), "Rapid fire.mp");
         std::fs::write(dir.join("junk.mp"), "not a preset").unwrap();

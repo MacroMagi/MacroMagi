@@ -17,13 +17,14 @@ mod gamepad;
 mod inject;
 pub mod keymap;
 mod listen;
+pub mod system;
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use magi_core::geom::{Point, Rect};
-use magi_core::host::{Frame, Host, HostError};
+use magi_core::host::{Frame, Host, HostError, WindowInfo, WindowQuery};
 use magi_core::input::InputEvent;
 
 pub use inject::{INJECTION_MARKER, Injector};
@@ -83,6 +84,18 @@ impl Host for SystemHost {
 
     fn capture(&self, region: Option<Rect>) -> Result<Frame, HostError> {
         capture::capture(region)
+    }
+
+    fn screens(&self) -> Result<Vec<Rect>, HostError> {
+        Ok(capture::monitors()?.into_iter().map(|m| m.rect).collect())
+    }
+
+    fn foreground_process(&self) -> Option<String> {
+        system::foreground_process()
+    }
+
+    fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError> {
+        system::focus_window(query)
     }
 }
 

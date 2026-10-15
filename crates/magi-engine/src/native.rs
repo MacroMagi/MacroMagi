@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use magi_core::autoclicker::AutoClickParams;
 use magi_core::geom::Point;
 use magi_core::graph::{Node, NodeId};
 use magi_core::nodes::flow::{
@@ -21,6 +22,7 @@ use magi_core::nodes::flow::{
 use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
 use magi_core::nodes::logic::{ChanceParams, GateOp, GateParams};
 use magi_core::nodes::vision::{FindColorParams, FindImageParams};
+use magi_core::nodes::window::FocusWindowParams;
 use magi_core::nodes::{ids, ports};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -79,6 +81,8 @@ impl NativeNodes {
         nodes.flow(ids::LOG, log);
         nodes.flow(ids::INPUT, input);
         nodes.flow(ids::PLAY_RECORDING, play_recording);
+        nodes.flow(ids::AUTOCLICK, autoclick);
+        nodes.flow(ids::FOCUS_WINDOW, focus_window);
         nodes.flow(ids::PYTHON, |_, _| {
             Err(EngineError::new(
                 "Python Script blocks need the Python engine. Choose it in Settings (Python 3.8+ must be installed).",
@@ -115,12 +119,15 @@ pub struct Interp<'a> {
     loops: Vec<LoopFrame>,
     /// Outputs of value blocks evaluated during the current step.
     memo: HashMap<NodeId, Map<String, Value>>,
+    /// Outputs of flow blocks (e.g. the screen type Switch to Window found),
+    /// kept until the block runs again.
+    pub outputs: HashMap<NodeId, Map<String, Value>>,
     depth: u32,
 }
 
 /// Runs the flow that begins at `start` until it ends, fails, or is stopped.
 pub(crate) fn run(cx: &mut RunCx, nodes: &NativeNodes, start: NodeId) -> Result<(), EngineError> {
-    let mut interp = Interp { cx, nodes, loops: Vec::new(), memo: HashMap::new(), depth: 0 };
+    let mut interp = Interp { cx, nodes, loops: Vec::new(), memo: HashMap::new(), outputs: HashMap::new(), depth: 0 };
     match interp.run_from(start) {
         Ok(()) | Err(Halt::Stopped) => Ok(()),
         Err(Halt::Failed(error)) => Err(error),
@@ -189,10 +196,12 @@ impl Interp<'_> {
         if !source_node.enabled {
             return Ok(Some(Value::Null));
         }
+        if let Some(values) = self.outputs.get(&source.node) {
+            return Ok(Some(values.get(&source.port).cloned().unwrap_or(Value::Null)));
+        }
         if !self.memo.contains_key(&source.node) {
             let Some(eval) = self.nodes.value.get(&source_node.kind) else {
-                // Outputs of flow blocks would be read here; no built-in has any
-                // on the native engine, so there is nothing to give.
+                // A flow block that has not run yet, or an unknown block.
                 return Ok(Some(Value::Null));
             };
             if self.depth >= MAX_VALUE_DEPTH {
@@ -328,6 +337,26 @@ fn input(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
     };
     interp.cx.perform_actions(&p, position)?;
     Ok(Next::out())
+}
+
+fn autoclick(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
+    let p: AutoClickParams = params(node)?;
+    interp.cx.autoclick(&p.clicker)?;
+    Ok(Next::out())
+}
+
+fn focus_window(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
+    let p: FocusWindowParams = params(node)?;
+    let found = interp.cx.focus_window(&p)?;
+    let screen = found.as_ref().map(|info| info.kind.id());
+    interp.outputs.insert(node.id, Map::from_iter([("screen".to_owned(), json!(screen))]));
+    Ok(match found {
+        Some(_) => Next::out(),
+        None => {
+            interp.cx.log(LogLevel::Warning, Some(node.id), format!("No window matching “{}” was found", p.target));
+            Next::Port("missing".to_owned())
+        }
+    })
 }
 
 fn play_recording(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {

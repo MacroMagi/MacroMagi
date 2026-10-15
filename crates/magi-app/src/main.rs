@@ -8,10 +8,12 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod background;
 mod cli;
 mod controller;
 mod document;
 mod examples;
+mod history;
 mod paths;
 mod presets;
 mod settings;
@@ -91,8 +93,8 @@ fn gui(options: StartupOptions) -> ExitCode {
     }
 }
 
-/// The window icon: a four-pointed sparkle on a violet tile, drawn in code so
-/// the app needs no image files.
+/// The window icon: a white four-pointed sparkle on a black tile, drawn in
+/// code so the app needs no image files. Always monochrome, whatever the theme.
 fn icon() -> egui::IconData {
     const SIZE: usize = 64;
     let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
@@ -104,13 +106,14 @@ fn icon() -> egui::IconData {
             let tile = dx.abs().powi(5) + dy.abs().powi(5) <= 0.86;
             // An astroid for the sparkle.
             let sparkle = dx.abs().sqrt() + dy.abs().sqrt() <= 1.06;
-            let shade = 1.0 - (dx + dy + 2.0) / 4.0 * 0.45;
+            // A faint top-left light keeps the black tile from looking flat.
+            let shade = 0x10 as f32 + (1.0 - (dx + dy + 2.0) / 4.0) * 0x22 as f32;
             let pixel = if !tile {
                 [0, 0, 0, 0]
             } else if sparkle {
                 [255, 255, 255, 255]
             } else {
-                [(0x9B as f32 * shade) as u8, (0x6D as f32 * shade) as u8, (0xFF as f32 * shade) as u8, 255]
+                [shade as u8, shade as u8, shade as u8, 255]
             };
             rgba.extend_from_slice(&pixel);
         }

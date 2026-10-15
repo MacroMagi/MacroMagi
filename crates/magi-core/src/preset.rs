@@ -222,7 +222,10 @@ mod tests {
         let preset = Preset {
             name: "Fast left click".into(),
             description: String::new(),
-            body: PresetBody::AutoClicker(AutoClickerConfig { interval_ms: 10.0, ..Default::default() }),
+            body: PresetBody::AutoClicker(AutoClickerConfig {
+                settings: crate::autoclicker::ClickerSettings { interval_ms: 10.0, ..Default::default() },
+                ..AutoClickerConfig::default()
+            }),
         };
         let json = preset.to_json().unwrap();
         assert!(json.contains(r#""kind": "auto_clicker""#));

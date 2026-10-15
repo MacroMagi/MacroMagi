@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use include_dir::{Dir, DirEntry, include_dir};
+use magi_core::autoclicker::AutoClickParams;
 use magi_core::graph::NodeId;
 use magi_core::input::InputEvent;
 use serde::de::DeserializeOwned;
@@ -491,6 +492,18 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
         "send" => {
             cx.send(&arg::<InputEvent>(args, "event")?)?;
             Ok(Value::Null)
+        }
+        "autoclick" => {
+            let params: AutoClickParams = arg(args, "params")?;
+            cx.autoclick(&params.clicker)?;
+            Ok(Value::Null)
+        }
+        "focus_window" => {
+            let found = cx.focus_window(&arg(args, "params")?)?;
+            Ok(found.map_or(
+                Value::Null,
+                |info| json!({ "title": info.title, "process": info.process, "kind": info.kind.id() }),
+            ))
         }
         "move" => {
             let duration = millis(arg::<Option<f64>>(args, "duration_ms")?.unwrap_or(0.0));

@@ -17,16 +17,27 @@ xcap.workspace = true
 # Windows listens through its own low-level hooks (see src/listen/windows.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
     "Win32_UI_HiDpi",
+    "Win32_UI_Input",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
 # Everything else listens through rdev.
 [target.'cfg(not(windows))'.dependencies]
 rdev = "0.5"
+
+[dev-dependencies]
+# The system tests inject input "as the user" (without MacroMagi's marker).
+enigo.workspace = true
 
 [lints]
 workspace = true
