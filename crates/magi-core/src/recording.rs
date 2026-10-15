@@ -20,10 +20,25 @@
 //! pointer really did. Existing recordings can be converted afterwards with
 //! [`Recording::make_smart`], and playback can force either kind with
 //! [`MouseReplay`].
+//!
+//! ## Overlapping presses
+//!
+//! A key or button that is pressed and released with nothing else happening
+//! in between is one stroke with a hold time. When other presses happen while
+//! it is held (hold Shift, type a word), it becomes two strokes, *key down*
+//! and *key up*, so each press keeps its own place in the order.
+//!
+//! ## Several displays
+//!
+//! Positions are stored relative to a display. A [`StrokeInput::Display`]
+//! stroke says which display the strokes after it are on; a recording made
+//! across displays has one wherever the pointer moved to another display.
+//! Strokes before the first one (recordings from older versions) use global
+//! coordinates.
 
 use serde::{Deserialize, Serialize};
 
-use crate::geom::Point;
+use crate::geom::{Displays, Point};
 use crate::input::{Button, GamepadAxis, GamepadButton, InputEvent, Key, MouseButton};
 
 /// Mouse samples closer together than this are merged while recording.
@@ -107,11 +122,42 @@ pub enum StrokeInput {
         axis: GamepadAxis,
         value: f32,
     },
+    /// A key pressed while other inputs happen; released by a later `KeyUp`.
+    KeyDown {
+        key: Key,
+    },
+    KeyUp {
+        key: Key,
+    },
+    /// A mouse button pressed while other inputs happen; released by a later `MouseUp`.
+    MouseDown {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        here: bool,
+    },
+    MouseUp {
+        button: MouseButton,
+        x: i32,
+        y: i32,
+        #[serde(default, skip_serializing_if = "is_false")]
+        here: bool,
+    },
+    /// The strokes after this one are on this display (0 = primary).
+    Display {
+        index: u8,
+    },
 }
 
 impl StrokeInput {
     pub fn kind_label(&self) -> &'static str {
         match self {
+            StrokeInput::KeyDown { .. } => "Key down",
+            StrokeInput::KeyUp { .. } => "Key up",
+            StrokeInput::MouseDown { .. } => "Button down",
+            StrokeInput::MouseUp { .. } => "Button up",
+            StrokeInput::Display { .. } => "Display",
             StrokeInput::Key { .. } => "Key",
             StrokeInput::Mouse { end: Some(_), .. } => "Drag",
             StrokeInput::Mouse { .. } => "Click",
@@ -125,7 +171,28 @@ impl StrokeInput {
 
     /// Whether the stroke has a meaningful hold time.
     pub fn is_held(&self) -> bool {
-        !matches!(self, StrokeInput::Scroll { .. } | StrokeInput::PadAxis { .. })
+        matches!(
+            self,
+            StrokeInput::Key { .. }
+                | StrokeInput::Mouse { .. }
+                | StrokeInput::PadButton { .. }
+                | StrokeInput::Move { .. }
+                | StrokeInput::Look { .. }
+        )
+    }
+
+    /// Whether this stroke presses something (as opposed to moving, releasing
+    /// or marking a display).
+    fn is_press(&self) -> bool {
+        matches!(
+            self,
+            StrokeInput::Key { .. }
+                | StrokeInput::Mouse { .. }
+                | StrokeInput::PadButton { .. }
+                | StrokeInput::KeyDown { .. }
+                | StrokeInput::MouseDown { .. }
+                | StrokeInput::Scroll { .. }
+        )
     }
 }
 
@@ -187,49 +254,232 @@ impl Recording {
 
     /// Keeps only what happens between `start` and `end` (milliseconds), and
     /// makes `start` the new beginning. Inputs held across a cut are shortened.
-    pub fn cut(&mut self, start: f64, end: f64) {
+    pub fn keep_between(&mut self, start: f64, end: f64) {
         let (start, end) = (start.max(0.0), end.max(start));
-        self.strokes.retain(|s| s.at < end && (s.at + s.hold > start || (s.hold == 0.0 && s.at >= start)));
-        for stroke in &mut self.strokes {
-            let (from, to) = (stroke.at.max(start), (stroke.at + stroke.hold).min(end));
-            let shift = (from - stroke.at) as f32;
-            match &mut stroke.input {
-                StrokeInput::Move { path } => {
-                    path.retain(|p| stroke.at + f64::from(p.0) >= from && stroke.at + f64::from(p.0) <= to);
-                    path.iter_mut().for_each(|p| p.0 -= shift);
+        // The display in effect at `start` stays in effect.
+        let display_before = self
+            .strokes
+            .iter()
+            .filter(|s| s.at < start)
+            .filter_map(|s| match s.input {
+                StrokeInput::Display { index } => Some((s.at, index)),
+                _ => None,
+            })
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, index)| index);
+        // A key held down across `start` is pressed at the new beginning.
+        self.normalize();
+        let mut downs: Vec<usize> = Vec::new();
+        for i in 0..self.strokes.len() {
+            match self.strokes[i].input {
+                StrokeInput::KeyDown { .. } | StrokeInput::MouseDown { .. } => downs.push(i),
+                StrokeInput::KeyUp { key } => {
+                    let found = downs
+                        .iter()
+                        .position(|&d| matches!(self.strokes[d].input, StrokeInput::KeyDown { key: k } if k == key));
+                    if let Some(position) = found {
+                        let down = downs.remove(position);
+                        if self.strokes[down].at < start && self.strokes[i].at >= start {
+                            self.strokes[down].at = start;
+                        }
+                    }
                 }
-                StrokeInput::Look { path } => {
-                    path.retain(|p| stroke.at + f64::from(p.0) >= from && stroke.at + f64::from(p.0) <= to);
-                    path.iter_mut().for_each(|p| p.0 -= shift);
+                StrokeInput::MouseUp { button, .. } => {
+                    let found = downs.iter().position(
+                        |&d| matches!(self.strokes[d].input, StrokeInput::MouseDown { button: b, .. } if b == button),
+                    );
+                    if let Some(position) = found {
+                        let down = downs.remove(position);
+                        if self.strokes[down].at < start && self.strokes[i].at >= start {
+                            self.strokes[down].at = start;
+                        }
+                    }
                 }
                 _ => {}
             }
+        }
+        self.strokes.retain(|s| {
+            !matches!(s.input, StrokeInput::Display { .. })
+                && s.at < end
+                && (s.at + s.hold > start || (s.hold == 0.0 && s.at >= start))
+                || matches!(s.input, StrokeInput::Display { .. }) && s.at >= start && s.at < end
+        });
+        for stroke in &mut self.strokes {
+            let (from, to) = (stroke.at.max(start), (stroke.at + stroke.hold).min(end));
+            clip_path(stroke, from, to);
             stroke.at = from - start;
             stroke.hold = (to - from).max(0.0);
         }
+        if let Some(index) = display_before {
+            self.strokes.insert(0, Stroke { at: 0.0, hold: 0.0, input: StrokeInput::Display { index } });
+        }
+        self.drop_empty_paths();
+        self.duration_ms = (end - start).min(self.duration_ms - start).max(self.end_time());
+        self.repair();
+    }
+
+    /// Removes what happens between `start` and `end` and closes the gap:
+    /// everything after `end` happens `end - start` earlier.
+    pub fn remove_between(&mut self, start: f64, end: f64) {
+        let (start, end) = (start.max(0.0), end.max(start));
+        let gap = end - start;
+        let mut kept = Vec::with_capacity(self.strokes.len());
+        for mut stroke in std::mem::take(&mut self.strokes) {
+            let (a, b) = (stroke.at, stroke.at + stroke.hold);
+            if let StrokeInput::Display { .. } = stroke.input {
+                // A display change inside the gap still applies after it.
+                stroke.at = if a >= end { a - gap } else { a.min(start) };
+                kept.push(stroke);
+                continue;
+            }
+            if a >= start && b <= end && !(stroke.hold == 0.0 && a >= end) {
+                continue; // entirely inside the gap
+            }
+            if a >= end {
+                stroke.at -= gap;
+            } else if b > start {
+                // Held across the gap: it loses the part inside it.
+                let overlap = b.min(end) - a.max(start);
+                if let StrokeInput::Move { path } = &mut stroke.input {
+                    remove_path_span(path, (start - a) as f32, (end - a) as f32);
+                }
+                if let StrokeInput::Look { path } = &mut stroke.input {
+                    remove_look_span(path, (start - a) as f32, (end - a) as f32);
+                }
+                if a > start {
+                    stroke.at = start;
+                }
+                stroke.hold = (stroke.hold - overlap.max(0.0)).max(0.0);
+            }
+            kept.push(stroke);
+        }
+        self.strokes = kept;
+        self.drop_empty_paths();
+        self.normalize();
+        self.duration_ms = (self.duration_ms - gap).max(self.end_time());
+        self.repair();
+    }
+
+    fn drop_empty_paths(&mut self) {
         self.strokes.retain(|s| match &s.input {
             StrokeInput::Move { path } => !path.is_empty(),
             StrokeInput::Look { path } => !path.is_empty(),
             _ => true,
         });
-        self.duration_ms = (end - start).min(self.duration_ms - start).max(self.end_time());
+    }
+
+    /// After editing: every *up* has a *down* before it, and every *down* is
+    /// released again by the end of the recording.
+    pub fn repair(&mut self) {
+        self.normalize();
+        let mut held_keys: Vec<Key> = Vec::new();
+        let mut held_buttons: Vec<MouseButton> = Vec::new();
+        self.strokes.retain(|s| match s.input {
+            StrokeInput::KeyDown { key } => {
+                held_keys.push(key);
+                true
+            }
+            StrokeInput::KeyUp { key } => match held_keys.iter().position(|k| *k == key) {
+                Some(i) => {
+                    held_keys.remove(i);
+                    true
+                }
+                None => false,
+            },
+            StrokeInput::MouseDown { button, .. } => {
+                held_buttons.push(button);
+                true
+            }
+            StrokeInput::MouseUp { button, .. } => match held_buttons.iter().position(|b| *b == button) {
+                Some(i) => {
+                    held_buttons.remove(i);
+                    true
+                }
+                None => false,
+            },
+            _ => true,
+        });
+        let end = self.duration_ms.max(self.end_time());
+        for key in held_keys {
+            self.strokes.push(Stroke { at: end, hold: 0.0, input: StrokeInput::KeyUp { key } });
+        }
+        for button in held_buttons {
+            self.strokes.push(Stroke {
+                at: end,
+                hold: 0.0,
+                input: StrokeInput::MouseUp { button, x: 0, y: 0, here: true },
+            });
+        }
+    }
+
+    /// Turns a held key or button into *down* and *up* strokes, or (if the
+    /// stroke is a *down*) does nothing. Returns whether anything changed.
+    pub fn split_hold(&mut self, index: usize) -> bool {
+        let Some(stroke) = self.strokes.get(index).cloned() else { return false };
+        let release_at = stroke.at + stroke.hold;
+        let (down, up) = match stroke.input {
+            StrokeInput::Key { key } => (StrokeInput::KeyDown { key }, StrokeInput::KeyUp { key }),
+            StrokeInput::Mouse { button, x, y, end, here } => {
+                let release = end.unwrap_or(Point { x, y, display: None });
+                (
+                    StrokeInput::MouseDown { button, x, y, here },
+                    StrokeInput::MouseUp { button, x: release.x, y: release.y, here },
+                )
+            }
+            _ => return false,
+        };
+        self.strokes[index] = Stroke { at: stroke.at, hold: 0.0, input: down };
+        self.strokes.push(Stroke { at: release_at, hold: 0.0, input: up });
+        self.normalize();
+        true
     }
 
     /// Flattens the strokes into the exact sequence of timed events to send,
-    /// replaying movement as recorded.
+    /// replaying movement as recorded, with display-relative positions
+    /// placed on `displays`.
     pub fn timeline(&self, include_moves: bool) -> Vec<(f64, InputEvent)> {
-        self.timeline_with(include_moves, MouseReplay::Recorded)
+        self.timeline_with(include_moves, MouseReplay::Recorded, &Displays::default())
     }
 
     /// Flattens the strokes into the exact sequence of timed events to send:
     /// every press, every release, every pointer sample, ordered by time.
-    pub fn timeline_with(&self, include_moves: bool, mouse: MouseReplay) -> Vec<(f64, InputEvent)> {
+    pub fn timeline_with(
+        &self,
+        include_moves: bool,
+        mouse: MouseReplay,
+        displays: &Displays,
+    ) -> Vec<(f64, InputEvent)> {
         let mut events = Vec::with_capacity(self.strokes.len() * 2);
         // Where an absolute path last left the pointer, for converting to relative motion.
         let mut last: Option<(i32, i32)> = None;
-        for stroke in &self.strokes {
+        // Strokes are ordered by time, so the display in effect is known as they go by.
+        let mut strokes: Vec<&Stroke> = self.strokes.iter().collect();
+        strokes.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let mut display: Option<u8> = None;
+        let place = |display: Option<u8>, x: i32, y: i32| {
+            let p = displays.to_global(Point { x, y, display });
+            (p.x, p.y)
+        };
+        for stroke in strokes {
             let (start, end) = (stroke.at, stroke.at + stroke.hold);
             match &stroke.input {
+                StrokeInput::Display { index } => display = Some(*index),
+                StrokeInput::KeyDown { key } => events.push((start, InputEvent::KeyDown { key: *key })),
+                StrokeInput::KeyUp { key } => events.push((start, InputEvent::KeyUp { key: *key })),
+                StrokeInput::MouseDown { button, x, y, here } => {
+                    if !(*here || mouse == MouseReplay::Relative) {
+                        let (x, y) = place(display, *x, *y);
+                        events.push((start, InputEvent::MoveTo { x, y }));
+                    }
+                    events.push((start, InputEvent::ButtonDown { button: *button }));
+                }
+                StrokeInput::MouseUp { button, x, y, here } => {
+                    if !(*here || mouse == MouseReplay::Relative) {
+                        let (x, y) = place(display, *x, *y);
+                        events.push((start, InputEvent::MoveTo { x, y }));
+                    }
+                    events.push((start, InputEvent::ButtonUp { button: *button }));
+                }
                 StrokeInput::Key { key } => {
                     events.push((start, InputEvent::KeyDown { key: *key }));
                     events.push((end, InputEvent::KeyUp { key: *key }));
@@ -239,17 +489,20 @@ impl Recording {
                     // movement strokes were not recorded or are skipped.
                     let stay = *here || mouse == MouseReplay::Relative;
                     if !stay {
-                        events.push((start, InputEvent::MoveTo { x: *x, y: *y }));
+                        let (x, y) = place(display, *x, *y);
+                        events.push((start, InputEvent::MoveTo { x, y }));
                     }
                     events.push((start, InputEvent::ButtonDown { button: *button }));
                     if let (Some(p), false) = (release_at, stay) {
-                        events.push((end, InputEvent::MoveTo { x: p.x, y: p.y }));
+                        let (x, y) = place(display, p.x, p.y);
+                        events.push((end, InputEvent::MoveTo { x, y }));
                     }
                     events.push((end, InputEvent::ButtonUp { button: *button }));
                 }
                 StrokeInput::Move { path } if include_moves => match mouse {
                     MouseReplay::Relative => {
                         for &PathPoint(dt, x, y) in path {
+                            let (x, y) = place(display, x, y);
                             let (dx, dy) = last.map_or((0, 0), |(lx, ly)| (x - lx, y - ly));
                             last = Some((x, y));
                             if (dx, dy) != (0, 0) {
@@ -258,10 +511,10 @@ impl Recording {
                         }
                     }
                     _ => {
-                        events.extend(
-                            path.iter()
-                                .map(|&PathPoint(dt, x, y)| (start + f64::from(dt), InputEvent::MoveTo { x, y })),
-                        );
+                        events.extend(path.iter().map(|&PathPoint(dt, x, y)| {
+                            let (x, y) = place(display, x, y);
+                            (start + f64::from(dt), InputEvent::MoveTo { x, y })
+                        }));
                     }
                 },
                 StrokeInput::Look { path } if include_moves && mouse != MouseReplay::Absolute => {
@@ -335,8 +588,9 @@ impl Recording {
         let (mut keys, mut clicks, mut moves, mut looks, mut scrolls, mut pad) = (0, 0, 0, 0, 0, 0);
         for stroke in &self.strokes {
             match stroke.input {
-                StrokeInput::Key { .. } => keys += 1,
-                StrokeInput::Mouse { .. } => clicks += 1,
+                StrokeInput::Key { .. } | StrokeInput::KeyDown { .. } => keys += 1,
+                StrokeInput::Mouse { .. } | StrokeInput::MouseDown { .. } => clicks += 1,
+                StrokeInput::KeyUp { .. } | StrokeInput::MouseUp { .. } | StrokeInput::Display { .. } => {}
                 StrokeInput::Move { .. } => moves += 1,
                 StrokeInput::Look { .. } => looks += 1,
                 StrokeInput::Scroll { .. } => scrolls += 1,
@@ -357,6 +611,37 @@ impl Recording {
         .collect();
         if parts.is_empty() { "Empty".to_owned() } else { parts.join(" · ") }
     }
+}
+
+/// Keeps the part of a movement stroke between `from` and `to` (absolute
+/// milliseconds) and makes its times relative to `from`.
+fn clip_path(stroke: &mut Stroke, from: f64, to: f64) {
+    let shift = (from - stroke.at) as f32;
+    let inside = |at: f64, dt: f32| at + f64::from(dt) >= from && at + f64::from(dt) <= to;
+    let at = stroke.at;
+    match &mut stroke.input {
+        StrokeInput::Move { path } => {
+            path.retain(|p| inside(at, p.0));
+            path.iter_mut().for_each(|p| p.0 -= shift);
+        }
+        StrokeInput::Look { path } => {
+            path.retain(|p| inside(at, p.0));
+            path.iter_mut().for_each(|p| p.0 -= shift);
+        }
+        _ => {}
+    }
+}
+
+/// Removes the samples between `from` and `to` (stroke-relative) and moves
+/// the later ones earlier by the gap.
+fn remove_path_span(path: &mut Vec<PathPoint>, from: f32, to: f32) {
+    path.retain(|p| p.0 < from || p.0 > to);
+    path.iter_mut().filter(|p| p.0 > to).for_each(|p| p.0 -= to - from);
+}
+
+fn remove_look_span(path: &mut Vec<LookPoint>, from: f32, to: f32) {
+    path.retain(|p| p.0 < from || p.0 > to);
+    path.iter_mut().filter(|p| p.0 > to).for_each(|p| p.0 -= to - from);
 }
 
 /// Clicks inside a stretch where the pointer was locked happen where the pointer is.
@@ -431,10 +716,16 @@ pub struct RecordingBuilder {
     options: RecordOptions,
     /// Buttons to leave out entirely – typically the record hotkey itself.
     ignored: Vec<Button>,
+    /// Where the pointer is, in global coordinates.
     cursor: Point,
+    /// The displays, for storing positions relative to the one they are on.
+    displays: Displays,
+    /// The display the latest strokes are on.
+    display: Option<u8>,
     strokes: Vec<Stroke>,
-    /// Buttons currently held, with the index of the stroke they opened.
-    open: Vec<(Button, usize)>,
+    /// Buttons currently held, with the index of the stroke they opened and
+    /// the display it was opened on.
+    open: Vec<(Button, usize, Option<u8>)>,
     /// The move stroke currently being extended, and when it was last extended.
     path: Option<(usize, f64)>,
     /// The newest pointer sample that thinning skipped. It is written out when
@@ -449,12 +740,15 @@ pub struct RecordingBuilder {
 
 impl RecordingBuilder {
     /// `cursor` is where the pointer is right now, so that a click made before
-    /// the first movement is still recorded at the right place.
-    pub fn new(options: RecordOptions, ignored: Vec<Button>, cursor: Point) -> Self {
+    /// the first movement is still recorded at the right place. With no
+    /// `displays`, positions are recorded as global coordinates.
+    pub fn new(options: RecordOptions, ignored: Vec<Button>, cursor: Point, displays: Displays) -> Self {
         Self {
             options,
             ignored: ignored.into_iter().map(Button::canonical).collect(),
             cursor,
+            displays,
+            display: None,
             strokes: Vec::new(),
             open: Vec::new(),
             path: None,
@@ -499,33 +793,53 @@ impl RecordingBuilder {
         }
     }
 
+    /// A global position as stored: relative to its display, with a
+    /// display stroke first when the pointer has moved to another display.
+    fn place(&mut self, t: f64, global: Point) -> (i32, i32) {
+        let Some(display) = self.displays.index_of(global) else {
+            return (global.x, global.y);
+        };
+        if self.display != Some(display) {
+            // A movement does not continue across displays.
+            self.flush_skipped();
+            self.path = None;
+            self.display = Some(display);
+            self.strokes.push(Stroke { at: t, hold: 0.0, input: StrokeInput::Display { index: display } });
+        }
+        let origin = self.displays.get(display).map_or((0, 0), |r| (r.x, r.y));
+        (global.x - origin.0, global.y - origin.1)
+    }
+
     fn on_button(&mut self, t: f64, button: Button, is_down: bool) {
         if !self.wants(button) {
             return;
         }
         if is_down {
-            if self.open.iter().any(|(b, _)| *b == button) {
+            if self.open.iter().any(|(b, ..)| *b == button) {
                 return; // keyboard auto-repeat
             }
             let here = self.options.mouse_mode == MouseRecording::Relative;
             let input = match button {
                 Button::Key(key) => StrokeInput::Key { key },
                 Button::Mouse(button) => {
-                    StrokeInput::Mouse { button, x: self.cursor.x, y: self.cursor.y, end: None, here }
+                    let (x, y) = self.place(t, self.cursor);
+                    StrokeInput::Mouse { button, x, y, end: None, here }
                 }
                 Button::Pad(button) => StrokeInput::PadButton { button },
             };
-            self.open.push((button, self.strokes.len()));
+            self.open.push((button, self.strokes.len(), self.display));
             self.strokes.push(Stroke { at: t, hold: 0.0, input });
-        } else if let Some(pos) = self.open.iter().position(|(b, _)| *b == button) {
-            let (_, index) = self.open.swap_remove(pos);
-            self.close(index, t);
+        } else if let Some(pos) = self.open.iter().position(|(b, ..)| *b == button) {
+            let (_, index, display) = self.open.swap_remove(pos);
+            self.close(index, t, display);
         }
         // A release without a recorded press was held before recording began: skip it.
     }
 
-    fn close(&mut self, index: usize, t: f64) {
-        let cursor = self.cursor;
+    fn close(&mut self, index: usize, t: f64, display: Option<u8>) {
+        // The release position is relative to the display the press was on.
+        let origin = display.and_then(|d| self.displays.get(d)).map_or((0, 0), |r| (r.x, r.y));
+        let cursor = Point::new(self.cursor.x - origin.0, self.cursor.y - origin.1);
         let stroke = &mut self.strokes[index];
         stroke.hold = (t - stroke.at).max(0.0);
         if let StrokeInput::Mouse { x, y, end, here: false, .. } = &mut stroke.input
@@ -541,6 +855,7 @@ impl RecordingBuilder {
         if !self.options.mouse_moves || self.options.mouse_mode == MouseRecording::Relative {
             return;
         }
+        let (x, y) = self.place(t, self.cursor);
         if let Some((index, last)) = self.path
             && t - last <= PATH_GAP_MS
         {
@@ -624,12 +939,13 @@ impl RecordingBuilder {
     pub fn finish(mut self, t: f64, screen: Option<(u32, u32)>) -> Recording {
         self.flush_skipped();
         self.flush_look();
-        for (_, index) in std::mem::take(&mut self.open) {
-            self.close(index, t);
+        for (_, index, display) in std::mem::take(&mut self.open) {
+            self.close(index, t, display);
         }
         if self.options.mouse_mode == MouseRecording::Smart {
             resolve_smart(&mut self.strokes);
         }
+        split_overlapping(&mut self.strokes);
         let mut recording = Recording { duration_ms: t.max(0.0), screen, strokes: self.strokes };
         recording.normalize();
         if self.options.trim_start {
@@ -637,6 +953,38 @@ impl RecordingBuilder {
         }
         recording
     }
+}
+
+/// Keys and buttons that were held while something else was pressed become
+/// *down* and *up* strokes, so every press keeps its own place in the order.
+fn split_overlapping(strokes: &mut Vec<Stroke>) {
+    let presses: Vec<f64> = strokes.iter().filter(|s| s.input.is_press()).map(|s| s.at).collect();
+    let mut split = Vec::with_capacity(strokes.len());
+    for stroke in std::mem::take(strokes) {
+        let (start, end) = (stroke.at, stroke.at + stroke.hold);
+        let overlapped = presses.iter().any(|&at| at > start && at < end);
+        let pair = match (&stroke.input, overlapped) {
+            (StrokeInput::Key { key }, true) => {
+                Some((StrokeInput::KeyDown { key: *key }, StrokeInput::KeyUp { key: *key }))
+            }
+            (StrokeInput::Mouse { button, x, y, end: release, here }, true) => {
+                let release = release.unwrap_or(Point::new(*x, *y));
+                Some((
+                    StrokeInput::MouseDown { button: *button, x: *x, y: *y, here: *here },
+                    StrokeInput::MouseUp { button: *button, x: release.x, y: release.y, here: *here },
+                ))
+            }
+            _ => None,
+        };
+        match pair {
+            Some((down, up)) => {
+                split.push(Stroke { at: start, hold: 0.0, input: down });
+                split.push(Stroke { at: end, hold: 0.0, input: up });
+            }
+            None => split.push(stroke),
+        }
+    }
+    *strokes = split;
 }
 
 /// For each stretch of relative motion, decides whether the pointer really
@@ -686,10 +1034,11 @@ fn resolve_smart(strokes: &mut Vec<Stroke>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geom::Rect;
 
     fn builder() -> RecordingBuilder {
         let options = RecordOptions { trim_start: false, ..RecordOptions::default() };
-        RecordingBuilder::new(options, vec![Button::Key(Key::F9)], Point::new(10, 10))
+        RecordingBuilder::new(options, vec![Button::Key(Key::F9)], Point::new(10, 10), Displays::default())
     }
 
     #[test]
@@ -758,7 +1107,7 @@ mod tests {
 
     #[test]
     fn held_keys_are_released_at_the_end_and_start_is_trimmed() {
-        let mut b = RecordingBuilder::new(RecordOptions::default(), vec![], Point::default());
+        let mut b = RecordingBuilder::new(RecordOptions::default(), vec![], Point::default(), Displays::default());
         b.push(1000.0, &InputEvent::KeyDown { key: Key::KeyW });
         let rec = b.finish(1500.0, None);
         assert_eq!(rec.strokes[0].at, 0.0);
@@ -777,7 +1126,7 @@ mod tests {
     /// The pointer stays put (a game holds it) while the mouse moves a lot.
     fn locked_session(mode: MouseRecording) -> Recording {
         let options = RecordOptions { trim_start: false, mouse_mode: mode, ..RecordOptions::default() };
-        let mut b = RecordingBuilder::new(options, vec![], Point::new(960, 540));
+        let mut b = RecordingBuilder::new(options, vec![], Point::new(960, 540), Displays::default());
         for i in 0..60 {
             let t = f64::from(i) * 2.0;
             b.push(t, &InputEvent::MoveBy { dx: 3, dy: -1 });
@@ -813,7 +1162,7 @@ mod tests {
     #[test]
     fn smart_recording_keeps_positions_for_ordinary_pointer_use() {
         let options = RecordOptions { trim_start: false, ..RecordOptions::default() };
-        let mut b = RecordingBuilder::new(options, vec![], Point::new(0, 0));
+        let mut b = RecordingBuilder::new(options, vec![], Point::new(0, 0), Displays::default());
         for i in 0..60 {
             let t = f64::from(i) * 2.0;
             b.push(t, &InputEvent::MoveBy { dx: 3, dy: 0 });
@@ -869,7 +1218,7 @@ mod tests {
             }],
         };
         let events: Vec<InputEvent> =
-            rec.timeline_with(true, MouseReplay::Relative).into_iter().map(|(_, e)| e).collect();
+            rec.timeline_with(true, MouseReplay::Relative, &Displays::default()).into_iter().map(|(_, e)| e).collect();
         assert_eq!(events, vec![InputEvent::MoveBy { dx: 10, dy: -5 }, InputEvent::MoveBy { dx: 2, dy: 0 }]);
     }
 
@@ -884,9 +1233,109 @@ mod tests {
                 Stroke { at: 900.0, hold: 10.0, input: StrokeInput::Key { key: Key::KeyC } },
             ],
         };
-        rec.cut(200.0, 500.0);
+        rec.keep_between(200.0, 500.0);
         assert_eq!(rec.strokes.len(), 1);
         assert_eq!((rec.strokes[0].at, rec.strokes[0].hold), (100.0, 200.0));
         assert_eq!(rec.duration_ms, 300.0);
+    }
+
+    #[test]
+    fn keys_held_while_others_are_pressed_become_down_and_up() {
+        let mut b = builder();
+        b.push(0.0, &InputEvent::KeyDown { key: Key::ShiftLeft });
+        b.push(40.0, &InputEvent::KeyDown { key: Key::KeyA });
+        b.push(60.0, &InputEvent::KeyUp { key: Key::KeyA });
+        b.push(90.0, &InputEvent::KeyUp { key: Key::ShiftLeft });
+        b.push(200.0, &InputEvent::KeyDown { key: Key::KeyB });
+        b.push(250.0, &InputEvent::KeyUp { key: Key::KeyB });
+        let rec = b.finish(300.0, None);
+        let kinds: Vec<&str> = rec.strokes.iter().map(|s| s.input.kind_label()).collect();
+        assert_eq!(kinds, ["Key down", "Key", "Key up", "Key"], "Shift was held across A; B was alone");
+        let events: Vec<InputEvent> = rec.timeline(true).into_iter().map(|(_, e)| e).collect();
+        assert_eq!(
+            events,
+            [
+                InputEvent::KeyDown { key: Key::ShiftLeft },
+                InputEvent::KeyDown { key: Key::KeyA },
+                InputEvent::KeyUp { key: Key::KeyA },
+                InputEvent::KeyUp { key: Key::ShiftLeft },
+                InputEvent::KeyDown { key: Key::KeyB },
+                InputEvent::KeyUp { key: Key::KeyB },
+            ]
+        );
+    }
+
+    #[test]
+    fn recordings_note_which_display_the_pointer_is_on() {
+        let displays = Displays::new(vec![Rect::new(0, 0, 1920, 1080), Rect::new(1920, 0, 1280, 1024)]);
+        let options = RecordOptions { trim_start: false, ..RecordOptions::default() };
+        let mut b = RecordingBuilder::new(options, vec![], Point::new(100, 100), displays.clone());
+        b.push(0.0, &InputEvent::ButtonDown { button: MouseButton::Left });
+        b.push(30.0, &InputEvent::ButtonUp { button: MouseButton::Left });
+        b.push(100.0, &InputEvent::MoveTo { x: 2000, y: 50 });
+        b.push(150.0, &InputEvent::ButtonDown { button: MouseButton::Left });
+        b.push(170.0, &InputEvent::ButtonUp { button: MouseButton::Left });
+        let rec = b.finish(200.0, None);
+        let rows: Vec<StrokeInput> = rec.strokes.iter().map(|s| s.input.clone()).collect();
+        assert_eq!(rows[0], StrokeInput::Display { index: 0 });
+        assert!(rows.contains(&StrokeInput::Display { index: 1 }));
+        assert!(
+            rows.iter().any(|r| matches!(r, StrokeInput::Mouse { x: 80, y: 50, .. })),
+            "positions on the second display are relative to it: {rows:?}"
+        );
+        // Played back on the same displays, the clicks land where they were made.
+        let moves: Vec<InputEvent> = rec
+            .timeline_with(false, MouseReplay::Recorded, &displays)
+            .into_iter()
+            .map(|(_, e)| e)
+            .filter(|e| matches!(e, InputEvent::MoveTo { .. }))
+            .collect();
+        assert_eq!(moves, [InputEvent::MoveTo { x: 100, y: 100 }, InputEvent::MoveTo { x: 2000, y: 50 }]);
+    }
+
+    #[test]
+    fn removing_a_stretch_closes_the_gap_and_keeps_the_display() {
+        let mut rec = Recording {
+            duration_ms: 1000.0,
+            screen: None,
+            strokes: vec![
+                Stroke { at: 0.0, hold: 0.0, input: StrokeInput::Display { index: 0 } },
+                Stroke { at: 100.0, hold: 50.0, input: StrokeInput::Key { key: Key::KeyA } },
+                Stroke { at: 300.0, hold: 0.0, input: StrokeInput::Display { index: 1 } },
+                Stroke { at: 320.0, hold: 40.0, input: StrokeInput::Key { key: Key::KeyB } },
+                Stroke { at: 600.0, hold: 50.0, input: StrokeInput::Key { key: Key::KeyC } },
+            ],
+        };
+        rec.remove_between(200.0, 500.0);
+        let rows: Vec<(f64, &str)> = rec.strokes.iter().map(|s| (s.at, s.input.kind_label())).collect();
+        assert_eq!(rows, [(0.0, "Display"), (100.0, "Key"), (200.0, "Display"), (300.0, "Key")]);
+        assert_eq!(rec.duration_ms, 700.0);
+
+        // Keeping only the end still knows which display it is on.
+        let mut kept = rec.clone();
+        kept.keep_between(250.0, 700.0);
+        assert_eq!(kept.strokes[0].input, StrokeInput::Display { index: 1 });
+        assert_eq!(kept.strokes[1].at, 50.0);
+    }
+
+    #[test]
+    fn edits_never_leave_a_key_stuck() {
+        let mut rec = Recording {
+            duration_ms: 500.0,
+            screen: None,
+            strokes: vec![
+                Stroke { at: 0.0, hold: 0.0, input: StrokeInput::KeyDown { key: Key::ShiftLeft } },
+                Stroke { at: 100.0, hold: 20.0, input: StrokeInput::Key { key: Key::KeyA } },
+                Stroke { at: 300.0, hold: 0.0, input: StrokeInput::KeyUp { key: Key::ShiftLeft } },
+            ],
+        };
+        // Keeping only the middle: Shift is pressed at the new start and released by the end.
+        let mut middle = rec.clone();
+        middle.keep_between(50.0, 200.0);
+        let rows: Vec<&str> = middle.strokes.iter().map(|s| s.input.kind_label()).collect();
+        assert_eq!(rows, ["Key down", "Key", "Key up"]);
+        // Removing the release: one is added at the end.
+        rec.remove_between(250.0, 350.0);
+        assert!(matches!(rec.strokes.last().unwrap().input, StrokeInput::KeyUp { key: Key::ShiftLeft }));
     }
 }

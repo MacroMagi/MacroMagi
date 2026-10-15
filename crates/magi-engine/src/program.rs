@@ -7,33 +7,68 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use magi_audio::Fingerprint;
 use magi_core::assets::AssetStore;
 use magi_core::graph::{Graph, Node, NodeId};
-use magi_core::nodes::{EngineSupport, NodePorts, Registry};
+use magi_core::nodes::flow::DefineParams;
+use magi_core::nodes::{EngineSupport, NodePorts, Registry, ids};
 use magi_core::project::Project;
+use magi_core::variables::{self, Variable};
 use magi_vision::Bitmap;
+use serde_json::{Map, Value};
 
 use crate::EngineError;
 
 pub struct Program {
+    /// The graph as it runs: blocks in disabled groups are disabled.
     pub graph: Graph,
     pub assets: AssetStore,
     pub registry: Arc<Registry>,
+    /// The variables and their starting values.
+    pub variables: Vec<Variable>,
     /// Decoded template images, filled in on first use.
     images: Mutex<HashMap<String, Arc<Bitmap>>>,
+    /// Fingerprints of the sounds listened for, filled in on first use.
+    sounds: Mutex<HashMap<String, Arc<Fingerprint>>>,
 }
 
 impl Program {
     pub fn new(graph: Graph, assets: AssetStore, registry: Arc<Registry>) -> Self {
-        Self { graph, assets, registry, images: Mutex::new(HashMap::new()) }
+        Self {
+            graph: graph.with_groups_applied(),
+            assets,
+            registry,
+            variables: Vec::new(),
+            images: Mutex::new(HashMap::new()),
+            sounds: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn from_project(project: &Project, registry: Arc<Registry>) -> Self {
-        Self::new(project.graph.clone(), project.assets.clone(), registry)
+        let mut program = Self::new(project.graph.clone(), project.assets.clone(), registry);
+        program.variables = project.variables.clone();
+        program
     }
 
     pub fn node(&self, id: NodeId) -> Result<&Node, EngineError> {
         self.graph.node(id).ok_or_else(|| EngineError::new(format!("block #{id} no longer exists")))
+    }
+
+    /// A block's settings as it should run them: defaults filled in, and
+    /// settings bound to variables replaced by the variables' current values.
+    pub fn resolved_params(&self, node: &Node, lookup: impl Fn(&str) -> Option<Value>) -> Map<String, Value> {
+        let defaults = self.registry.get(&node.kind).map(|def| def.default_params()).unwrap_or_default();
+        let mut params = defaults.clone();
+        params.extend(node.params.clone());
+        if variables::has_bindings(&params) { variables::resolve(&params, &defaults, lookup) } else { params }
+    }
+
+    /// The Definition block with this name.
+    pub fn definition(&self, name: &str) -> Option<&Node> {
+        self.graph
+            .nodes()
+            .filter(|node| node.kind == ids::DEFINE)
+            .find(|node| node.params_or_default::<DefineParams>().name == name)
     }
 
     /// The decoded pixels of an image asset.
@@ -51,6 +86,25 @@ impl Program {
         Ok(bitmap)
     }
 
+    /// The fingerprint of a sound asset.
+    pub fn sound(&self, id: &str) -> Result<Arc<Fingerprint>, EngineError> {
+        if id.is_empty() {
+            return Err(EngineError::new("no sound has been chosen"));
+        }
+        let mut cache = self.sounds.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(fingerprint) = cache.get(id) {
+            return Ok(Arc::clone(fingerprint));
+        }
+        let bytes = self.assets.audio(id).ok_or_else(|| EngineError::new(format!("sound `{id}` is missing")))?;
+        let audio = magi_audio::decode(bytes).map_err(|e| EngineError::new(e.to_string()))?;
+        let fingerprint = Arc::new(Fingerprint::of(&audio));
+        if fingerprint.is_empty() {
+            return Err(EngineError::new("the sound to listen for is too short"));
+        }
+        cache.insert(id.to_owned(), Arc::clone(&fingerprint));
+        Ok(fingerprint)
+    }
+
     /// Whether any enabled node can only be run by the Python engine.
     pub fn needs_python(&self) -> bool {
         self.graph
@@ -63,8 +117,9 @@ impl Program {
     ///
     /// Every node carries its complete parameters (defaults filled in) and the
     /// output a disabled node passes execution to, so the runtime needs no
-    /// copy of the node definitions. Assets are listed by name so scripts can
-    /// refer to them.
+    /// copy of the node definitions. Nodes with settings bound to variables
+    /// are marked, so the runtime asks for them to be resolved before running
+    /// such a node. Assets are listed by name so scripts can refer to them.
     pub fn to_python(&self) -> serde_json::Value {
         let nodes: Vec<_> = self
             .graph
@@ -76,6 +131,7 @@ impl Program {
                     "id": node.id,
                     "type": node.kind,
                     "enabled": node.enabled,
+                    "bound": variables::has_bindings(&params),
                     "params": params,
                     "pass_through": pass_through(&self.registry.ports(node)),
                 })

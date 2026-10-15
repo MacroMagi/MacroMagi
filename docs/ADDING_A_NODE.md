@@ -8,7 +8,7 @@ A block has three parts, each in its own place and all keyed by the same id:
 
 There is no fourth step for the user interface. The editor draws the block from its definition and the inspector builds its settings form from its parameters.
 
-This guide adds a **Compare** block: two numbers in, true/false out. The code is a worked example to adapt, not something already in the tree.
+This guide adds an **Order** block: two numbers in, true/false out. The code is a worked example to adapt, not something already in the tree (the real Compare block does more).
 
 ## 1. Define it
 
@@ -17,7 +17,7 @@ Pick an id. Ids are `category.name`, are written into users' files, and never ch
 ```rust
 pub mod ids {
     // …
-    pub const COMPARE: &str = "logic.compare";
+    pub const ORDER: &str = "logic.order";
 }
 ```
 
@@ -26,7 +26,7 @@ Then describe the block in the module for its category – here [`nodes/logic.rs
 ```rust
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CompareOp {
+pub enum OrderOp {
     #[default]
     Less,
     Equal,
@@ -35,8 +35,8 @@ pub enum CompareOp {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct CompareParams {
-    pub op: CompareOp,
+pub struct OrderParams {
+    pub op: OrderOp,
 }
 ```
 
@@ -44,7 +44,7 @@ Register the definition in that module's `register` function:
 
 ```rust
 registry.register(
-    NodeDef::new(ids::COMPARE, "Compare", Category::Logic, "True when A relates to B in the chosen way.")
+    NodeDef::new(ids::ORDER, "Order", Category::Logic, "True when A relates to B in the chosen way.")
         .keywords(&["greater", "less", "equal", "bigger", "smaller"])
         .data_in("a", "A", DataType::Number)
         .data_in("b", "B", DataType::Number)
@@ -54,12 +54,12 @@ registry.register(
             "Comparison",
             ParamKind::choice(&[("less", "A is less than B"), ("equal", "A equals B"), ("greater", "A is greater than B")]),
         ))
-        .defaults(&CompareParams::default())
+        .defaults(&OrderParams::default())
         .summarize(|node, _| {
-            vec![match node.params_or_default::<CompareParams>().op {
-                CompareOp::Less => "A < B".into(),
-                CompareOp::Equal => "A = B".into(),
-                CompareOp::Greater => "A > B".into(),
+            vec![match node.params_or_default::<OrderParams>().op {
+                OrderOp::Less => "A < B".into(),
+                OrderOp::Equal => "A = B".into(),
+                OrderOp::Greater => "A > B".into(),
             }]
         }),
 );
@@ -84,22 +84,23 @@ Run the app. The block is already in the "add block" list, can be wired up, edit
 In [`crates/magi-engine/src/native.rs`](../crates/magi-engine/src/native.rs), register a function in `NativeNodes::builtin`:
 
 ```rust
-nodes.value(ids::COMPARE, compare);
+nodes.value(ids::ORDER, order);
 ```
 
 and write it. A **value** block returns all of its outputs at once:
 
 ```rust
-fn compare(interp: &mut Interp<'_>, node: &Node) -> OpResult<Map<String, Value>> {
-    let p: CompareParams = params(node)?;
+fn order(interp: &mut Interp<'_>, node: &Node) -> OpResult<Map<String, Value>> {
+    // The block's settings, with any that follow a variable already resolved.
+    let p: OrderParams = interp.params(node)?;
     // `input` returns None when nothing is wired to the port.
     let number = |value: Option<Value>| value.and_then(|v| v.as_f64()).unwrap_or(0.0);
     let a = number(interp.input(node, "a")?);
     let b = number(interp.input(node, "b")?);
     let result = match p.op {
-        CompareOp::Less => a < b,
-        CompareOp::Equal => a == b,
-        CompareOp::Greater => a > b,
+        OrderOp::Less => a < b,
+        OrderOp::Equal => a == b,
+        OrderOp::Greater => a > b,
     };
     Ok(single(json!(result)))
 }
@@ -109,7 +110,7 @@ A **flow** block is registered with `nodes.flow(…)` and returns what happens n
 
 ```rust
 fn delay(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
-    let p: DelayParams = params(node)?;
+    let p: DelayParams = interp.params(node)?;
     let ms = interp.cx.jittered(p.ms, p.jitter_ms);
     interp.cx.sleep_ms(ms)?;
     Ok(Next::out())
@@ -127,8 +128,8 @@ Rules that keep blocks well-behaved:
 In the matching module under [`runtime/python/magi/nodes/`](../runtime/python/magi/nodes) – here `logic.py`:
 
 ```python
-@value_node("logic.compare")
-def compare(run, node):
+@value_node("logic.order")
+def order(run, node):
     _, a = run.input(node, "a")        # (wired, value)
     _, b = run.input(node, "b")
     a, b = a or 0, b or 0
@@ -162,17 +163,17 @@ Add a scenario to [`crates/magi-engine/tests/engines.rs`](../crates/magi-engine/
 
 ```rust
 #[test]
-fn compare_orders_numbers() {
+fn order_compares_numbers() {
     let mut b = Builder::new();
     let image = add_target_asset(&mut b.project);
     let start = b.node(ids::START, json!({}));
     let find = b.node(ids::FIND_IMAGE, json!({ "image": image }));
-    let compare = b.node(ids::COMPARE, json!({ "op": "greater" }));
+    let order = b.node(ids::ORDER, json!({ "op": "greater" }));
     let decision = b.node(ids::DECISION, json!({}));
     let yes = b.tap(Key::KeyY);
     b.flow(start, ports::OUT, decision)
-        .wire(find, "score", compare, "a") // similarity of the best match; B is unwired, so 0
-        .wire(compare, "out", decision, "cond:1")
+        .wire(find, "score", order, "a") // similarity of the best match; B is unwired, so 0
+        .wire(order, "out", decision, "cond:1")
         .flow(decision, "case:1", yes);
 
     on_all(&b.project, start, || screen(Some(Point::new(40, 40))), |kind, outcome| {
@@ -204,4 +205,6 @@ cargo test -p magi-engine --test engines
 
 **Something drawn on the block itself**, like the thumbnail on Image Detection or the card on Play Recording. That is the one case with UI code: see `Layout::compute` and `GraphView::show` in `ui/graph.rs`.
 
-**A new capability** (clipboard, sound, …). Add a method to the `Host` trait in `magi-core` (with a default that reports it as unsupported), implement it for `SystemHost` and `SimHost`, add an operation to `ops.rs` and to `perform` in `python.rs`, then write the block on top.
+**Settings that follow variables** need nothing extra: `interp.params` (native) resolves them, and the Python runtime hands each block its settings already resolved. Settings of the kinds `ParamKind::bindable` lists get a link button in the inspector automatically.
+
+**A new capability** (like the clipboard or sound). Add a method to the `Host` trait in `magi-core` (with a default that reports it as unsupported), implement it for `SystemHost` and `SimHost`, add an operation to `ops.rs` and to `perform` in `python.rs`, then write the block on top.

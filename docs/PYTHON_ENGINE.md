@@ -42,11 +42,22 @@ if magi.vars["runs"] % 3 == 0:
 result = magi.vars["runs"]
 ```
 
+### Variables
+
+`magi.vars` are the macro's [variables](../README.md#variables) – the same ones the Variables panel lists and Set Variable, Counter and the blocks' linked settings use. Changing one from a script changes it for every block that follows it, at once:
+
+```python
+# Make every Wait block that follows "pause" a bit shorter.
+magi.vars["pause"] = max(50, magi.vars.get("pause", 400) - 25)
+```
+
+The block's **Store the result in** setting also writes `result` into a variable when the script ends, so a script can feed a variable without touching `magi.vars` at all.
+
 Things to know:
 
 - `print()` writes to the MacroMagi console.
 - An exception ends the run and is shown in the console with its line number, against the block.
-- Each run of a Start block is its own thread. `magi.vars` is shared between all of them; use your own lock if several runs change the same entry.
+- Each run of a Start block is its own thread. `magi.vars` is shared between all of them, and each read or write is one step; if several runs read, change and write back the same variable, use your own lock.
 - In long loops of your own, call `magi.sleep()` now and then or check `magi.stopped`. A script that never does cannot be asked to stop; after a few seconds MacroMagi restarts the Python engine to end it.
 - You can `import` anything your Python has installed.
 - Python Script blocks only run on the Python engine. On the native engine they report an error.
@@ -63,7 +74,7 @@ Positions are screen pixels. Times are milliseconds.
 | `magi.stop()` | Ends this Start block's run. |
 | `magi.stop_all()` | Ends every run of the macro. |
 | `magi.stopped` | `True` once a stop has been requested. |
-| `magi.vars` | A dictionary shared by every script block of the macro. |
+| `magi.vars` | The macro's variables, shared with its blocks: `magi.vars["name"]` reads one, assigning changes it. Also `get`, `in`, `keys()`, `items()`. |
 | `magi.log(*values)` | Writes a line to the console. |
 
 ### Keyboard

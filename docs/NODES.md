@@ -8,7 +8,21 @@ The `id` under each heading is the block's type as written in `.magi` files.
 
 ## Flow
 
-Where a macro starts, waits, loops, branches and stops.
+Where a macro starts, waits, loops, branches and stops, and the pieces it is built from.
+
+### Function
+
+`flow.call`
+
+Runs the blocks under a Definition block, then carries on from here.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Input** (any value)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Definition | definition | none |  |
 
 ### Decision
 
@@ -23,6 +37,19 @@ Chooses which branch to follow. Each case has a condition input on the left; the
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Cases | list of cases | one case |  |
+
+### Definition
+
+`flow.define`
+
+The start of a reusable piece of a macro. Build it once under this block, then run it from anywhere with a Function block. Never started by Run or a hotkey.
+
+- Flow out: yes
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Name | text | My function |  |
+| Input goes into variable | variable | none | What is wired into a Function block's Input is stored in this variable before the definition runs. |
 
 ### Wait
 
@@ -52,6 +79,22 @@ Writes a line to the console. Handy for checking which path a macro took.
 | --- | --- | --- | --- |
 | Message | text | Reached this step |  |
 
+### Rate
+
+`flow.rate`
+
+Does a list of inputs one after another, a set time apart – a whole chain of Input and Wait blocks in one. The time can come from a variable or be wired in.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Rate (ms)** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Time between steps | duration | 100 ms |  |
+| Hold taps for | duration | 30 ms |  |
+| Steps | list of inputs | one left click |  |
+
 ### Repeat
 
 `flow.repeat`
@@ -60,10 +103,11 @@ Runs the blocks under “Loop” over and over, then continues from “Done”. 
 
 - Flow in: yes
 - Flow out: **Loop**, **Done**
+- Value inputs: **Condition** (true/false)
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Repeat | choice | A number of times | Options: A number of times; Until stopped. |
+| Repeat | choice | A number of times | Options: A number of times; Until stopped; Until the condition is true; While the condition is true. |
 | Times | whole number | 10 × |  |
 
 ### Start
@@ -84,13 +128,14 @@ Where a macro begins. A macro can have several Start blocks; each one runs indep
 
 `flow.stop`
 
-Ends the macro here.
+Ends the macro here – or only this branch, or the loop it is in, or jumps to another block.
 
 - Flow in: yes
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Stop | choice | This Start block only | Options: This Start block only; The whole macro. |
+| Stop | choice | This Start block | Options: This Start block; The whole macro; This branch – go on with the loop's next round; The loop – continue from its Done; Here, and continue from another block. |
+| Continue from | block | none | The block to run next. |
 
 ### Wait Until
 
@@ -172,6 +217,7 @@ Looks for a colour on screen. “Found” is true when at least one pixel in the
 | Color | colour | #FF3B30 |  |
 | Tolerance | whole number | 16 | How far red, green and blue may each be off and still count as a match. |
 | Search area | screen area | whole screen |  |
+| Display | display | 1 (primary) | The display searched when there is no search area. |
 
 ### Image Detection
 
@@ -185,7 +231,43 @@ Looks for an image on screen. “Found” is true when a match at least as simil
 | --- | --- | --- | --- |
 | Image | image | none |  |
 | Search area | screen area | whole screen | A smaller area is faster and avoids false matches elsewhere on screen. |
+| Display | display | 1 (primary) | The display searched when there is no search area. |
 | Accuracy | percentage | 80% | How closely the screen must match the image. 100% demands a pixel-perfect match. |
+
+## Sound
+
+Listening to what the computer plays, or to the microphone. Value blocks, like the vision blocks.
+
+### Sound Detection
+
+`sound.level`
+
+Listens for sound that is loud enough – and, optionally, within a pitch range. “Detected” is true while it is heard; “Loudness” is in dB (0 is the loudest possible, quiet sound is around -60) and “Pitch” in Hz. Wire “Detected” into a Wait Until or a Decision.
+
+- Value outputs: **Detected** (true/false), **Loudness (dB)** (number), **Pitch (Hz)** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Listen to | choice | What the computer plays | Options: What the computer plays; Microphone. |
+| Loud enough at | number | -30 dB | 0 dB is the loudest sound possible. Normal sound is around -30 dB, quiet sound -60 dB. |
+| Only within a pitch range | on/off | off |  |
+| Lowest pitch | number | 200 Hz |  |
+| Highest pitch | number | 2000 Hz | The strongest frequency heard must be in this range. A man's voice is around 100–150 Hz, a whistle 1000–3000 Hz. |
+| Measure the last | duration | 200 ms | Longer smooths out short clicks and gaps; shorter reacts faster. |
+
+### Sound Recognition
+
+`sound.match`
+
+Listens for a particular sound – a notification, an alarm, a voice line – that you upload as a sound file. “Found” is true once it is heard at least as closely as the accuracy setting, however loud it is played. Each time the sound is heard counts once.
+
+- Value outputs: **Found** (true/false), **Similarity** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Listen to | choice | What the computer plays | Options: What the computer plays; Microphone. |
+| Sound | sound | none | A WAV, MP3, OGG or FLAC file. Short and distinctive works best; the first 10 seconds are used. |
+| Accuracy | percentage | 75% | How closely what is heard must match. Lower it if the sound is missed, raise it if other sounds set it off. |
 
 ## Window
 
@@ -203,14 +285,62 @@ Brings a program's window to the front (restoring it if it is minimised) and wai
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Window | text |  | Part of the window's title, or of the program's name, e.g. “Minecraft” or “game.exe”. |
+| Window | text | empty | Part of the window's title, or of the program's name, e.g. “Minecraft” or “game.exe”. |
 | Find it by | choice | Window title | Options: Window title; Program name. |
 | Screen type | choice | Detect automatically | Exclusive fullscreen programs need longer to come back after a switch. Options: Detect automatically; Windowed; Borderless fullscreen; Exclusive fullscreen. |
 | Keep looking for | duration | 2000 ms |  |
 
+## Variables
+
+Named values a macro reads and changes while it runs. Any setting of any block can also follow a variable (the link button next to it).
+
+### Counter
+
+`var.counter`
+
+Counts passes: adds the step to a variable each time it runs. When a limit is set and reached, “Reached” is followed and counting starts again from zero.
+
+- Flow in: yes
+- Flow out: **Next**, **Reached**
+- Value outputs: **Count** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Variable | variable | none |  |
+| Step | number | 1.0 |  |
+| Limit | number | 0.0 | Zero: count for ever, never take “Reached”. |
+
+### Variable
+
+`var.get`
+
+The current value of a variable, for any block that reads values.
+
+- Value outputs: **Value** (any value)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Variable | variable | none |  |
+
+### Set Variable
+
+`var.set`
+
+Changes a variable: sets it, adds to it, multiplies it… Every block bound to the variable follows the new value.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Value** (any value)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Variable | variable | none |  |
+| Do | choice | Set to | Options: Set to; Add; Subtract; Multiply by; Divide by; Add text to the end. |
+| Value | text | empty | Used when nothing is wired into the Value input. 42, true or any text. |
+
 ## Logic
 
-Combining and producing true/false values.
+Combining and producing values: true/false, numbers and text.
 
 ### Random Chance
 
@@ -224,6 +354,20 @@ True some of the time, at random. Use it to make a macro less predictable.
 | --- | --- | --- | --- |
 | Chance of true | percentage | 50% |  |
 
+### Compare
+
+`logic.compare`
+
+True when A relates to B in the chosen way: equal, less, greater, contains… Numbers compare as numbers, everything else as text.
+
+- Value inputs: **A** (any value), **B** (any value)
+- Value outputs: **Result** (true/false)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Operation | choice | A equals B | Options: A equals B; A is not B; A is less than B; A is at most B; A is greater than B; A is at least B; A contains B; A starts with B; A ends with B. |
+| B | text | empty | Used when nothing is wired into B. |
+
 ### Logic
 
 `logic.gate`
@@ -236,6 +380,66 @@ Combines true/false values: AND, OR, XOR, or NOT (which only uses input A).
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Operation | choice | A and B | Options: A and B; A or B; Exactly one of A, B; Not A. |
+
+### Math
+
+`logic.math`
+
+Calculates with numbers: add, subtract, multiply, divide, round, random… A and B come from their inputs, or from the numbers typed here when nothing is wired.
+
+- Value inputs: **A** (number), **B** (number)
+- Value outputs: **Result** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Operation | choice | A + B | Options: A + B; A − B; A × B; A ÷ B; Remainder of A ÷ B; A to the power of B; The smaller of A, B; The larger of A, B; A rounded; A rounded down; A rounded up; A without its sign; Random number from A to B. |
+| A | number | 0.0 |  |
+| B | number | 0.0 |  |
+
+### Text
+
+`logic.text`
+
+Works with text: joins it, measures it, changes case, replaces words, or reads a number from it.
+
+- Value inputs: **A** (any value), **B** (any value)
+- Value outputs: **Result** (any value)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Operation | choice | A followed by B | Options: A followed by B; Length of A; A in capitals; A in small letters; A without spaces around it; A with B replaced; A as a number. |
+| A | text | empty | Used when nothing is wired into A. |
+| B | text | empty | Used when nothing is wired into B. |
+| Replace with | text | empty |  |
+
+## System
+
+The clipboard and notifications.
+
+### Clipboard
+
+`system.clipboard`
+
+The text on the clipboard. Wire it into Set Variable to keep it, or into any block that reads text.
+
+- Value outputs: **Text** (text)
+
+### Notification
+
+`system.notify`
+
+Plays a short sound and shows a desktop notification – for example when a long macro has finished.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Value** (any value)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Title | text | MacroMagi |  |
+| Message | text | Done | Whatever is wired into Value is added to the end. |
+| Play a sound | on/off | on |  |
+| Show a desktop notification | on/off | on |  |
 
 ## Script
 
@@ -255,3 +459,24 @@ Runs your own Python code as a step of the macro. The script can send input, rea
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Code | code | a commented starter script |  |
+| Store the result in | variable | none | When the script ends, `result` is stored in this variable. |
+
+## Notes
+
+Explanations on the canvas. They never run.
+
+### Comment
+
+`note.comment`
+
+A note on the canvas. It does nothing when the macro runs. Resize it by its corner, fold it by its arrow.
+
+
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Text | text | A note about this part of the macro. |  |
+| Width | number | 240.0 |  |
+| Height | number | 120.0 |  |
+| Folded | on/off | off |  |
+| Colour | text | empty | #RRGGBB, or empty |

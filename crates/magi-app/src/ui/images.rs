@@ -43,3 +43,26 @@ pub fn fit_size(texture: &TextureHandle, bounds: Vec2, max_scale: f32) -> Vec2 {
     let scale = (bounds.x / size.x).min(bounds.y / size.y).min(max_scale);
     size * scale
 }
+
+/// A picture of the screen as a texture. Pictures larger than the graphics
+/// card allows (or than egui assumes before the first frame) are shrunk by a
+/// whole factor to fit; they are only ever shown stretched over a window.
+pub fn screen_texture(ctx: &Context, name: &str, width: u32, height: u32, rgba: &[u8]) -> TextureHandle {
+    let max_side = ctx.input(|i| i.max_texture_side).max(256);
+    let (w, h) = (width as usize, height as usize);
+    let factor = w.max(h).div_ceil(max_side).max(1);
+    let image = if factor == 1 {
+        ColorImage::from_rgba_unmultiplied([w, h], rgba)
+    } else {
+        let (sw, sh) = (w / factor, h / factor);
+        let mut small = Vec::with_capacity(sw * sh * 4);
+        for y in 0..sh {
+            for x in 0..sw {
+                let i = ((y * factor) * w + x * factor) * 4;
+                small.extend_from_slice(&rgba[i..i + 4]);
+            }
+        }
+        ColorImage::from_rgba_unmultiplied([sw, sh], &small)
+    };
+    ctx.load_texture(name, image, TextureOptions::LINEAR)
+}

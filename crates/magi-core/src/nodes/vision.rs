@@ -11,15 +11,17 @@ use crate::geom::Rect;
 pub struct FindImageParams {
     /// Id of the image asset to look for.
     pub image: String,
-    /// Where to look. `None` searches the whole primary screen.
+    /// Where to look. `None` searches the whole of `display`.
     pub region: Option<Rect>,
+    /// The display searched when there is no region (0 = primary).
+    pub display: u8,
     /// Minimum similarity, `0.0..=1.0`, for the image to count as found.
     pub threshold: f64,
 }
 
 impl Default for FindImageParams {
     fn default() -> Self {
-        Self { image: String::new(), region: None, threshold: 0.8 }
+        Self { image: String::new(), region: None, display: 0, threshold: 0.8 }
     }
 }
 
@@ -31,18 +33,22 @@ pub struct FindColorParams {
     /// How far each of red, green and blue may differ (0–255) and still match.
     pub tolerance: u8,
     pub region: Option<Rect>,
+    /// The display searched when there is no region (0 = primary).
+    pub display: u8,
 }
 
 impl Default for FindColorParams {
     fn default() -> Self {
-        Self { color: "#FF3B30".into(), tolerance: 16, region: None }
+        Self { color: "#FF3B30".into(), tolerance: 16, region: None, display: 0 }
     }
 }
 
-fn region_line(region: Option<Rect>) -> String {
+fn region_line(region: Option<Rect>, display: u8) -> String {
+    let on = |d: u8| if d == 0 { String::new() } else { format!(" on display {}", d + 1) };
     match region {
-        Some(r) => format!("In {}×{} at {}, {}", r.w, r.h, r.x, r.y),
-        None => "Whole screen".into(),
+        Some(r) => format!("In {}×{} at {}, {}{}", r.w, r.h, r.x, r.y, on(r.display.unwrap_or(0))),
+        None if display == 0 => "Whole screen".into(),
+        None => format!("Whole display {}", display + 1),
     }
 }
 
@@ -66,6 +72,10 @@ pub(super) fn register(registry: &mut Registry) {
                 .help("A smaller area is faster and avoids false matches elsewhere on screen."),
         )
         .param(
+            ParamDef::new("display", "Display", ParamKind::Display)
+                .help("The display searched when there is no search area."),
+        )
+        .param(
             ParamDef::new("threshold", "Accuracy", ParamKind::Percent)
                 .help("How closely the screen must match the image. 100% demands a pixel-perfect match."),
         )
@@ -76,7 +86,7 @@ pub(super) fn register(registry: &mut Registry) {
                 Some(asset) => asset.name.clone(),
                 None => "No image selected".into(),
             };
-            vec![name, format!("Accuracy ≥ {:.0}%", p.threshold * 100.0), region_line(p.region)]
+            vec![name, format!("Accuracy ≥ {:.0}%", p.threshold * 100.0), region_line(p.region, p.display)]
         }),
     );
 
@@ -97,10 +107,14 @@ pub(super) fn register(registry: &mut Registry) {
                 .help("How far red, green and blue may each be off and still count as a match."),
         )
         .param(ParamDef::new("region", "Search area", ParamKind::Region))
+        .param(
+            ParamDef::new("display", "Display", ParamKind::Display)
+                .help("The display searched when there is no search area."),
+        )
         .defaults(&FindColorParams::default())
         .summarize(|node, _| {
             let p: FindColorParams = node.params_or_default();
-            vec![format!("{} ± {}", p.color.to_uppercase(), p.tolerance), region_line(p.region)]
+            vec![format!("{} ± {}", p.color.to_uppercase(), p.tolerance), region_line(p.region, p.display)]
         }),
     );
 }

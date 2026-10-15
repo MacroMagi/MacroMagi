@@ -1,8 +1,16 @@
-//! The editable view of a recording: a timeline with trim handles and a
-//! spreadsheet with one row per recorded input – what it was, where, when it
-//! was pressed and how long it was held. Every kind of input can be edited.
+//! Editing a recording.
 //!
-//! The editor only *reads* the recording and reports at most one
+//! Two views share one set of edits:
+//!
+//! * [`controls`] – the timeline with its two handles, Trim and Cut, the
+//!   speed and Smart buttons, and a button that opens the full editor. Shown
+//!   in a block's settings, where there is no room for more.
+//! * [`full`] – the same controls above a spreadsheet with one row per
+//!   recorded input: what it was, where, when it was pressed and how long it
+//!   was held. Rows are dragged by their grip to reorder them. Shown in the
+//!   Recording Editor window.
+//!
+//! The views only *read* the recording and report at most one
 //! [`RecordingEdit`] per frame. That way an untouched recording is never
 //! copied, however often it is drawn.
 
@@ -26,30 +34,75 @@ const HANDLE_GRAB: f32 = 10.0;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RowKind {
     Key,
+    KeyDown,
+    KeyUp,
     Click,
+    ButtonDown,
+    ButtonUp,
     Scroll,
     PadButton,
+    Display,
 }
 
 impl RowKind {
-    const ALL: [RowKind; 4] = [RowKind::Key, RowKind::Click, RowKind::Scroll, RowKind::PadButton];
+    const ALL: [RowKind; 9] = [
+        RowKind::Key,
+        RowKind::KeyDown,
+        RowKind::KeyUp,
+        RowKind::Click,
+        RowKind::ButtonDown,
+        RowKind::ButtonUp,
+        RowKind::Scroll,
+        RowKind::PadButton,
+        RowKind::Display,
+    ];
 
     fn label(self) -> &'static str {
         match self {
-            RowKind::Key => "Key",
+            RowKind::Key => "Key (held)",
+            RowKind::KeyDown => "Key down",
+            RowKind::KeyUp => "Key up",
             RowKind::Click => "Click",
+            RowKind::ButtonDown => "Button down",
+            RowKind::ButtonUp => "Button up",
             RowKind::Scroll => "Scroll",
             RowKind::PadButton => "Pad button",
+            RowKind::Display => "Display change",
         }
+    }
+
+    fn of(input: &StrokeInput) -> Option<RowKind> {
+        Some(match input {
+            StrokeInput::Key { .. } => RowKind::Key,
+            StrokeInput::KeyDown { .. } => RowKind::KeyDown,
+            StrokeInput::KeyUp { .. } => RowKind::KeyUp,
+            StrokeInput::Mouse { .. } => RowKind::Click,
+            StrokeInput::MouseDown { .. } => RowKind::ButtonDown,
+            StrokeInput::MouseUp { .. } => RowKind::ButtonUp,
+            StrokeInput::Scroll { .. } => RowKind::Scroll,
+            StrokeInput::PadButton { .. } => RowKind::PadButton,
+            StrokeInput::Display { .. } => RowKind::Display,
+            StrokeInput::Move { .. } | StrokeInput::Look { .. } | StrokeInput::PadAxis { .. } => return None,
+        })
     }
 
     fn input(self) -> StrokeInput {
         match self {
             RowKind::Key => StrokeInput::Key { key: Key::Space },
+            RowKind::KeyDown => StrokeInput::KeyDown { key: Key::Space },
+            RowKind::KeyUp => StrokeInput::KeyUp { key: Key::Space },
             RowKind::Click => StrokeInput::Mouse { button: MouseButton::Left, x: 0, y: 0, end: None, here: true },
+            RowKind::ButtonDown => StrokeInput::MouseDown { button: MouseButton::Left, x: 0, y: 0, here: true },
+            RowKind::ButtonUp => StrokeInput::MouseUp { button: MouseButton::Left, x: 0, y: 0, here: true },
             RowKind::Scroll => StrokeInput::Scroll { dx: 0, dy: -1 },
             RowKind::PadButton => StrokeInput::PadButton { button: GamepadButton::South },
+            RowKind::Display => StrokeInput::Display { index: 0 },
         }
+    }
+
+    /// Whether a new row of this kind starts out held for a moment.
+    fn held(self) -> bool {
+        matches!(self, RowKind::Key | RowKind::Click | RowKind::PadButton)
     }
 }
 
@@ -58,7 +111,9 @@ pub enum RecordingEdit {
     At(usize, f64),
     Hold(usize, f64),
     Kind(usize, RowKind),
+    /// The key of a key, key-down or key-up row.
     Key(usize, Key),
+    /// The button of a click, button-down or button-up row.
     Button(usize, MouseButton),
     /// Where a click is pressed; a drag's end moves along.
     Position(usize, i32, i32),
@@ -69,6 +124,8 @@ pub enum RecordingEdit {
     Scroll(usize, i32, i32),
     PadButton(usize, GamepadButton),
     PadAxis(usize, GamepadAxis, f32),
+    /// Which display the rows after a display change are on (0 = primary).
+    Display(usize, u8),
     /// Where a movement starts and ends; the path in between follows.
     MoveEnds(usize, Point, Point),
     /// The total relative motion of a look.
@@ -77,11 +134,15 @@ pub enum RecordingEdit {
     SwapMovement(usize),
     Delete(usize),
     Duplicate(usize),
+    /// Moves a row to another place in the list; its time moves into place too.
+    Reorder(usize, usize),
     /// Add an input after this row (or at the start).
     Insert(Option<usize>, RowKind),
     /// Multiply every time by a factor (0.5 = twice as fast).
     Stretch(f64),
     /// Keep only what happens between two times, in milliseconds.
+    Trim(f64, f64),
+    /// Remove what happens between two times and close the gap.
     Cut(f64, f64),
     /// Detect movement made in games that lock the pointer.
     MakeSmart,
@@ -91,8 +152,8 @@ pub enum RecordingEdit {
 #[derive(Default)]
 pub struct EditorResponse {
     pub edit: Option<RecordingEdit>,
-    /// The user asked for the editor in its own window.
-    pub pop_out: bool,
+    /// The user asked for the full editor in its own window.
+    pub open_editor: bool,
 }
 
 fn rounded_split(total: i32, weights: &[f64]) -> Vec<i32> {
@@ -111,6 +172,9 @@ fn rounded_split(total: i32, weights: &[f64]) -> Vec<i32> {
 
 impl RecordingEdit {
     pub fn apply(self, recording: &mut Recording) {
+        fn input(recording: &mut Recording, i: usize) -> Option<&mut StrokeInput> {
+            recording.strokes.get_mut(i).map(|s| &mut s.input)
+        }
         match self {
             RecordingEdit::At(i, at) => {
                 if let Some(s) = recording.strokes.get_mut(i) {
@@ -133,54 +197,78 @@ impl RecordingEdit {
             RecordingEdit::Kind(i, kind) => {
                 if let Some(s) = recording.strokes.get_mut(i) {
                     s.input = kind.input();
+                    if !s.input.is_held() {
+                        s.hold = 0.0;
+                    }
                 }
             }
             RecordingEdit::Key(i, new_key) => {
-                if let Some(StrokeInput::Key { key }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(StrokeInput::Key { key } | StrokeInput::KeyDown { key } | StrokeInput::KeyUp { key }) =
+                    input(recording, i)
+                {
                     *key = new_key;
                 }
             }
             RecordingEdit::Button(i, new_button) => {
-                if let Some(StrokeInput::Mouse { button, .. }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(
+                    StrokeInput::Mouse { button, .. }
+                    | StrokeInput::MouseDown { button, .. }
+                    | StrokeInput::MouseUp { button, .. },
+                ) = input(recording, i)
+                {
                     *button = new_button;
                 }
             }
-            RecordingEdit::Position(i, new_x, new_y) => {
-                if let Some(StrokeInput::Mouse { x, y, end, .. }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+            RecordingEdit::Position(i, new_x, new_y) => match input(recording, i) {
+                Some(StrokeInput::Mouse { x, y, end, .. }) => {
                     if let Some(end) = end {
                         end.x += new_x - *x;
                         end.y += new_y - *y;
                     }
                     (*x, *y) = (new_x, new_y);
                 }
-            }
+                Some(StrokeInput::MouseDown { x, y, .. } | StrokeInput::MouseUp { x, y, .. }) => {
+                    (*x, *y) = (new_x, new_y);
+                }
+                _ => {}
+            },
             RecordingEdit::End(i, new_end) => {
-                if let Some(StrokeInput::Mouse { end, .. }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(StrokeInput::Mouse { end, .. }) = input(recording, i) {
                     *end = new_end;
                 }
             }
             RecordingEdit::Here(i, new_here) => {
-                if let Some(StrokeInput::Mouse { here, .. }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(
+                    StrokeInput::Mouse { here, .. }
+                    | StrokeInput::MouseDown { here, .. }
+                    | StrokeInput::MouseUp { here, .. },
+                ) = input(recording, i)
+                {
                     *here = new_here;
                 }
             }
             RecordingEdit::Scroll(i, new_dx, new_dy) => {
-                if let Some(StrokeInput::Scroll { dx, dy }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(StrokeInput::Scroll { dx, dy }) = input(recording, i) {
                     (*dx, *dy) = (new_dx, new_dy);
                 }
             }
             RecordingEdit::PadButton(i, new_button) => {
-                if let Some(StrokeInput::PadButton { button }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(StrokeInput::PadButton { button }) = input(recording, i) {
                     *button = new_button;
                 }
             }
             RecordingEdit::PadAxis(i, new_axis, new_value) => {
-                if let Some(StrokeInput::PadAxis { axis, value }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(StrokeInput::PadAxis { axis, value }) = input(recording, i) {
                     (*axis, *value) = (new_axis, new_value.clamp(-1.0, 1.0));
                 }
             }
+            RecordingEdit::Display(i, new_index) => {
+                if let Some(StrokeInput::Display { index }) = input(recording, i) {
+                    *index = new_index;
+                }
+            }
             RecordingEdit::MoveEnds(i, start, end) => {
-                if let Some(StrokeInput::Move { path }) = recording.strokes.get_mut(i).map(|s| &mut s.input)
+                if let Some(StrokeInput::Move { path }) = input(recording, i)
                     && let (Some(first), Some(last)) = (path.first().copied(), path.last().copied())
                 {
                     let shift = (start.x - first.1, start.y - first.2);
@@ -194,7 +282,7 @@ impl RecordingEdit {
                 }
             }
             RecordingEdit::LookTotal(i, total_x, total_y) => {
-                if let Some(StrokeInput::Look { path }) = recording.strokes.get_mut(i).map(|s| &mut s.input) {
+                if let Some(StrokeInput::Look { path }) = input(recording, i) {
                     let xs = rounded_split(total_x, &path.iter().map(|p| f64::from(p.1)).collect::<Vec<_>>());
                     let ys = rounded_split(total_y, &path.iter().map(|p| f64::from(p.2)).collect::<Vec<_>>());
                     for ((point, x), y) in path.iter_mut().zip(xs).zip(ys) {
@@ -237,10 +325,27 @@ impl RecordingEdit {
                     recording.strokes.insert(i + 1, copy);
                 }
             }
+            RecordingEdit::Reorder(from, to) => {
+                let len = recording.strokes.len();
+                if from < len && to < len && from != to {
+                    let stroke = recording.strokes.remove(from);
+                    recording.strokes.insert(to, stroke);
+                    // Playback goes by time: the row takes a time between its new neighbours.
+                    let before = to.checked_sub(1).map(|i| recording.strokes[i].at);
+                    let after = recording.strokes.get(to + 1).map(|s| s.at);
+                    let at = &mut recording.strokes[to].at;
+                    if let Some(before) = before {
+                        *at = at.max(before);
+                    }
+                    if let Some(after) = after {
+                        *at = at.min(after);
+                    }
+                }
+            }
             RecordingEdit::Insert(after, kind) => {
                 let at = after.and_then(|i| recording.strokes.get(i)).map_or(0.0, |s| s.at + s.hold + 50.0);
                 let index = after.map_or(0, |i| (i + 1).min(recording.strokes.len()));
-                let hold = if kind == RowKind::Scroll { 0.0 } else { 50.0 };
+                let hold = if kind.held() { 50.0 } else { 0.0 };
                 recording.strokes.insert(index, RecStroke { at, hold, input: kind.input() });
             }
             RecordingEdit::Stretch(factor) => {
@@ -259,7 +364,8 @@ impl RecordingEdit {
                 }
                 recording.duration_ms *= factor;
             }
-            RecordingEdit::Cut(start, end) => recording.cut(start, end),
+            RecordingEdit::Trim(start, end) => recording.keep_between(start, end),
+            RecordingEdit::Cut(start, end) => recording.remove_between(start, end),
             RecordingEdit::MakeSmart => {
                 recording.make_smart();
             }
@@ -275,33 +381,50 @@ fn stroke_color(input: &StrokeInput) -> Color32 {
     let data = |ty| theme::data_color(ty);
     use magi_core::nodes::DataType;
     match input {
-        StrokeInput::Key { .. } => data(DataType::Number),
-        StrokeInput::Mouse { .. } => p.success,
+        StrokeInput::Key { .. } | StrokeInput::KeyDown { .. } | StrokeInput::KeyUp { .. } => data(DataType::Number),
+        StrokeInput::Mouse { .. } | StrokeInput::MouseDown { .. } | StrokeInput::MouseUp { .. } => p.success,
         StrokeInput::Move { .. } => p.text_faint,
         StrokeInput::Look { .. } => data(DataType::Point),
         StrokeInput::Scroll { .. } => p.warning,
         StrokeInput::PadButton { .. } | StrokeInput::PadAxis { .. } => data(DataType::Text),
+        StrokeInput::Display { .. } => p.accent,
     }
 }
 
 fn stroke_icon(input: &StrokeInput) -> &'static str {
     match input {
         StrokeInput::Key { .. } => icon::KEYBOARD,
+        StrokeInput::KeyDown { .. } | StrokeInput::MouseDown { .. } => icon::ARROW_LINE_DOWN,
+        StrokeInput::KeyUp { .. } | StrokeInput::MouseUp { .. } => icon::ARROW_LINE_UP,
         StrokeInput::Mouse { .. } => icon::CURSOR_CLICK,
         StrokeInput::Move { .. } => icon::PATH,
         StrokeInput::Look { .. } => icon::CROSSHAIR,
         StrokeInput::Scroll { .. } => icon::ARROWS_VERTICAL,
         StrokeInput::PadButton { .. } | StrokeInput::PadAxis { .. } => icon::GAME_CONTROLLER,
+        StrokeInput::Display { .. } => icon::MONITOR,
     }
 }
 
 fn lane(input: &StrokeInput) -> f32 {
     match input {
-        StrokeInput::Key { .. } => 0.0,
-        StrokeInput::Mouse { .. } | StrokeInput::Scroll { .. } => 1.0,
+        StrokeInput::Key { .. } | StrokeInput::KeyDown { .. } | StrokeInput::KeyUp { .. } => 0.0,
+        StrokeInput::Mouse { .. }
+        | StrokeInput::MouseDown { .. }
+        | StrokeInput::MouseUp { .. }
+        | StrokeInput::Scroll { .. } => 1.0,
         StrokeInput::Move { .. } | StrokeInput::Look { .. } => 2.0,
-        StrokeInput::PadButton { .. } | StrokeInput::PadAxis { .. } => 3.0,
+        StrokeInput::PadButton { .. } | StrokeInput::PadAxis { .. } | StrokeInput::Display { .. } => 3.0,
     }
+}
+
+/// When the press a *down* row makes is released: the matching *up* row, if any.
+fn release_of(recording: &Recording, index: usize) -> Option<f64> {
+    let down = &recording.strokes[index];
+    recording.strokes.iter().skip(index + 1).find_map(|s| match (&down.input, &s.input) {
+        (StrokeInput::KeyDown { key: a }, StrokeInput::KeyUp { key: b }) if a == b => Some(s.at),
+        (StrokeInput::MouseDown { button: a, .. }, StrokeInput::MouseUp { button: b, .. }) if a == b => Some(s.at),
+        _ => None,
+    })
 }
 
 /// Per-editor state kept between frames: the trim selection and the selected row.
@@ -314,8 +437,12 @@ struct EditorState {
     dragging: Option<u8>,
 }
 
+/// The row being dragged to a new place.
+#[derive(Clone, Copy)]
+struct RowDrag(usize);
+
 /// The timeline: every input as a bar from press to release, one lane per
-/// kind, with two handles that select the part to keep.
+/// kind, with two handles that select a part to keep (Trim) or remove (Cut).
 fn timeline(ui: &mut Ui, recording: &Recording, state: &mut EditorState) -> Option<RecordingEdit> {
     let duration = recording.duration_ms.max(recording.end_time()).max(1.0);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), TIMELINE_HEIGHT), Sense::click_and_drag());
@@ -327,13 +454,22 @@ fn timeline(ui: &mut Ui, recording: &Recording, state: &mut EditorState) -> Opti
     let lane_height = (inner.height() - 10.0) / 4.0;
 
     for (i, stroke) in recording.strokes.iter().enumerate() {
+        let end = match stroke.input {
+            StrokeInput::KeyDown { .. } | StrokeInput::MouseDown { .. } => {
+                release_of(recording, i).unwrap_or(stroke.at)
+            }
+            _ => stroke.at + stroke.hold,
+        };
         let x0 = x_of(stroke.at);
-        let x1 = x_of(stroke.at + stroke.hold).max(x0 + 2.0);
+        let x1 = x_of(end).max(x0 + 2.0);
         let top = inner.top() + lane(&stroke.input) * lane_height;
         let bar = Rect::from_min_max(pos2(x0, top + 1.0), pos2(x1, top + lane_height - 1.0));
         let mut color = stroke_color(&stroke.input);
         if state.selected == Some(i) {
             color = theme::accent_bright();
+        }
+        if matches!(stroke.input, StrokeInput::Display { .. }) {
+            painter.vline(x0, inner.y_range(), Stroke::new(1.0, theme::with_alpha(color, 0.6)));
         }
         painter.rect_filled(bar, 1.5, color);
     }
@@ -341,12 +477,11 @@ fn timeline(ui: &mut Ui, recording: &Recording, state: &mut EditorState) -> Opti
     // Time ticks along the bottom.
     let tick_y = inner.bottom() - 4.0;
     for k in 0..=4 {
-        let ms = duration * f64::from(k) / 4.0;
-        let x = x_of(ms);
+        let x = x_of(duration * f64::from(k) / 4.0);
         painter.vline(x, (tick_y - 3.0)..=tick_y, Stroke::new(1.0, theme::stroke_strong()));
     }
 
-    // Trim handles.
+    // The handles.
     let (start, end) = state.trim.unwrap_or((0.0, duration));
     let (start, end) = (start.clamp(0.0, duration), end.clamp(0.0, duration));
     let pointer = response.interact_pointer_pos().or(response.hover_pos());
@@ -387,58 +522,55 @@ fn timeline(ui: &mut Ui, recording: &Recording, state: &mut EditorState) -> Opti
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
     }
-    response.on_hover_text("Drag the handles at either end to choose the part to keep, then press Trim.");
+    response.on_hover_text(
+        "Drag the handles to choose a part. Trim keeps only that part; Cut removes it and closes the gap.",
+    );
 
-    // Trim controls.
     let mut edit = None;
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         let changed = state.trim.is_some_and(|(s, e)| s > 0.5 || e < duration - 0.5);
-        let label = format!("{} – {}", format_ms(start), format_ms(end));
-        ui.label(RichText::new(label).size(11.0).color(theme::text_dim()));
+        ui.label(
+            RichText::new(format!("{} – {}", format_ms(start), format_ms(end))).size(11.0).color(theme::text_dim()),
+        );
         if ui
             .add_enabled(changed, egui::Button::new(format!("{}  Trim", icon::SCISSORS)).small())
             .on_hover_text("Keep only the part between the handles")
             .clicked()
         {
+            edit = Some(RecordingEdit::Trim(start, end));
+            state.trim = None;
+        }
+        if ui
+            .add_enabled(changed, egui::Button::new(format!("{}  Cut", icon::SCISSORS)).small())
+            .on_hover_text("Remove the part between the handles; what comes after moves up to close the gap")
+            .clicked()
+        {
             edit = Some(RecordingEdit::Cut(start, end));
             state.trim = None;
         }
-        if changed && ui.small_button("Reset").clicked() {
+        if changed && ui.small_button("Reset").on_hover_text("Put the handles back at the ends").clicked() {
             state.trim = None;
         }
     });
     edit
 }
 
-/// Shows the editor. `table_height` limits the table; `wide` shows every column.
-pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -> EditorResponse {
-    let mut out = EditorResponse::default();
-    let state_id = ui.id().with("recording-editor-state");
-    let mut state: EditorState = ui.data(|d| d.get_temp(state_id)).unwrap_or_default();
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(recording.summary()).color(theme::text()));
-        ui.weak(format!("· {}", format_ms(recording.duration_ms)));
-        if !wide {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::icon_button(ui, icon::ARROW_SQUARE_OUT, "Open in its own window").clicked() {
-                    out.pop_out = true;
-                }
-            });
-        }
-    });
-    if let Some(edit) = timeline(ui, recording, &mut state) {
-        out.edit = Some(edit);
-    }
-
+/// The buttons below the timeline: speed and Smart.
+fn tools(ui: &mut Ui) -> Option<RecordingEdit> {
+    let mut edit = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        if ui.small_button("½× time").on_hover_text("Make everything happen twice as fast").clicked() {
-            out.edit = Some(RecordingEdit::Stretch(0.5));
-        }
-        if ui.small_button("2× time").on_hover_text("Make everything happen half as fast").clicked() {
-            out.edit = Some(RecordingEdit::Stretch(2.0));
+        ui.label(RichText::new(format!("{}  Speed", icon::GAUGE)).size(11.5).color(theme::text_dim()));
+        for (label, factor, hint) in [
+            ("×2", 0.5, "Twice as fast: every time is halved"),
+            ("×1.25", 0.8, "A quarter faster"),
+            ("×0.8", 1.25, "A little slower"),
+            ("×0.5", 2.0, "Half as fast: every time is doubled"),
+        ] {
+            if ui.small_button(label).on_hover_text(hint).clicked() {
+                edit = Some(RecordingEdit::Stretch(factor));
+            }
         }
         if ui
             .small_button(format!("{}  Smart", icon::CROSSHAIR))
@@ -448,7 +580,54 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
             )
             .clicked()
         {
-            out.edit = Some(RecordingEdit::MakeSmart);
+            edit = Some(RecordingEdit::MakeSmart);
+        }
+    });
+    edit
+}
+
+fn header(ui: &mut Ui, recording: &Recording) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(recording.summary()).color(theme::text()));
+        ui.weak(format!("· {}", format_ms(recording.duration_ms)));
+    });
+}
+
+fn load_state(ui: &Ui) -> (egui::Id, EditorState) {
+    let id = ui.id().with("recording-editor-state");
+    (id, ui.data(|d| d.get_temp(id)).unwrap_or_default())
+}
+
+/// The compact view for a block's settings: timeline, handles, Trim and Cut,
+/// speed, Smart, and the button that opens the full editor. No rows.
+pub fn controls(ui: &mut Ui, recording: &Recording) -> EditorResponse {
+    let mut out = EditorResponse::default();
+    let (state_id, mut state) = load_state(ui);
+    header(ui, recording);
+    out.edit = timeline(ui, recording, &mut state);
+    if let Some(edit) = tools(ui) {
+        out.edit = Some(edit);
+    }
+    ui.add_space(2.0);
+    let button = egui::Button::new(RichText::new(format!("{}  Recording Editor", icon::ARROW_SQUARE_OUT)).strong())
+        .min_size(vec2(ui.available_width(), 26.0));
+    if ui.add(button).on_hover_text("Every recorded input, one per row, in its own window").clicked() {
+        out.open_editor = true;
+    }
+    ui.data_mut(|d| d.insert_temp(state_id, state));
+    out
+}
+
+/// The full editor: the controls above a table of every recorded input.
+/// `table_height` limits the table.
+pub fn full(ui: &mut Ui, recording: &Recording, table_height: f32) -> EditorResponse {
+    let mut out = EditorResponse::default();
+    let (state_id, mut state) = load_state(ui);
+    header(ui, recording);
+    out.edit = timeline(ui, recording, &mut state);
+    ui.horizontal_wrapped(|ui| {
+        if let Some(edit) = tools(ui) {
+            out.edit = Some(edit);
         }
         ui.menu_button(format!("{}  Add", icon::PLUS), |ui| {
             for kind in RowKind::ALL {
@@ -472,43 +651,29 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
     // left, so the last row is not cut in half.
     ui.spacing_mut().item_spacing = vec2(4.0, 2.0);
     let table_height = table_height.min(ui.available_height() - 30.0).max(ROW_HEIGHT * 2.0);
-    let mut table = TableBuilder::new(ui)
+    let small = egui::FontId::proportional(11.0);
+    let dragging = egui::DragAndDrop::has_payload_of_type::<RowDrag>(ui.ctx());
+    let mut drop: Option<(usize, usize)> = None;
+    TableBuilder::new(ui)
         .id_salt("recording-table")
         .striped(true)
-        .resizable(wide)
+        .resizable(true)
         .sense(Sense::click())
         .max_scroll_height(table_height)
         .auto_shrink([false, true])
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center));
-    if wide {
-        table = table.column(Column::exact(34.0)).column(Column::initial(100.0).at_least(70.0));
-    } else {
-        table = table.column(Column::exact(18.0));
-    }
-    table = table
-        .column(Column::remainder().at_least(110.0).clip(true))
-        .column(Column::exact(if wide { 76.0 } else { 62.0 }))
-        .column(Column::exact(if wide { 70.0 } else { 56.0 }))
-        .column(Column::exact(if wide { 46.0 } else { 20.0 }));
-
-    let small = egui::FontId::proportional(11.0);
-    table
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::exact(52.0))
+        .column(Column::initial(118.0).at_least(80.0))
+        .column(Column::remainder().at_least(140.0).clip(true))
+        .column(Column::exact(76.0))
+        .column(Column::exact(70.0))
+        .column(Column::exact(46.0))
         .header(18.0, |mut header| {
-            let title = |header: &mut egui_extras::TableRow<'_, '_>, text: &str| {
+            for title in ["#", "Type", "Input", "At", "Held", ""] {
                 header.col(|ui| {
-                    ui.label(RichText::new(text).font(small.clone()).color(theme::text_faint()));
+                    ui.label(RichText::new(title).font(small.clone()).color(theme::text_faint()));
                 });
-            };
-            if wide {
-                title(&mut header, "#");
-                title(&mut header, "Type");
-            } else {
-                title(&mut header, "");
             }
-            title(&mut header, "Input");
-            title(&mut header, "At");
-            title(&mut header, "Held");
-            title(&mut header, "");
         })
         .body(|body| {
             body.rows(ROW_HEIGHT, recording.strokes.len(), |mut row| {
@@ -516,25 +681,25 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
                 let stroke = &recording.strokes[i];
                 row.set_selected(state.selected == Some(i));
                 row.col(|ui| {
-                    if wide {
+                    // The grip: drag it to move the row.
+                    let id = ui.id().with(("row-grip", i));
+                    ui.dnd_drag_source(id, RowDrag(i), |ui| {
+                        ui.label(RichText::new(icon::DOTS_SIX_VERTICAL).color(theme::text_faint()));
                         ui.label(RichText::new(format!("{}", i + 1)).size(11.0).color(theme::text_faint()));
-                    } else {
-                        ui.label(RichText::new(stroke_icon(&stroke.input)).color(stroke_color(&stroke.input)))
-                            .on_hover_text(stroke.input.kind_label());
-                    }
+                    })
+                    .response
+                    .on_hover_text("Drag to move this input to another place");
                 });
-                if wide {
-                    row.col(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        ui.label(RichText::new(stroke_icon(&stroke.input)).color(stroke_color(&stroke.input)));
-                        kind_cell(ui, i, &stroke.input, &mut out.edit);
-                    });
-                }
+                row.col(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.label(RichText::new(stroke_icon(&stroke.input)).color(stroke_color(&stroke.input)));
+                    kind_cell(ui, i, &stroke.input, &mut out.edit);
+                });
                 row.col(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.spacing_mut().interact_size.y = 20.0;
                     ui.style_mut().override_font_id = Some(egui::FontId::proportional(12.0));
-                    if let Some(change) = detail(ui, i, &stroke.input, wide) {
+                    if let Some(change) = detail(ui, i, &stroke.input) {
                         out.edit = Some(change);
                     }
                 });
@@ -542,7 +707,7 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
                     let mut at = stroke.at / 1000.0;
                     let field =
                         DragValue::new(&mut at).speed(0.01).range(0.0..=31_536_000.0).fixed_decimals(3).suffix(" s");
-                    if ui.add(field).on_hover_text("When it starts").changed() {
+                    if ui.add(field).on_hover_text("When it happens").changed() {
                         out.edit = Some(RecordingEdit::At(i, at * 1000.0));
                     }
                 });
@@ -560,15 +725,9 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
                 });
                 row.col(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    if wide
-                        && ui
-                            .add(
-                                egui::Button::new(RichText::new(icon::COPY).size(12.0).color(theme::text_faint()))
-                                    .frame(false),
-                            )
-                            .on_hover_text("Duplicate")
-                            .clicked()
-                    {
+                    let copy =
+                        egui::Button::new(RichText::new(icon::COPY).size(12.0).color(theme::text_faint())).frame(false);
+                    if ui.add(copy).on_hover_text("Duplicate").clicked() {
                         out.edit = Some(RecordingEdit::Duplicate(i));
                     }
                     let delete =
@@ -577,12 +736,34 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
                         out.edit = Some(RecordingEdit::Delete(i));
                     }
                 });
-                if row.response().clicked() {
+                let response = row.response();
+                if dragging && response.dnd_hover_payload::<RowDrag>().is_some() {
+                    // Where the row would go: a line above or below this one.
+                    let rect = response.rect;
+                    let below = response.hover_pos().or(ui_pointer(&response)).is_some_and(|p| p.y > rect.center().y);
+                    let y = if below { rect.bottom() } else { rect.top() };
+                    response.ctx.debug_painter().hline(rect.x_range(), y, Stroke::new(2.0, theme::accent_bright()));
+                }
+                if let Some(from) = response.dnd_release_payload::<RowDrag>() {
+                    let below = ui_pointer(&response).is_some_and(|p| p.y > response.rect.center().y);
+                    let mut to = if below { i + 1 } else { i };
+                    if from.0 < to {
+                        to -= 1;
+                    }
+                    drop = Some((from.0, to.min(recording.strokes.len() - 1)));
+                }
+                if response.clicked() {
                     state.selected = if state.selected == Some(i) { None } else { Some(i) };
                 }
             });
         });
 
+    if let Some((from, to)) = drop
+        && from != to
+    {
+        out.edit = Some(RecordingEdit::Reorder(from, to));
+        state.selected = Some(to);
+    }
     if let Some(RecordingEdit::Delete(i)) = &out.edit {
         state.selected = state.selected.filter(|s| s < i);
     }
@@ -590,18 +771,15 @@ pub fn show(ui: &mut Ui, recording: &Recording, table_height: f32, wide: bool) -
     out
 }
 
+fn ui_pointer(response: &egui::Response) -> Option<egui::Pos2> {
+    response.ctx.pointer_latest_pos()
+}
+
 /// The type column: switchable for simple inputs, Move ⇄ Look for movement.
 fn kind_cell(ui: &mut Ui, index: usize, input: &StrokeInput, edit: &mut Option<RecordingEdit>) {
-    let current = match input {
-        StrokeInput::Key { .. } => Some(RowKind::Key),
-        StrokeInput::Mouse { .. } => Some(RowKind::Click),
-        StrokeInput::Scroll { .. } => Some(RowKind::Scroll),
-        StrokeInput::PadButton { .. } => Some(RowKind::PadButton),
-        _ => None,
-    };
-    match current {
+    match RowKind::of(input) {
         Some(kind) => {
-            egui::ComboBox::from_id_salt(("kind", index)).width(66.0).selected_text(input.kind_label()).show_ui(
+            egui::ComboBox::from_id_salt(("kind", index)).width(92.0).selected_text(input.kind_label()).show_ui(
                 ui,
                 |ui| {
                     for option in RowKind::ALL {
@@ -618,75 +796,77 @@ fn kind_cell(ui: &mut Ui, index: usize, input: &StrokeInput, edit: &mut Option<R
     }
 }
 
-fn mouse_short(button: MouseButton) -> &'static str {
-    match button {
-        MouseButton::Left => "L",
-        MouseButton::Right => "R",
-        MouseButton::Middle => "M",
-        MouseButton::Back => "B",
-        MouseButton::Forward => "F",
+/// A button picker, the "at the pointer" switch and, unless it is on, the position.
+fn button_detail(
+    ui: &mut Ui,
+    index: usize,
+    button: MouseButton,
+    (x, y): (i32, i32),
+    here: bool,
+    edit: &mut Option<RecordingEdit>,
+) {
+    egui::ComboBox::from_id_salt(("button", index)).width(70.0).selected_text(button.label()).show_ui(ui, |ui| {
+        for &option in MouseButton::ALL {
+            if ui.selectable_label(option == button, option.label()).clicked() {
+                *edit = Some(RecordingEdit::Button(index, option));
+            }
+        }
+    });
+    let at_pointer = RichText::new(icon::CURSOR).color(if here { theme::accent_bright() } else { theme::text_faint() });
+    if ui
+        .add(egui::Button::new(at_pointer).frame(false).selected(here))
+        .on_hover_text("Press wherever the pointer is, instead of at the position")
+        .clicked()
+    {
+        *edit = Some(RecordingEdit::Here(index, !here));
+    }
+    if !here {
+        let (mut nx, mut ny) = (x, y);
+        let a = ui.add(DragValue::new(&mut nx).speed(1.0)).on_hover_text("Where it is pressed");
+        let b = ui.add(DragValue::new(&mut ny).speed(1.0)).on_hover_text("Where it is pressed");
+        if a.changed() || b.changed() {
+            *edit = Some(RecordingEdit::Position(index, nx, ny));
+        }
     }
 }
 
 /// The input column: what the input is, editable.
-fn detail(ui: &mut Ui, index: usize, input: &StrokeInput, wide: bool) -> Option<RecordingEdit> {
+fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdit> {
     let mut edit = None;
     let coord = |ui: &mut Ui, value: &mut i32, hint: &str| {
         ui.add(DragValue::new(value).speed(1.0)).on_hover_text(hint).changed()
     };
     match input {
-        StrokeInput::Key { key } => {
+        StrokeInput::Key { key } | StrokeInput::KeyDown { key } | StrokeInput::KeyUp { key } => {
             let mut key = *key;
             if widgets::key_picker(ui, ("key", index), &mut key) {
                 edit = Some(RecordingEdit::Key(index, key));
             }
         }
         StrokeInput::Mouse { button, x, y, end, here } => {
-            let shown = if wide { button.label() } else { mouse_short(*button) };
-            egui::ComboBox::from_id_salt(("button", index))
-                .width(if wide { 70.0 } else { 22.0 })
-                .selected_text(shown)
-                .show_ui(ui, |ui| {
-                    for &option in MouseButton::ALL {
-                        if ui.selectable_label(option == *button, option.label()).clicked() {
-                            edit = Some(RecordingEdit::Button(index, option));
-                        }
-                    }
-                });
-            let at_pointer =
-                RichText::new(icon::CURSOR).color(if *here { theme::accent_bright() } else { theme::text_faint() });
-            if ui
-                .add(egui::Button::new(at_pointer).frame(false).selected(*here))
-                .on_hover_text("Click wherever the pointer is, instead of at the position")
-                .clicked()
-            {
-                edit = Some(RecordingEdit::Here(index, !*here));
-            }
+            button_detail(ui, index, *button, (*x, *y), *here, &mut edit);
             if !*here {
-                let (mut nx, mut ny) = (*x, *y);
-                if coord(ui, &mut nx, "Where it is pressed") | coord(ui, &mut ny, "Where it is pressed") {
-                    edit = Some(RecordingEdit::Position(index, nx, ny));
-                }
-                if wide {
-                    match end {
-                        Some(end) => {
-                            ui.label(RichText::new("→").color(theme::text_faint()));
-                            let (mut ex, mut ey) = (end.x, end.y);
-                            if coord(ui, &mut ex, "Where the drag ends") | coord(ui, &mut ey, "Where the drag ends") {
-                                edit = Some(RecordingEdit::End(index, Some(Point::new(ex, ey))));
-                            }
-                            if ui.small_button(icon::X).on_hover_text("Make it a click, not a drag").clicked() {
-                                edit = Some(RecordingEdit::End(index, None));
-                            }
+                match end {
+                    Some(end) => {
+                        ui.label(RichText::new("→").color(theme::text_faint()));
+                        let (mut ex, mut ey) = (end.x, end.y);
+                        if coord(ui, &mut ex, "Where the drag ends") | coord(ui, &mut ey, "Where the drag ends") {
+                            edit = Some(RecordingEdit::End(index, Some(Point::new(ex, ey))));
                         }
-                        None => {
-                            if ui.small_button("Drag…").on_hover_text("Make it a drag").clicked() {
-                                edit = Some(RecordingEdit::End(index, Some(Point::new(*x + 50, *y))));
-                            }
+                        if ui.small_button(icon::X).on_hover_text("Make it a click, not a drag").clicked() {
+                            edit = Some(RecordingEdit::End(index, None));
+                        }
+                    }
+                    None => {
+                        if ui.small_button("Drag…").on_hover_text("Make it a drag").clicked() {
+                            edit = Some(RecordingEdit::End(index, Some(Point::new(*x + 50, *y))));
                         }
                     }
                 }
             }
+        }
+        StrokeInput::MouseDown { button, x, y, here } | StrokeInput::MouseUp { button, x, y, here } => {
+            button_detail(ui, index, *button, (*x, *y), *here, &mut edit);
         }
         StrokeInput::Move { path } => {
             if let (Some(a), Some(b)) = (path.first(), path.last()) {
@@ -700,8 +880,7 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput, wide: bool) -> Option<
                     edit = Some(RecordingEdit::MoveEnds(index, Point::new(ax, ay), Point::new(bx, by)));
                 }
             }
-            if wide && ui.small_button("→ Look").on_hover_text("Replay as relative motion (for game cameras)").clicked()
-            {
+            if ui.small_button("→ Look").on_hover_text("Replay as relative motion (for game cameras)").clicked() {
                 edit = Some(RecordingEdit::SwapMovement(index));
             }
         }
@@ -712,8 +891,7 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput, wide: bool) -> Option<
             if changed {
                 edit = Some(RecordingEdit::LookTotal(index, tx, ty));
             }
-            if wide && ui.small_button("→ Move").on_hover_text("Replay as movement between screen positions").clicked()
-            {
+            if ui.small_button("→ Move").on_hover_text("Replay as movement between screen positions").clicked() {
                 edit = Some(RecordingEdit::SwapMovement(index));
             }
         }
@@ -748,6 +926,17 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput, wide: bool) -> Option<
             let field = ui.add(DragValue::new(&mut new_value).speed(0.01).range(-1.0..=1.0).fixed_decimals(2));
             if new_axis != *axis || field.changed() {
                 edit = Some(RecordingEdit::PadAxis(index, new_axis, new_value));
+            }
+        }
+        StrokeInput::Display { index: display } => {
+            let mut shown = u32::from(*display) + 1;
+            let field = DragValue::new(&mut shown).range(1..=16).prefix("Display ");
+            if ui
+                .add(field)
+                .on_hover_text("The positions after this row are on this display (1 is the primary display)")
+                .changed()
+            {
+                edit = Some(RecordingEdit::Display(index, (shown - 1) as u8));
             }
         }
     }
@@ -822,6 +1011,40 @@ mod tests {
     }
 
     #[test]
+    fn down_up_and_display_rows_are_edited_like_the_others() {
+        let mut recording = sample();
+        RecordingEdit::Kind(0, RowKind::KeyDown).apply(&mut recording);
+        assert_eq!(recording.strokes[0].hold, 0.0, "a key-down has no hold of its own");
+        RecordingEdit::Key(0, Key::KeyQ).apply(&mut recording);
+        assert_eq!(recording.strokes[0].input, StrokeInput::KeyDown { key: Key::KeyQ });
+        RecordingEdit::Kind(1, RowKind::ButtonUp).apply(&mut recording);
+        RecordingEdit::Button(1, MouseButton::Right).apply(&mut recording);
+        RecordingEdit::Here(1, false).apply(&mut recording);
+        RecordingEdit::Position(1, 7, 8).apply(&mut recording);
+        assert_eq!(
+            recording.strokes[1].input,
+            StrokeInput::MouseUp { button: MouseButton::Right, x: 7, y: 8, here: false }
+        );
+        RecordingEdit::Insert(None, RowKind::Display).apply(&mut recording);
+        RecordingEdit::Display(0, 2).apply(&mut recording);
+        assert_eq!(recording.strokes[0].input, StrokeInput::Display { index: 2 });
+    }
+
+    #[test]
+    fn rows_are_reordered_and_take_a_time_between_their_neighbours() {
+        let mut recording = sample();
+        RecordingEdit::Reorder(0, 2).apply(&mut recording);
+        assert!(matches!(recording.strokes[2].input, StrokeInput::Key { .. }));
+        assert_eq!(recording.strokes[2].at, 320.0, "placed after the move, so it now happens with it");
+        RecordingEdit::Reorder(3, 0).apply(&mut recording);
+        assert!(matches!(recording.strokes[0].input, StrokeInput::Look { .. }));
+        assert_eq!(recording.strokes[0].at, 200.0, "moved to the top, it happens first");
+        let mut sorted = recording.clone();
+        sorted.normalize();
+        assert_eq!(sorted.strokes, recording.strokes, "the new order is also the order in time");
+    }
+
+    #[test]
     fn movement_ends_and_look_totals_reshape_the_path() {
         let mut recording = sample();
         RecordingEdit::MoveEnds(2, Point::new(100, 100), Point::new(120, 100)).apply(&mut recording);
@@ -863,14 +1086,25 @@ mod tests {
     }
 
     #[test]
-    fn trimming_keeps_the_selected_part() {
+    fn trim_keeps_the_part_between_the_handles() {
         let mut recording = sample();
-        RecordingEdit::Cut(120.0, 330.0).apply(&mut recording);
-        assert_eq!(recording.strokes[0].at, 0.0, "the key, held across the cut, starts at the new beginning");
+        RecordingEdit::Trim(120.0, 330.0).apply(&mut recording);
+        assert_eq!(recording.strokes[0].at, 0.0, "the key, held across the start, starts at the new beginning");
         assert_eq!(recording.strokes[0].hold, 30.0);
         assert_eq!(recording.strokes[1].at, 80.0);
         assert!(recording.duration_ms <= 210.0 + 1e-9);
         assert!(recording.strokes.iter().all(|s| !matches!(s.input, StrokeInput::Look { .. })));
+    }
+
+    #[test]
+    fn cut_removes_the_part_between_the_handles_and_closes_the_gap() {
+        let mut recording = sample();
+        RecordingEdit::Cut(180.0, 380.0).apply(&mut recording);
+        assert_eq!(recording.strokes.len(), 2, "the click and the move are gone");
+        assert!(matches!(recording.strokes[0].input, StrokeInput::Key { .. }));
+        assert!(matches!(recording.strokes[1].input, StrokeInput::Look { .. }));
+        assert_eq!(recording.strokes[1].at, 200.0, "the look moved up by the 200 ms removed");
+        assert_eq!(recording.duration_ms, 300.0);
     }
 
     #[test]
@@ -879,6 +1113,40 @@ mod tests {
         RecordingEdit::Stretch(0.5).apply(&mut recording);
         assert_eq!((recording.strokes[0].at, recording.strokes[0].hold), (50.0, 25.0));
         assert_eq!(recording.duration_ms, 250.0);
+    }
+
+    #[test]
+    fn rows_are_dragged_to_a_new_place_by_their_grip() {
+        use egui_kittest::Harness;
+        use egui_kittest::kittest::Queryable;
+
+        struct State {
+            recording: Recording,
+            edits: Vec<RecordingEdit>,
+        }
+        let mut harness = Harness::builder().with_size(vec2(900.0, 500.0)).build_ui_state(
+            |ui, state: &mut State| {
+                if let Some(edit) = full(ui, &state.recording, 300.0).edit {
+                    state.edits.push(edit);
+                }
+            },
+            State { recording: sample(), edits: Vec::new() },
+        );
+        harness.run();
+        let from = harness.get_by_label("1").rect().center();
+        // The lower half of the third row: the row goes after it.
+        let to = harness.get_by_label("3").rect().center() + vec2(0.0, 6.0);
+        harness.hover_at(from);
+        harness.run();
+        harness.drag_at(from);
+        harness.run();
+        for step in 1..=5 {
+            harness.hover_at(from + (to - from) * (step as f32 / 5.0));
+            harness.run();
+        }
+        harness.drop_at(to);
+        harness.run();
+        assert_eq!(harness.state().edits, [RecordingEdit::Reorder(0, 2)]);
     }
 
     #[test]

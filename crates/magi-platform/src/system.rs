@@ -57,9 +57,16 @@ pub fn running_processes() -> Vec<ProcessEntry> {
     names.into_iter().map(|name| ProcessEntry { name, has_window: false }).collect()
 }
 
+/// Icon files for a desktop shortcut: Windows shortcuts take an `.ico`,
+/// Linux desktop entries a `.png`.
+pub struct ShortcutIcon<'a> {
+    pub ico: &'a std::path::Path,
+    pub png: &'a std::path::Path,
+}
+
 /// Puts a shortcut to this executable on the user's desktop. This is the one
 /// thing MacroMagi writes outside its own folder, and only when asked.
-pub fn create_desktop_shortcut() -> Result<std::path::PathBuf, String> {
+pub fn create_desktop_shortcut(icon: Option<ShortcutIcon<'_>>) -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let folder = exe.parent().map(std::path::Path::to_path_buf).unwrap_or_default();
 
@@ -76,7 +83,7 @@ pub fn create_desktop_shortcut() -> Result<std::path::PathBuf, String> {
              $shortcut.IconLocation = '{},0'; $shortcut.Save(); Write-Output $link",
             quote(&exe),
             quote(&folder),
-            quote(&exe)
+            quote(icon.as_ref().map_or(exe.as_path(), |icon| icon.ico))
         );
         let output = std::process::Command::new("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
@@ -95,7 +102,7 @@ pub fn create_desktop_shortcut() -> Result<std::path::PathBuf, String> {
         let link = std::path::PathBuf::from(home).join("Desktop").join("MacroMagi");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&exe, &link).map_err(|e| e.to_string())?;
-        let _ = folder;
+        let _ = (folder, icon);
         Ok(link)
     }
 
@@ -112,8 +119,9 @@ pub fn create_desktop_shortcut() -> Result<std::path::PathBuf, String> {
             .map_or_else(|| std::path::PathBuf::from(&home).join("Desktop"), std::path::PathBuf::from);
         std::fs::create_dir_all(&desktop).map_err(|e| e.to_string())?;
         let link = desktop.join("MacroMagi.desktop");
+        let icon_line = icon.map(|icon| format!("Icon={}\n", icon.png.display())).unwrap_or_default();
         let entry = format!(
-            "[Desktop Entry]\nType=Application\nName=MacroMagi\nExec=\"{}\"\nPath={}\nTerminal=false\n",
+            "[Desktop Entry]\nType=Application\nName=MacroMagi\nExec=\"{}\"\nPath={}\n{icon_line}Terminal=false\n",
             exe.display(),
             folder.display()
         );

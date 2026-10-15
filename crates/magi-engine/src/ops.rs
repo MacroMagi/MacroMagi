@@ -5,25 +5,33 @@
 //! implementation is what guarantees a macro clicks, types and sees exactly
 //! the same way whichever engine runs it.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use magi_core::action::{Action, PressMode};
-use magi_core::autoclicker::{ClickLimit, ClickPosition, ClickTarget, ClickerSettings, DualMode, MULTI_CLICK_GAP_MS};
-use magi_core::geom::{Point, Rect};
+use magi_core::autoclicker::{ClickLimit, ClickTarget, ClickerSettings, DualMode, MULTI_CLICK_GAP_MS};
+use magi_core::geom::{Displays, Point, Rect};
 use magi_core::graph::NodeId;
-use magi_core::host::{Host, WindowInfo, WindowQuery};
+use magi_core::host::{Host, Notification, WindowInfo, WindowQuery};
 use magi_core::input::{Button, InputEvent, Key};
+use magi_core::nodes::flow::RateParams;
 use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
+use magi_core::nodes::sound::{SoundLevelParams, SoundMatchParams};
+use magi_core::nodes::system::NotifyParams;
+use magi_core::nodes::variables::{CounterParams, SetVariableParams};
 use magi_core::nodes::vision::{FindColorParams, FindImageParams};
 use magi_core::nodes::window::{FocusWindowParams, ScreenKind};
 use magi_core::options::{ProcessRules, RuleAction, Verdict};
 use magi_core::text::parse_hex_color;
+use magi_core::variables::{as_number, as_text};
 use magi_vision::ImageRef;
+use serde_json::Value;
 
 use crate::monitor::{LogLevel, Monitor};
 use crate::program::Program;
 use crate::timing::{StopToken, millis};
+use crate::vars::Variables;
 use crate::{EngineError, Halt, OpResult};
 
 /// Time between pointer updates while gliding.
@@ -34,6 +42,11 @@ const FOREGROUND_CACHE: Duration = Duration::from_millis(25);
 const PAUSE_POLL: Duration = Duration::from_millis(150);
 /// How often Switch to Window looks again for a window that is not there yet.
 const WINDOW_POLL: Duration = Duration::from_millis(200);
+/// How long the list of displays is reused before it is read again.
+const DISPLAYS_CACHE: Duration = Duration::from_secs(2);
+/// Sound Recognition listens to this much more than the sound's own length,
+/// so a sound is not missed between two looks.
+const LISTEN_SLACK_MS: f64 = 1000.0;
 
 /// Shared, live-editable process rules. The app owns them; every run reads them.
 pub type SharedRules = Arc<RwLock<ProcessRules>>;
@@ -78,6 +91,13 @@ pub struct RunCx {
     /// The program input last went to, and when the program in front was last checked.
     last_allowed: Option<String>,
     checked_at: Option<Instant>,
+    /// The macro's variables.
+    pub vars: Variables,
+    /// The displays, and when they were read.
+    displays: Option<(Instant, Displays)>,
+    /// When each Sound Recognition block last recognised its sound: what was
+    /// heard before then has been counted.
+    heard_at: HashMap<NodeId, Instant>,
 }
 
 impl RunCx {
@@ -88,10 +108,14 @@ impl RunCx {
         stop: StopToken,
         stop_everything: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
+        let vars = Variables::new(&program.variables, Arc::clone(&monitor));
         Self {
             host,
             program,
             monitor,
+            vars,
+            displays: None,
+            heard_at: HashMap::new(),
             stop,
             stop_everything,
             held: Vec::new(),
@@ -108,6 +132,51 @@ impl RunCx {
     pub fn with_rules(mut self, rules: Option<SharedRules>) -> Self {
         self.rules = rules;
         self
+    }
+
+    /// Makes this run share variables with the other runs of its session.
+    pub fn with_variables(mut self, vars: Variables) -> Self {
+        self.vars = vars;
+        self
+    }
+
+    /// A block's settings as it runs them, variables resolved.
+    pub fn params_of(&self, node: &magi_core::graph::Node) -> serde_json::Map<String, Value> {
+        let vars = self.vars.clone();
+        self.program.resolved_params(node, move |name| vars.get(name))
+    }
+
+    // ---- displays -----------------------------------------------------------
+
+    /// The displays, read again every couple of seconds.
+    pub fn displays(&mut self) -> Displays {
+        match &self.displays {
+            Some((at, displays)) if at.elapsed() < DISPLAYS_CACHE => displays.clone(),
+            _ => {
+                let displays = Displays::new(self.host.screens().unwrap_or_default());
+                self.displays = Some((Instant::now(), displays.clone()));
+                displays
+            }
+        }
+    }
+
+    /// A position as global coordinates.
+    pub fn global(&mut self, p: Point) -> Point {
+        if p.display.is_none() { p } else { self.displays().to_global(p) }
+    }
+
+    /// An area as global coordinates.
+    pub fn global_rect(&mut self, r: Rect) -> Rect {
+        if r.display.is_none() { r } else { self.displays().rect_to_global(r) }
+    }
+
+    /// The area to capture for a search: the search area, or the whole display.
+    fn search_area(&mut self, region: Option<Rect>, display: u8) -> Option<Rect> {
+        match region {
+            Some(region) => Some(self.global_rect(region)),
+            None if display == 0 => None,
+            None => self.displays().get(display),
+        }
     }
 
     /// Checks the process rules before input is sent. Stops the run, or waits
@@ -220,6 +289,7 @@ impl RunCx {
     /// any fixed position stored in a mouse action.
     pub fn perform_actions(&mut self, params: &ActionParams, position: Option<Point>) -> OpResult<()> {
         if let Some(p) = position {
+            let p = self.global(p);
             self.send(&InputEvent::MoveTo { x: p.x, y: p.y })?;
         }
         let hold = millis(params.hold_ms);
@@ -267,6 +337,7 @@ impl RunCx {
                 },
                 Action::Mouse { button, mode, clicks, at } => {
                     if let (Some(p), false) = (at, position_overridden) {
+                        let p = self.global(*p);
                         self.send(&InputEvent::MoveTo { x: p.x, y: p.y })?;
                     }
                     match mode {
@@ -281,8 +352,14 @@ impl RunCx {
                         PressMode::Release => self.send(&InputEvent::ButtonUp { button: *button })?,
                     }
                 }
-                Action::Move { x, y, relative, duration_ms } => {
-                    self.move_pointer(*x, *y, *relative, millis(*duration_ms as f64))?;
+                Action::Move { x, y, display, relative, duration_ms } => {
+                    let (x, y) = if *relative {
+                        (*x, *y)
+                    } else {
+                        let p = self.global(Point { x: *x, y: *y, display: *display });
+                        (p.x, p.y)
+                    };
+                    self.move_pointer(x, y, *relative, millis(*duration_ms as f64))?;
                 }
                 Action::Scroll { dx, dy } => self.send(&InputEvent::Scroll { dx: *dx, dy: *dy })?,
                 Action::Text { text } => self.send(&InputEvent::Text { text: text.clone() })?,
@@ -332,7 +409,8 @@ impl RunCx {
 
         self.waited = true;
         let start = Instant::now();
-        for (time, event) in recording.timeline_with(params.moves, params.mouse) {
+        let displays = self.displays();
+        for (time, event) in recording.timeline_with(params.moves, params.mouse, &displays) {
             if !self.stop.sleep_until(start + at(time)) {
                 return Err(Halt::Stopped);
             }
@@ -424,8 +502,9 @@ impl RunCx {
     }
 
     fn click_once(&mut self, settings: &ClickerSettings, hold_ms: f64, alternate: &mut bool) -> OpResult<()> {
-        if let ClickPosition::Fixed { x, y } = settings.position {
-            self.send(&InputEvent::MoveTo { x, y })?;
+        if let Some(p) = settings.position.point() {
+            let p = self.global(p);
+            self.send(&InputEvent::MoveTo { x: p.x, y: p.y })?;
         }
         let hold = millis(hold_ms);
         match settings.target {
@@ -504,9 +583,10 @@ impl RunCx {
     }
 
     /// Looks for an image on screen (an **Image Detection** node).
-    pub fn find_image(&self, params: &FindImageParams) -> OpResult<Sighting> {
+    pub fn find_image(&mut self, params: &FindImageParams) -> OpResult<Sighting> {
         let needle = self.program.image(&params.image)?;
-        let frame = self.host.capture(params.region).map_err(EngineError::from)?;
+        let area = self.search_area(params.region, params.display);
+        let frame = self.host.capture(area).map_err(EngineError::from)?;
         let haystack = ImageRef::new(frame.width, frame.height, &frame.rgba);
         let Some(best) = magi_vision::find_template(haystack, needle.as_ref().as_ref()) else {
             // The image is larger than the area searched: it cannot be there.
@@ -520,10 +600,11 @@ impl RunCx {
     }
 
     /// Looks for a colour on screen (a **Color Detection** node).
-    pub fn find_color(&self, params: &FindColorParams) -> OpResult<Sighting> {
+    pub fn find_color(&mut self, params: &FindColorParams) -> OpResult<Sighting> {
         let rgb = parse_hex_color(&params.color)
             .ok_or_else(|| EngineError::new(format!("`{}` is not a colour like #FF8800", params.color)))?;
-        let frame = self.host.capture(params.region).map_err(EngineError::from)?;
+        let area = self.search_area(params.region, params.display);
+        let frame = self.host.capture(area).map_err(EngineError::from)?;
         let hit = magi_vision::find_color(ImageRef::new(frame.width, frame.height, &frame.rgba), rgb, params.tolerance);
         Ok(match hit {
             Some(hit) => Sighting {
@@ -533,6 +614,120 @@ impl RunCx {
             },
             None => Sighting { found: false, position: None, score: 0.0 },
         })
+    }
+}
+
+impl RunCx {
+    // ---- sound --------------------------------------------------------------
+
+    /// Listens to the most recent sound (a **Sound Detection** block).
+    pub fn sound_level(&mut self, params: &SoundLevelParams) -> OpResult<serde_json::Map<String, Value>> {
+        let clip = self.host.listen(params.source, params.window_ms.clamp(20.0, 5000.0)).map_err(EngineError::from)?;
+        let loudness = magi_audio::loudness_db(&clip.samples);
+        let pitch = magi_audio::dominant_frequency(&clip.samples, clip.sample_rate);
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("detected".into(), serde_json::json!(params.detects(loudness, pitch)));
+        outputs.insert("loudness".into(), serde_json::json!((loudness * 10.0).round() / 10.0));
+        outputs.insert("pitch".into(), serde_json::json!(pitch.map_or(0.0, f64::round)));
+        Ok(outputs)
+    }
+
+    /// Listens for a particular sound (a **Sound Recognition** block). Each
+    /// time the sound is played it is recognised once.
+    pub fn sound_match(&mut self, params: &SoundMatchParams, node: NodeId) -> OpResult<serde_json::Map<String, Value>> {
+        let template = self.program.sound(&params.sound)?;
+        let mut window = template.duration_ms() + LISTEN_SLACK_MS;
+        if let Some(at) = self.heard_at.get(&node) {
+            window = window.min(at.elapsed().as_secs_f64() * 1000.0);
+        }
+        let clip = self.host.listen(params.source, window.max(1.0)).map_err(EngineError::from)?;
+        let heard =
+            magi_audio::Fingerprint::of(&magi_audio::Audio { sample_rate: clip.sample_rate, samples: clip.samples });
+        let score = magi_audio::similarity(&template, &heard);
+        let found = score >= params.accuracy.clamp(0.0, 1.0);
+        if found {
+            self.heard_at.insert(node, Instant::now());
+        }
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("found".into(), serde_json::json!(found));
+        outputs.insert("score".into(), serde_json::json!((score * 1000.0).round() / 1000.0));
+        Ok(outputs)
+    }
+
+    // ---- Rate ---------------------------------------------------------------
+
+    /// Does each step in turn, waiting `rate_ms` between one and the next (a **Rate** block).
+    pub fn rate(&mut self, params: &RateParams, rate_ms: f64) -> OpResult<()> {
+        for (index, step) in params.steps.iter().enumerate() {
+            if index > 0 {
+                self.sleep_ms(rate_ms.max(0.0))?;
+            }
+            let one = ActionParams { actions: vec![step.clone()], hold_ms: params.hold_ms };
+            self.perform_actions(&one, None)?;
+        }
+        Ok(())
+    }
+
+    // ---- variables ------------------------------------------------------------
+
+    fn variable_name(name: &str) -> OpResult<&str> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(EngineError::new("no variable has been chosen").into());
+        }
+        Ok(name)
+    }
+
+    /// Changes a variable (a **Set Variable** block). `wired` is what the
+    /// Value input received, if it is wired. Returns the new value.
+    pub fn set_variable(&mut self, params: &SetVariableParams, wired: Option<Value>) -> OpResult<Value> {
+        let name = Self::variable_name(&params.variable)?;
+        let operand = wired.unwrap_or_else(|| Value::String(params.value.clone()));
+        Ok(self.vars.update(name, |current| params.operation.apply(current, &operand)))
+    }
+
+    /// Counts one pass (a **Counter** block). Returns the count and whether
+    /// the limit was reached (the count then starts again from zero).
+    pub fn count(&mut self, params: &CounterParams) -> OpResult<(f64, bool)> {
+        let name = Self::variable_name(&params.variable)?;
+        let mut reached = false;
+        let value = self.vars.update(name, |current| {
+            let next = as_number(current).unwrap_or(0.0) + params.step;
+            if params.limit > 0.0 && next >= params.limit {
+                reached = true;
+                serde_json::json!(0.0)
+            } else {
+                serde_json::json!(next)
+            }
+        });
+        let count = if reached { params.limit } else { as_number(&value).unwrap_or(0.0) };
+        Ok((count, reached))
+    }
+
+    /// A random number in `0..1`, for blocks that need one.
+    pub fn random(&mut self) -> f64 {
+        self.rng.f64()
+    }
+
+    // ---- system ---------------------------------------------------------------
+
+    pub fn clipboard(&mut self) -> OpResult<String> {
+        Ok(self.host.clipboard_text().map_err(EngineError::from)?)
+    }
+
+    /// Plays a sound and/or shows a notification (a **Notification** block).
+    /// A failure is reported but does not stop the macro.
+    pub fn notify(&mut self, params: &NotifyParams, wired: Option<Value>, node: NodeId) -> OpResult<()> {
+        let message = match wired {
+            Some(value) => format!("{} {}", params.message, as_text(&value)).trim().to_owned(),
+            None => params.message.clone(),
+        };
+        let notification =
+            Notification { title: params.title.clone(), message, sound: params.sound, popup: params.popup };
+        if let Err(error) = self.host.notify(&notification) {
+            self.monitor.log(LogLevel::Warning, Some(node), format!("Could not notify: {}", error.0));
+        }
+        Ok(())
     }
 }
 

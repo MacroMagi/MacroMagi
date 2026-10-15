@@ -51,8 +51,9 @@ pub enum SnipMode {
 pub enum SnipTarget {
     /// A parameter of a block.
     NodeParam(NodeId, String),
-    /// The position of one input inside an Input block.
-    Action(NodeId, usize),
+    /// The position of one input in a block's list of inputs (the list's
+    /// parameter key, the index).
+    Action(NodeId, String, usize),
     /// The Auto Clicker tab's fixed click position.
     ClickerPosition,
     /// The fixed click position of an Auto Click block.
@@ -69,4 +70,8 @@ pub enum UiRequest {
     RecordInto(NodeId, String),
     /// Open a recording in its own editor window.
     EditRecording(String),
+    /// Load a sound file into a block's sound parameter.
+    LoadSound(NodeId, String),
+    /// Open a Rate block in the Variable Rate Editor.
+    EditRate(NodeId),
 }

@@ -19,8 +19,23 @@ def python(run, node):
         raise MacroError("line %s: %s" % (error.lineno, error.msg))
     except Exception as error:
         raise MacroError("%s%s: %s" % (_line_of(error), type(error).__name__, error))
-    run.outputs[node["id"]] = {"result": scope.get("result")}
+    result = scope.get("result")
+    run.outputs[node["id"]] = {"result": result}
+    variable = (node["params"].get("result_variable") or "").strip()
+    if variable:
+        run.host.call("var_set", name=variable, value=_plain(result))
     return "out"
+
+
+def _plain(value):
+    """A value that can be stored in a variable: JSON-like data, or its text."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    return str(value)
 
 
 def _line_of(error):

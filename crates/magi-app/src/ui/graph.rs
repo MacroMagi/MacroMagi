@@ -29,14 +29,15 @@ use magi_core::action::Action;
 use magi_core::graph::{Node, NodeId, PortRef, Wire};
 use magi_core::nodes::flow::DecisionParams;
 use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
+use magi_core::nodes::notes::CommentParams;
 use magi_core::nodes::vision::FindImageParams;
 use magi_core::nodes::{Category, NodeDef, Port, PortKind, Registry, ids, ports};
 use magi_core::preset::NodePreset;
 use magi_core::project::Project;
+use magi_core::text::{format_ms, parse_hex_color};
 use magi_engine::Activity;
 
 use super::images::{ImageCache, fit_size};
-use super::recording_editor;
 use crate::theme;
 
 const NODE_WIDTH: f32 = 212.0;
@@ -54,7 +55,7 @@ const PORT_RADIUS: f32 = 5.0;
 const PORT_HIT: f32 = 20.0;
 const NODE_RADIUS: u8 = 10;
 
-const CARD_SIZE: Vec2 = vec2(360.0, 310.0);
+const CARD_SIZE: Vec2 = vec2(250.0, 118.0);
 const CARD_GAP: f32 = 34.0;
 
 const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.25..=2.0;
@@ -62,6 +63,11 @@ const ZOOM_RANGE: std::ops::RangeInclusive<f32> = 0.25..=2.0;
 const GLOW_SECONDS: f32 = 0.6;
 /// Prefix that marks clipboard text as copied MacroMagi nodes.
 const CLIPBOARD_TAG: &str = "macromagi-nodes:";
+/// Space between a group's box and the blocks in it.
+const GROUP_PAD: f32 = 18.0;
+const GROUP_HEADER: f32 = 28.0;
+/// Size of the grip in a comment's corner that resizes it.
+const COMMENT_GRIP: f32 = 14.0;
 
 pub enum GraphEvent {
     /// The run/stop button on a Start block was clicked.
@@ -83,6 +89,10 @@ pub struct GraphEnv<'a> {
     pub running: &'a [NodeId],
     /// The block the last error was reported against.
     pub error_node: Option<NodeId>,
+    /// View → Grid.
+    pub show_grid: bool,
+    /// View → Block activity: blocks glow as they run.
+    pub show_activity: bool,
 }
 
 /// A wire being dragged out of a port.
@@ -110,6 +120,22 @@ struct Palette {
     highlight: usize,
 }
 
+/// The search over block names and groups (Ctrl+F).
+#[derive(Default)]
+struct Find {
+    query: String,
+    /// The result shown last; Enter goes on to the next.
+    current: usize,
+    just_opened: bool,
+}
+
+/// Something the search found.
+#[derive(Clone, Copy, PartialEq)]
+enum Found {
+    Node(NodeId),
+    Group(u64),
+}
+
 pub struct GraphView {
     /// Screen position of the scene origin, relative to the canvas corner.
     pan: Vec2,
@@ -135,6 +161,11 @@ pub struct GraphView {
     pub images: ImageCache,
     /// Size of the block list; the app keeps it in the settings.
     pub palette_size: Vec2,
+    find: Option<Find>,
+    /// Blocks to bring into the middle of the view on the next frame.
+    center_on: Option<Vec<NodeId>>,
+    /// The group whose name is being edited.
+    renaming: Option<u64>,
 }
 
 impl Default for GraphView {
@@ -155,6 +186,9 @@ impl Default for GraphView {
             canvas: Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0)),
             images: ImageCache::default(),
             palette_size: vec2(280.0, 420.0),
+            find: None,
+            center_on: None,
+            renaming: None,
         }
     }
 }
@@ -178,12 +212,34 @@ struct Layout {
     lines_top: f32,
     thumbnail: Option<(Rect, String)>,
     button: Option<(Rect, &'static str)>,
+    /// Set for comment blocks, which are drawn as notes.
+    comment: Option<CommentParams>,
 }
 
 impl Layout {
     fn compute(node: &Node, project: &Project, registry: &Registry) -> Self {
+        if node.kind == ids::COMMENT {
+            let params: CommentParams = node.params_or_default();
+            let size = vec2(
+                params.width.max(80.0) as f32,
+                if params.collapsed { HEADER } else { params.height.max(40.0) as f32 },
+            );
+            return Self {
+                id: node.id,
+                rect: Rect::from_min_size(pos2(node.pos[0], node.pos[1]), size),
+                def: registry.get(&node.kind).cloned(),
+                title: if node.label.is_empty() { "Comment".to_owned() } else { node.label.clone() },
+                spots: Vec::new(),
+                rows_top: 0.0,
+                lines: Vec::new(),
+                lines_top: 0.0,
+                thumbnail: None,
+                button: None,
+                comment: Some(params),
+            };
+        }
         let node_ports = registry.ports(node);
-        let lines = registry.summary(node, &project.assets);
+        let lines = registry.summary_with(node, &project.assets, &project.variables);
         let width = NODE_WIDTH.max(node_ports.flow_out.len() as f32 * FLOW_SLOT);
         let origin = pos2(node.pos[0], node.pos[1]);
 
@@ -249,6 +305,7 @@ impl Layout {
             lines_top,
             thumbnail,
             button,
+            comment: None,
         }
     }
 
@@ -267,6 +324,16 @@ impl Layout {
 
     fn category(&self) -> Category {
         self.def.as_ref().map_or(Category::Addon, |def| def.category)
+    }
+
+    /// The fold arrow at the left of a comment's title.
+    fn fold_button(&self) -> Rect {
+        Rect::from_center_size(pos2(self.rect.left() + 16.0, self.rect.top() + HEADER / 2.0), Vec2::splat(22.0))
+    }
+
+    /// The resize grip in a comment's bottom-right corner.
+    fn grip(&self) -> Rect {
+        Rect::from_min_max(self.rect.max - Vec2::splat(COMMENT_GRIP), self.rect.max)
     }
 }
 
@@ -289,6 +356,20 @@ pub fn node_icon(kind: &str) -> &'static str {
         ids::PYTHON => icon::CODE,
         ids::AUTOCLICK => icon::HAND_TAP,
         ids::FOCUS_WINDOW => icon::APP_WINDOW,
+        ids::RATE => icon::METRONOME,
+        ids::DEFINE => icon::FUNCTION,
+        ids::CALL => icon::FLOW_ARROW,
+        ids::VARIABLE => icon::BRACKETS_CURLY,
+        ids::SET_VARIABLE => icon::NOTE_PENCIL,
+        ids::COUNTER => icon::HASH,
+        ids::MATH => icon::CALCULATOR,
+        ids::COMPARE => icon::SCALES,
+        ids::TEXT => icon::TEXT_AA,
+        ids::CLIPBOARD => icon::CLIPBOARD_TEXT,
+        ids::NOTIFY => icon::BELL,
+        ids::COMMENT => icon::NOTE,
+        ids::SOUND_LEVEL => icon::WAVEFORM,
+        ids::SOUND_MATCH => icon::EAR,
         _ => icon::SPARKLE,
     }
 }
@@ -376,6 +457,28 @@ impl GraphView {
     /// Opens the information card of a recording block.
     pub fn show_card(&mut self, node: NodeId) {
         self.cards.insert(node);
+    }
+
+    /// Selects a block and brings it into the middle of the view.
+    pub fn reveal(&mut self, node: NodeId) {
+        self.focus_node(node);
+        self.center_on = Some(vec![node]);
+    }
+
+    /// Opens the search over block names and groups.
+    pub fn open_find(&mut self) {
+        match &mut self.find {
+            Some(find) => find.just_opened = true,
+            None => self.find = Some(Find { just_opened: true, ..Find::default() }),
+        }
+    }
+
+    /// Puts the selected blocks in a new group.
+    pub fn group_selection(&mut self, project: &mut Project) -> Option<u64> {
+        let name = format!("Group {}", project.graph.groups().len() + 1);
+        let id = project.graph.add_group(&name, &self.selection)?;
+        self.renaming = Some(id);
+        Some(id)
     }
 
     /// The layer the nodes and wires are drawn on.
@@ -545,9 +648,20 @@ impl GraphView {
         if std::mem::take(&mut self.fit_requested) {
             self.fit(canvas, &layouts);
         }
+        if let Some(ids) = self.center_on.take()
+            && let Some(bounds) =
+                layouts.iter().filter(|l| ids.contains(&l.id)).map(|l| l.rect).reduce(|a, b| a.union(b))
+        {
+            if self.zoom < 0.6 {
+                self.zoom = 1.0;
+            }
+            self.pan = canvas.size() / 2.0 - bounds.center().to_vec2() * self.zoom;
+        }
 
         self.navigate(ui, canvas, &background);
-        self.paint_grid(ui.painter(), canvas);
+        if env.show_grid {
+            self.paint_grid(ui.painter(), canvas);
+        }
 
         // The scene: a layer whose contents are panned and zoomed as a whole.
         let to_screen = self.to_screen(canvas);
@@ -564,6 +678,9 @@ impl GraphView {
         ui.ctx().set_transform_layer(layer, to_screen);
         let painter = scene.painter().clone();
         let pointer = ui.ctx().pointer_latest_pos().filter(|p| canvas.contains(*p)).map(|p| from_screen * p);
+
+        // ---- groups (under everything) ---------------------------------------
+        self.groups(&mut scene, &painter, project, &layouts);
 
         // ---- wires (under the nodes) --------------------------------------
         let by_id: HashMap<NodeId, usize> = layouts.iter().enumerate().map(|(i, l)| (l.id, i)).collect();
@@ -628,11 +745,20 @@ impl GraphView {
             }
             body.context_menu(|ui| self.node_menu(ui, project, env.registry, &node, &mut events));
 
-            let glow = env
-                .activity
-                .get(&layout.id)
-                .map_or(0.0, |a| 1.0 - now.saturating_duration_since(a.last).as_secs_f32() / GLOW_SECONDS)
-                .clamp(0.0, 1.0);
+            let active = project.graph.is_active(layout.id);
+            if let Some(comment) = &layout.comment {
+                self.comment(&mut scene, &painter, project, layout, comment, body.hovered());
+                continue;
+            }
+
+            let glow = if env.show_activity {
+                env.activity
+                    .get(&layout.id)
+                    .map_or(0.0, |a| 1.0 - now.saturating_duration_since(a.last).as_secs_f32() / GLOW_SECONDS)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             glowing |= glow > 0.0;
             let running = env.running.contains(&layout.id);
             self.paint_node(
@@ -643,8 +769,9 @@ impl GraphView {
                     selected: self.selection.contains(&layout.id),
                     hovered: body.hovered(),
                     glow,
-                    running,
+                    running: running && env.show_activity,
                     error: env.error_node == Some(layout.id),
+                    active,
                 },
             );
             if let Some((rect, asset)) = &layout.thumbnail
@@ -653,7 +780,7 @@ impl GraphView {
                 painter.rect_filled(*rect, 5.0, theme::bg_input());
                 let size = fit_size(&texture, rect.size() - Vec2::splat(6.0), 4.0);
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-                let tint = if node.enabled { Color32::WHITE } else { Color32::from_white_alpha(90) };
+                let tint = if active { Color32::WHITE } else { Color32::from_white_alpha(90) };
                 painter.image(texture.id(), Rect::from_center_size(rect.center(), size), uv, tint);
             }
 
@@ -687,7 +814,7 @@ impl GraphView {
                 let hint = match (node.kind.as_str(), running) {
                     (ids::START, true) => "Stop this Start block",
                     (ids::START, false) => "Run from this Start block",
-                    _ => "Show the recorded inputs",
+                    _ => "Show the recording's information",
                 };
                 response.on_hover_text(hint);
             }
@@ -854,11 +981,12 @@ impl GraphView {
         self.background(ui, &painter, project, env, &background, canvas, &layouts, hovered_wire);
         self.shortcuts(ui, project, env.registry, canvas, &background);
         self.palette_popup(ui, project, env.registry);
+        self.find_bar(ui, canvas, project, env.registry);
         self.overlay(ui, canvas, project.graph.is_empty());
 
         // Re-lay-out after edits made this frame is not needed: the next frame does it.
         layouts.clear();
-        if glowing || !env.running.is_empty() {
+        if glowing || (!env.running.is_empty() && env.show_activity) {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
         }
         events
@@ -931,7 +1059,7 @@ impl GraphView {
 
     fn paint_node(&self, painter: &Painter, layout: &Layout, node: &Node, look: NodeLook) {
         let accent = theme::category_color(layout.category());
-        let dim = |color: Color32| if node.enabled { color } else { color.gamma_multiply(0.42) };
+        let dim = |color: Color32| if look.active { color } else { color.gamma_multiply(0.42) };
         let rect = layout.rect;
         let radius = CornerRadius::same(NODE_RADIUS);
 
@@ -962,7 +1090,7 @@ impl GraphView {
         let title_width = rect.width() - 36.0 - if has_button { 34.0 } else { 10.0 };
         let title = fit_text(painter, &layout.title, FontId::proportional(13.5), dim(theme::text()), title_width);
         painter.galley(pos2(rect.left() + 34.0, header.center().y - title.size().y / 2.0), title, theme::text());
-        if !node.enabled {
+        if !look.active {
             painter.text(
                 pos2(rect.right() - if has_button { 40.0 } else { 12.0 }, header.center().y),
                 Align2::RIGHT_CENTER,
@@ -1089,6 +1217,26 @@ impl GraphView {
             self.duplicate_selection(project);
             ui.close();
         }
+        if ui.add(egui::Button::new(format!("{}  Group", icon::BOUNDING_BOX)).shortcut_text("Ctrl+G")).clicked() {
+            self.group_selection(project);
+            ui.close();
+        }
+        let groups: Vec<u64> =
+            project.graph.groups().iter().filter(|g| g.nodes.contains(&node.id)).map(|g| g.id).collect();
+        if !groups.is_empty() && ui.button(format!("{}  Take out of its group", icon::SIGN_OUT)).clicked() {
+            for id in groups {
+                if let Some(group) = project.graph.group_mut(id) {
+                    for member in &self.selection {
+                        group.nodes.remove(member);
+                    }
+                }
+            }
+            let empty: Vec<u64> = project.graph.groups().iter().filter(|g| g.nodes.is_empty()).map(|g| g.id).collect();
+            for id in empty {
+                project.graph.remove_group(id);
+            }
+            ui.close();
+        }
         if ui.button(format!("{}  Copy", icon::CLIPBOARD)).clicked() {
             self.copy_selection(ui, project, registry);
             ui.close();
@@ -1199,6 +1347,9 @@ impl GraphView {
         if ui.ctx().text_edit_focused() || !Self::pointer_on_canvas(ui, canvas) {
             return;
         }
+        if ui.input(|i| i.modifiers.command && i.key_pressed(Key::G)) {
+            self.group_selection(project);
+        }
         let (delete, select_all, duplicate, fit, escape, copy, cut, paste) = ui.input(|i| {
             let paste = i.events.iter().find_map(|event| match event {
                 egui::Event::Paste(text) => Some(text.clone()),
@@ -1270,11 +1421,25 @@ impl GraphView {
                 || def.keywords.iter().any(|k| k.contains(&query))
                 || def.category.label().to_lowercase().contains(&query)
         };
+        // Every block is listed. With a wire to attach, the blocks it can
+        // attach to come first and the others after them.
         let mut listed: Vec<Arc<NodeDef>> = Vec::new();
         for category in Category::ALL {
             listed.extend(
                 registry.iter().filter(|def| def.category == category && matches(def) && fits_wire(def)).cloned(),
             );
+        }
+        let mut others_from = None;
+        if palette.wire.is_some() {
+            let start = listed.len();
+            for category in Category::ALL {
+                listed.extend(
+                    registry.iter().filter(|def| def.category == category && matches(def) && !fits_wire(def)).cloned(),
+                );
+            }
+            if listed.len() > start {
+                others_from = Some(start);
+            }
         }
 
         // Arrow keys move the highlight; they are taken before the search box sees them.
@@ -1323,7 +1488,24 @@ impl GraphView {
                         ui.add_space(2.0);
                         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                             let mut last_category = None;
+                            if others_from.is_some() {
+                                ui.label(
+                                    egui::RichText::new(format!("{}  CAN BE CONNECTED", icon::PLUG))
+                                        .size(10.0)
+                                        .color(theme::text_dim()),
+                                );
+                            }
                             for (index, def) in listed.iter().enumerate() {
+                                if others_from == Some(index) {
+                                    ui.add_space(4.0);
+                                    ui.separator();
+                                    ui.label(
+                                        egui::RichText::new("OTHER BLOCKS (added without the wire)")
+                                            .size(10.0)
+                                            .color(theme::text_dim()),
+                                    );
+                                    last_category = None;
+                                }
                                 if last_category != Some(def.category) {
                                     last_category = Some(def.category);
                                     ui.add_space(3.0);
@@ -1415,7 +1597,8 @@ impl GraphView {
             });
     }
 
-    /// The "recording information" card attached to a Play Recording block.
+    /// The "recording information" card attached to a Play Recording block:
+    /// what the recording holds, and the button that opens the Recording Editor.
     #[allow(clippy::too_many_arguments)]
     fn recording_card(
         &mut self,
@@ -1448,22 +1631,394 @@ impl GraphView {
         );
         card.set_clip_rect(rect.intersect(scene.clip_rect()));
         card.label(egui::RichText::new("RECORDING INFORMATION").size(10.0).color(theme::text_faint()));
-        match project.assets.recording(&params.recording).cloned() {
+        match project.assets.recording(&params.recording) {
             Some(recording) => {
-                let response = recording_editor::show(&mut card, &recording, 120.0, false);
-                if let Some(edit) = response.edit
-                    && let Some(target) = project.assets.recording_mut(&params.recording)
-                {
-                    edit.apply(target);
-                }
-                if response.pop_out {
+                card.add(egui::Label::new(egui::RichText::new(recording.summary()).color(theme::text())).truncate());
+                card.label(
+                    egui::RichText::new(format!(
+                        "{} · {} inputs",
+                        format_ms(recording.duration_ms),
+                        recording.strokes.len()
+                    ))
+                    .size(11.5)
+                    .color(theme::text_dim()),
+                );
+                card.add_space(4.0);
+                let button = egui::Button::new(
+                    egui::RichText::new(format!("{}  RECORDING EDITOR", icon::ARROW_SQUARE_OUT)).strong(),
+                )
+                .min_size(vec2(card.available_width(), 28.0));
+                if card.add(button).on_hover_text("Every recorded input, one per row, in its own window").clicked() {
                     events.push(GraphEvent::EditRecording(params.recording.clone()));
                 }
             }
             None => {
-                card.add_space(6.0);
-                card.weak("No recording selected yet. Record one with the Record button, or pick one in this block's settings.");
+                card.add_space(4.0);
+                card.add(
+                    egui::Label::new(
+                        egui::RichText::new(
+                            "No recording selected yet. Record one with the Record button, or pick one in this \
+                             block's settings.",
+                        )
+                        .color(theme::text_faint()),
+                    )
+                    .wrap(),
+                );
             }
+        }
+    }
+
+    /// A comment block: a note with a title, its text, a fold arrow and a
+    /// resize grip.
+    fn comment(
+        &mut self,
+        scene: &mut Ui,
+        painter: &Painter,
+        project: &mut Project,
+        layout: &Layout,
+        params: &CommentParams,
+        hovered: bool,
+    ) {
+        let rect = layout.rect;
+        let id = scene.id().with(("comment", layout.id));
+        let tint = parse_hex_color(&params.color).map_or_else(theme::accent, |[r, g, b]| Color32::from_rgb(r, g, b));
+        let fill = theme::mix(theme::bg_raised(), tint, if theme::palette().dark { 0.14 } else { 0.1 });
+        let fill = if hovered { theme::mix(fill, theme::bg_widget(), 0.3) } else { fill };
+        let radius = CornerRadius::same(8);
+        painter.add(theme::drop_shadow().as_shape(rect, radius));
+        painter.rect_filled(rect, radius, fill);
+        let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER));
+        let header_radius = if params.collapsed { radius } else { CornerRadius { nw: 8, ne: 8, sw: 0, se: 0 } };
+        painter.rect_filled(header, header_radius, theme::mix(fill, tint, 0.16));
+
+        let fold = layout.fold_button();
+        let fold_response = scene.interact(fold, id.with("fold"), Sense::click());
+        let glyph = if params.collapsed { icon::CARET_RIGHT } else { icon::CARET_DOWN };
+        if fold_response.hovered() {
+            painter.rect_filled(fold, 5.0, theme::with_alpha(theme::text(), 0.08));
+        }
+        painter.text(fold.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(13.0), theme::text_dim());
+        if fold_response.on_hover_text(if params.collapsed { "Unfold" } else { "Fold" }).clicked()
+            && let Some(node) = project.graph.node_mut(layout.id)
+        {
+            node.set_param("collapsed", !params.collapsed);
+        }
+        let title = fit_text(painter, &layout.title, FontId::proportional(13.0), theme::text(), rect.width() - 44.0);
+        painter.galley(pos2(rect.left() + 32.0, header.center().y - title.size().y / 2.0), title, theme::text());
+
+        if !params.collapsed {
+            let text_rect =
+                Rect::from_min_max(pos2(rect.left() + PAD, header.bottom() + 6.0), rect.max - vec2(PAD, 6.0));
+            let galley = painter.layout(
+                params.text.clone(),
+                FontId::proportional(12.5),
+                theme::text_dim(),
+                text_rect.width().max(10.0),
+            );
+            painter.with_clip_rect(text_rect.intersect(painter.clip_rect())).galley(
+                text_rect.min,
+                galley,
+                theme::text_dim(),
+            );
+
+            let grip = layout.grip();
+            let grip_response = scene.interact(grip, id.with("grip"), Sense::drag());
+            let color = if grip_response.hovered() || grip_response.dragged() {
+                scene.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+                theme::accent_bright()
+            } else {
+                theme::text_faint()
+            };
+            for k in 1..=3 {
+                let d = k as f32 * 3.5;
+                painter.line_segment(
+                    [
+                        pos2(rect.right() - d - 2.0, rect.bottom() - 2.0),
+                        pos2(rect.right() - 2.0, rect.bottom() - d - 2.0),
+                    ],
+                    Stroke::new(1.0, color),
+                );
+            }
+            if grip_response.dragged()
+                && let Some(node) = project.graph.node_mut(layout.id)
+            {
+                let delta = grip_response.drag_delta();
+                node.set_param("width", (params.width + f64::from(delta.x)).clamp(80.0, 4000.0));
+                node.set_param("height", (params.height + f64::from(delta.y)).clamp(40.0, 4000.0));
+            }
+        }
+
+        let outline = if self.selection.contains(&layout.id) {
+            Stroke::new(1.8, theme::accent_bright())
+        } else {
+            Stroke::new(1.0, theme::with_alpha(tint, 0.45))
+        };
+        painter.rect_stroke(rect, radius, outline, StrokeKind::Outside);
+    }
+
+    /// The boxes around groups of blocks, with their name, an on/off switch
+    /// and a menu. Dragging a group's title moves the whole group.
+    fn groups(&mut self, scene: &mut Ui, painter: &Painter, project: &mut Project, layouts: &[Layout]) {
+        enum Change {
+            Move(u64, Vec2),
+            Toggle(u64),
+            Rename(u64, String),
+            Color(u64, Option<[u8; 3]>),
+            Ungroup(u64),
+        }
+        let mut changes = Vec::new();
+        let groups = project.graph.groups().to_vec();
+        for group in &groups {
+            let Some(bounds) =
+                layouts.iter().filter(|l| group.nodes.contains(&l.id)).map(|l| l.rect).reduce(|a, b| a.union(b))
+            else {
+                continue;
+            };
+            let rect = Rect::from_min_max(
+                bounds.min - vec2(GROUP_PAD, GROUP_PAD + GROUP_HEADER),
+                bounds.max + Vec2::splat(GROUP_PAD),
+            );
+            let color = group.color.map_or_else(theme::accent, |[r, g, b]| Color32::from_rgb(r, g, b));
+            let strength = if group.enabled { 1.0 } else { 0.45 };
+            painter.rect_filled(rect, 12.0, theme::with_alpha(color, 0.07 * strength));
+            painter.rect_stroke(
+                rect,
+                12.0,
+                Stroke::new(1.2, theme::with_alpha(color, 0.55 * strength)),
+                StrokeKind::Inside,
+            );
+            let header = Rect::from_min_size(rect.min, vec2(rect.width(), GROUP_HEADER));
+            let id = scene.id().with(("group", group.id));
+            let response = scene.interact(header, id, Sense::click_and_drag());
+
+            let renaming = self.renaming == Some(group.id);
+            if !renaming {
+                let name = fit_text(
+                    painter,
+                    &format!("{}  {}", icon::BOUNDING_BOX, group.name),
+                    FontId::proportional(13.0),
+                    theme::with_alpha(theme::text(), strength),
+                    header.width() - 70.0,
+                );
+                painter.galley(
+                    pos2(header.left() + 12.0, header.center().y - name.size().y / 2.0),
+                    name,
+                    theme::text(),
+                );
+            }
+            let power = Rect::from_center_size(pos2(header.right() - 18.0, header.center().y), Vec2::splat(22.0));
+            let power_response = scene.interact(power, id.with("power"), Sense::click());
+            let power_color = if group.enabled { theme::success() } else { theme::text_faint() };
+            if power_response.hovered() {
+                painter.rect_filled(power, 5.0, theme::with_alpha(power_color, 0.15));
+            }
+            painter.text(power.center(), Align2::CENTER_CENTER, icon::POWER, FontId::proportional(14.0), power_color);
+            if !group.enabled {
+                painter.text(
+                    pos2(power.left() - 6.0, header.center().y),
+                    Align2::RIGHT_CENTER,
+                    "off",
+                    FontId::proportional(10.5),
+                    theme::text_faint(),
+                );
+            }
+            let hint = if group.enabled {
+                "Turn this group off: every block in it is skipped"
+            } else {
+                "Turn this group on again"
+            };
+            if power_response.on_hover_text(hint).clicked() {
+                changes.push(Change::Toggle(group.id));
+            }
+
+            if response.dragged_by(PointerButton::Primary) {
+                changes.push(Change::Move(group.id, response.drag_delta()));
+            }
+            if response.clicked() {
+                self.selection = group.nodes.clone();
+            }
+            if response.double_clicked() {
+                self.renaming = Some(group.id);
+            }
+            response.context_menu(|ui| {
+                if ui.button(format!("{}  Rename", icon::PENCIL_SIMPLE)).clicked() {
+                    self.renaming = Some(group.id);
+                    ui.close();
+                }
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 3.0;
+                    let swatches: [Option<[u8; 3]>; 9] = [
+                        None,
+                        Some([0xE5, 0x48, 0x4D]),
+                        Some([0xF0, 0x8C, 0x2E]),
+                        Some([0xE9, 0xC4, 0x3B]),
+                        Some([0x3F, 0xB9, 0x6B]),
+                        Some([0x2E, 0xB3, 0xC4]),
+                        Some([0x3F, 0x7F, 0xE6]),
+                        Some([0x8E, 0x5B, 0xE0]),
+                        Some([0x8A, 0x8A, 0x8A]),
+                    ];
+                    for swatch in swatches {
+                        let shown = swatch.map_or_else(theme::accent, |[r, g, b]| Color32::from_rgb(r, g, b));
+                        let (rect, response) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::click());
+                        ui.painter().circle_filled(rect.center(), 7.0, shown);
+                        if group.color == swatch {
+                            ui.painter().circle_stroke(rect.center(), 8.5, Stroke::new(1.5, theme::text()));
+                        }
+                        let hint = if swatch.is_none() { "Theme colour" } else { "Colour" };
+                        if response.on_hover_text(hint).clicked() {
+                            changes.push(Change::Color(group.id, swatch));
+                        }
+                    }
+                });
+                let label = if group.enabled { "Turn off" } else { "Turn on" };
+                if ui.button(format!("{}  {label}", icon::POWER)).clicked() {
+                    changes.push(Change::Toggle(group.id));
+                    ui.close();
+                }
+                if ui.button(format!("{}  Select its blocks", icon::SELECTION)).clicked() {
+                    self.selection = group.nodes.clone();
+                    ui.close();
+                }
+                if ui.button(format!("{}  Ungroup", icon::BOUNDING_BOX)).on_hover_text("The blocks stay").clicked() {
+                    changes.push(Change::Ungroup(group.id));
+                    ui.close();
+                }
+            });
+
+            if renaming {
+                let mut name = group.name.clone();
+                let field_rect = Rect::from_min_size(
+                    header.min + vec2(10.0, 3.0),
+                    vec2((header.width() - 60.0).max(80.0), GROUP_HEADER - 6.0),
+                );
+                let field = scene.put(field_rect, egui::TextEdit::singleline(&mut name).id(id.with("name")));
+                if !field.has_focus() && !field.lost_focus() {
+                    field.request_focus();
+                }
+                if field.changed() {
+                    changes.push(Change::Rename(group.id, name));
+                }
+                if field.lost_focus() {
+                    self.renaming = None;
+                }
+            }
+        }
+        for change in changes {
+            match change {
+                Change::Move(id, delta) => {
+                    let members = project.graph.groups().iter().find(|g| g.id == id).map(|g| g.nodes.clone());
+                    for member in members.unwrap_or_default() {
+                        if let Some(node) = project.graph.node_mut(member) {
+                            node.pos = [node.pos[0] + delta.x, node.pos[1] + delta.y];
+                        }
+                    }
+                }
+                Change::Toggle(id) => {
+                    if let Some(group) = project.graph.group_mut(id) {
+                        group.enabled = !group.enabled;
+                    }
+                }
+                Change::Rename(id, name) => {
+                    if let Some(group) = project.graph.group_mut(id) {
+                        group.name = name;
+                    }
+                }
+                Change::Color(id, color) => {
+                    if let Some(group) = project.graph.group_mut(id) {
+                        group.color = color;
+                    }
+                }
+                Change::Ungroup(id) => project.graph.remove_group(id),
+            }
+        }
+    }
+
+    /// The search box over the canvas (Ctrl+F): finds blocks by their name,
+    /// type and settings, and groups by name.
+    fn find_bar(&mut self, ui: &Ui, canvas: Rect, project: &Project, registry: &Registry) {
+        let Some(find) = &mut self.find else { return };
+        let query = find.query.trim().to_lowercase();
+        let mut results: Vec<(Found, String)> = Vec::new();
+        if !query.is_empty() {
+            for group in project.graph.groups() {
+                if group.name.to_lowercase().contains(&query) {
+                    results.push((Found::Group(group.id), format!("{}  {}", icon::BOUNDING_BOX, group.name)));
+                }
+            }
+            for node in project.graph.nodes() {
+                let title = registry.title(node);
+                let kind = registry.get(&node.kind).map(|d| d.name.to_lowercase()).unwrap_or_default();
+                let summary = registry.summary(node, &project.assets).join(" ").to_lowercase();
+                if title.to_lowercase().contains(&query) || kind.contains(&query) || summary.contains(&query) {
+                    results.push((Found::Node(node.id), format!("{}  {title}", node_icon(&node.kind))));
+                }
+            }
+        }
+        let mut go = None;
+        let mut close = false;
+        egui::Area::new(Id::new("magi-find"))
+            .order(Order::Foreground)
+            .fixed_pos(pos2((canvas.right() - 300.0).max(canvas.left() + 8.0), canvas.top() + 10.0))
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_width(280.0);
+                    ui.horizontal(|ui| {
+                        let field = ui.add(
+                            egui::TextEdit::singleline(&mut find.query)
+                                .hint_text(format!("{}  Find blocks and groups", icon::MAGNIFYING_GLASS))
+                                .desired_width(ui.available_width() - 28.0),
+                        );
+                        if std::mem::take(&mut find.just_opened) {
+                            field.request_focus();
+                        }
+                        if field.changed() {
+                            find.current = 0;
+                        }
+                        if field.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !results.is_empty() {
+                            find.current %= results.len();
+                            go = Some(results[find.current].0);
+                            find.current += 1;
+                            field.request_focus();
+                        }
+                        if ui.input(|i| i.key_pressed(Key::Escape)) {
+                            close = true;
+                        }
+                        if ui.add(egui::Button::new(icon::X).frame(false)).on_hover_text("Close (Esc)").clicked() {
+                            close = true;
+                        }
+                    });
+                    if !query.is_empty() {
+                        let count = match results.len() {
+                            0 => "Nothing found".to_owned(),
+                            1 => "1 found · Enter to show it".to_owned(),
+                            n => format!("{n} found · Enter for the next"),
+                        };
+                        ui.label(egui::RichText::new(count).size(11.0).color(theme::text_faint()));
+                        egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
+                            for (index, (found, label)) in results.iter().enumerate() {
+                                let current = index + 1 == find.current;
+                                if ui.selectable_label(current, label).clicked() {
+                                    go = Some(*found);
+                                    find.current = index + 1;
+                                }
+                            }
+                        });
+                    }
+                });
+            });
+        match go {
+            Some(Found::Node(node)) => self.reveal(node),
+            Some(Found::Group(id)) => {
+                if let Some(group) = project.graph.groups().iter().find(|g| g.id == id) {
+                    self.selection = group.nodes.clone();
+                    self.center_on = Some(group.nodes.iter().copied().collect());
+                }
+            }
+            None => {}
+        }
+        if close {
+            self.find = None;
         }
     }
 }
@@ -1498,6 +2053,8 @@ struct NodeLook {
     glow: f32,
     running: bool,
     error: bool,
+    /// The block runs: it is enabled, and so are its groups.
+    active: bool,
 }
 
 /// Attaches a dangling wire to the first port of a new node that accepts it.
@@ -1567,7 +2124,14 @@ mod tests {
         let mut harness = builder.build_ui_state(
             |ui, world: &mut World| {
                 let activity = HashMap::new();
-                let env = GraphEnv { registry: &world.registry, activity: &activity, running: &[], error_node: None };
+                let env = GraphEnv {
+                    registry: &world.registry,
+                    activity: &activity,
+                    running: &[],
+                    error_node: None,
+                    show_grid: true,
+                    show_activity: true,
+                };
                 let events = world.view.show(ui, &mut world.project, &env);
                 world.events.extend(events);
             },
@@ -1764,6 +2328,88 @@ mod tests {
         assert!(harness.state().events.is_empty(), "a single click only selects");
         click(&mut harness, at); // 1/60 s steps keep this within the double-click time
         assert!(harness.state().events.iter().any(|e| matches!(e, GraphEvent::Inspect(id) if *id == wait)));
+    }
+
+    #[test]
+    fn comments_fold_and_resize_by_their_corner() {
+        let (mut world, ..) = World::new();
+        let comment = world.project.graph.add(&world.registry, ids::COMMENT, [300.0, 0.0]).unwrap();
+        let mut harness = harness(world);
+        let (grip, fold) = {
+            let world = harness.state();
+            let layout = world.layout(comment);
+            let to_screen = world.view.to_screen(world.view.canvas);
+            (to_screen * layout.grip().center(), to_screen * layout.fold_button().center())
+        };
+        let zoom = harness.state().view.zoom;
+        drag(&mut harness, grip, grip + vec2(60.0, 40.0));
+        let params: CommentParams = harness.state().project.graph.node(comment).unwrap().params_or_default();
+        assert!((params.width - (240.0 + 60.0 / f64::from(zoom))).abs() < 8.0, "width {}", params.width);
+        assert!((params.height - (120.0 + 40.0 / f64::from(zoom))).abs() < 8.0, "height {}", params.height);
+
+        click(&mut harness, fold);
+        let params: CommentParams = harness.state().project.graph.node(comment).unwrap().params_or_default();
+        assert!(params.collapsed, "the arrow folds the comment");
+    }
+
+    #[test]
+    fn ctrl_g_groups_the_selection_and_the_switch_turns_the_group_off() {
+        let (world, start, wait) = World::new();
+        let mut harness = harness(world);
+        let canvas = harness.state().view.canvas;
+        harness.hover_at(canvas.min + vec2(20.0, 20.0));
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::A);
+        harness.run();
+        harness.key_press_modifiers(Modifiers::COMMAND, Key::G);
+        harness.run();
+        // Leave the name as it is.
+        harness.key_press(Key::Enter);
+        harness.run();
+        let group = harness.state().project.graph.groups().first().cloned().expect("a group was made");
+        assert_eq!(group.nodes, BTreeSet::from([start, wait]));
+
+        // The on/off switch sits at the right end of the group's title.
+        let power = {
+            let world = harness.state();
+            let bounds = world.layout(start).rect.union(world.layout(wait).rect);
+            let header_y = bounds.top() - GROUP_PAD - GROUP_HEADER / 2.0;
+            world.view.to_screen(world.view.canvas) * pos2(bounds.right() + GROUP_PAD - 18.0, header_y)
+        };
+        click(&mut harness, power);
+        let graph = &harness.state().project.graph;
+        assert!(!graph.groups()[0].enabled);
+        assert!(!graph.is_active(start) && !graph.is_active(wait), "the blocks of a group that is off are skipped");
+    }
+
+    #[test]
+    fn a_dropped_wire_lists_every_block_and_others_are_added_unwired() {
+        let (world, start, _) = World::new();
+        let mut harness = harness(world);
+        let from = harness.state().port(start, ports::OUT, false);
+        let canvas = harness.state().view.canvas;
+        drag(&mut harness, from, canvas.max - vec2(160.0, 140.0));
+        // Clipboard has no flow input, so it cannot take the wire – but it is listed.
+        harness.event(egui::Event::Text("clipboard".to_owned()));
+        harness.run();
+        harness.key_press(Key::Enter);
+        harness.run();
+        let world = harness.state();
+        assert!(world.project.graph.nodes().any(|n| n.kind == ids::CLIPBOARD), "the block was added");
+        assert!(world.project.graph.flow_target(start, ports::OUT).is_none(), "and left unwired");
+    }
+
+    #[test]
+    fn find_shows_the_block_it_finds() {
+        let (world, _, wait) = World::new();
+        let mut harness = harness(world);
+        harness.state_mut().view.open_find();
+        harness.run();
+        harness.event(egui::Event::Text("wait".to_owned()));
+        harness.run();
+        harness.key_press(Key::Enter);
+        harness.run();
+        assert_eq!(harness.state().view.selection, BTreeSet::from([wait]));
     }
 
     #[test]

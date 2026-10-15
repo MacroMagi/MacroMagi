@@ -138,8 +138,8 @@ impl SettingsWindow {
     ) {
         let narrow = ui.available_width() < 430.0;
         let mut page_ui = |ui: &mut Ui, settings: &mut Settings| {
-            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                ui.set_width(ui.available_width() - 8.0);
+            // Scrolls both ways: a narrow window shows less, it does not grow.
+            egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                 match settings.settings_page {
                     SettingsPage::General => self.general(ui, settings, events),
                     SettingsPage::Appearance => self.appearance(ui, settings, env, events),

@@ -27,6 +27,8 @@ pub mod project;
 pub mod recording;
 pub mod targets;
 pub mod text;
+pub mod values;
+pub mod variables;
 
 pub use error::{Error, Result};
 

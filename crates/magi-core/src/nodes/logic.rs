@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Category, DataType, NodeDef, ParamDef, ParamKind, Registry, ids, ports};
+use crate::text::trim_float;
+use crate::values::{CompareOp, MathOp, TextOp};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,7 +46,104 @@ impl Default for ChanceParams {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MathParams {
+    pub operation: MathOp,
+    /// Used when nothing is wired into A / B.
+    pub a: f64,
+    pub b: f64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CompareParams {
+    pub operation: CompareOp,
+    /// Used when nothing is wired into B.
+    pub b: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextParams {
+    pub operation: TextOp,
+    /// Used when nothing is wired into A / B.
+    pub a: String,
+    pub b: String,
+    /// What B is replaced with, for Replace.
+    pub replacement: String,
+}
+
+fn options<T>(all: &[(T, &'static str, &'static str)]) -> ParamKind {
+    ParamKind::choice(&all.iter().map(|(_, id, label)| (*id, *label)).collect::<Vec<_>>())
+}
+
 pub(super) fn register(registry: &mut Registry) {
+    registry.register(
+        NodeDef::new(
+            ids::MATH,
+            "Math",
+            Category::Logic,
+            "Calculates with numbers: add, subtract, multiply, divide, round, random… A and B \
+             come from their inputs, or from the numbers typed here when nothing is wired.",
+        )
+        .keywords(&["math", "add", "plus", "minus", "multiply", "divide", "calculate", "random", "round", "sum"])
+        .data_in("a", "A", DataType::Number)
+        .data_in("b", "B", DataType::Number)
+        .data_out(ports::OUT, "Result", DataType::Number)
+        .param(ParamDef::new("operation", "Operation", options(&MathOp::ALL)))
+        .param(ParamDef::new("a", "A", ParamKind::float(-1e12, 1e12, "")))
+        .param(ParamDef::new("b", "B", ParamKind::float(-1e12, 1e12, "")))
+        .defaults(&MathParams::default())
+        .summarize(|node, _| {
+            let p: MathParams = node.params_or_default();
+            vec![p.operation.label().replace('A', &trim_float(p.a, 3)).replace('B', &trim_float(p.b, 3))]
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::COMPARE,
+            "Compare",
+            Category::Logic,
+            "True when A relates to B in the chosen way: equal, less, greater, contains… Numbers \
+             compare as numbers, everything else as text.",
+        )
+        .keywords(&["compare", "equal", "less", "greater", "if", "contains", "match", "search", "same"])
+        .data_in("a", "A", DataType::Any)
+        .data_in("b", "B", DataType::Any)
+        .data_out(ports::OUT, "Result", DataType::Bool)
+        .param(ParamDef::new("operation", "Operation", options(&CompareOp::ALL)))
+        .param(ParamDef::new("b", "B", ParamKind::Text { multiline: false }).help("Used when nothing is wired into B."))
+        .defaults(&CompareParams::default())
+        .summarize(|node, _| {
+            let p: CompareParams = node.params_or_default();
+            vec![p.operation.label().replace('B', &format!("“{}”", p.b))]
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::TEXT,
+            "Text",
+            Category::Logic,
+            "Works with text: joins it, measures it, changes case, replaces words, or reads a number from it.",
+        )
+        .keywords(&["text", "string", "join", "concat", "replace", "length", "upper", "lower", "words"])
+        .data_in("a", "A", DataType::Any)
+        .data_in("b", "B", DataType::Any)
+        .data_out(ports::OUT, "Result", DataType::Any)
+        .param(ParamDef::new("operation", "Operation", options(&TextOp::ALL)))
+        .param(ParamDef::new("a", "A", ParamKind::Text { multiline: false }).help("Used when nothing is wired into A."))
+        .param(ParamDef::new("b", "B", ParamKind::Text { multiline: false }).help("Used when nothing is wired into B."))
+        .param(
+            ParamDef::new("replacement", "Replace with", ParamKind::Text { multiline: false })
+                .show_if("operation", "replace"),
+        )
+        .defaults(&TextParams::default())
+        .summarize(|node, _| vec![node.params_or_default::<TextParams>().operation.label().to_owned()]),
+    );
+
     registry.register(
         NodeDef::new(
             ids::GATE,

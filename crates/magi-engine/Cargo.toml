@@ -11,6 +11,7 @@ publish.workspace = true
 [dependencies]
 magi-core.workspace = true
 magi-vision.workspace = true
+magi-audio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

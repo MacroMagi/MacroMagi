@@ -23,6 +23,9 @@ use include_dir::{Dir, DirEntry, include_dir};
 use magi_core::autoclicker::AutoClickParams;
 use magi_core::graph::NodeId;
 use magi_core::input::InputEvent;
+use magi_core::nodes::flow::RateParams;
+use magi_core::nodes::logic::{CompareParams, MathParams, TextParams};
+use magi_core::variables::{as_number, parse_literal};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
@@ -514,6 +517,55 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
         "cursor" => {
             let position = cx.host.cursor().map_err(EngineError::from)?;
             Ok(json!(position))
+        }
+        "resolve" => {
+            let program = Arc::clone(&cx.program);
+            let node = program.node(arg(args, "node")?)?;
+            Ok(Value::Object(cx.params_of(node)))
+        }
+        "var_get" => Ok(cx.vars.get(&arg::<String>(args, "name")?).unwrap_or(Value::Null)),
+        "var_set" => {
+            cx.vars.set(&arg::<String>(args, "name")?, args.get("value").cloned().unwrap_or(Value::Null));
+            Ok(Value::Null)
+        }
+        "vars" => Ok(Value::Object(cx.vars.snapshot())),
+        "set_variable" => cx.set_variable(&arg(args, "params")?, args.get("value").cloned()),
+        "counter" => {
+            let (count, reached) = cx.count(&arg(args, "params")?)?;
+            Ok(json!({ "count": count, "reached": reached }))
+        }
+        "rate" => {
+            let params: RateParams = arg(args, "params")?;
+            let rate_ms = args.get("rate").and_then(as_number).unwrap_or(params.rate_ms);
+            cx.rate(&params, rate_ms)?;
+            Ok(Value::Null)
+        }
+        "math" => {
+            let params: MathParams = arg(args, "params")?;
+            let a = args.get("a").and_then(as_number).unwrap_or(params.a);
+            let b = args.get("b").and_then(as_number).unwrap_or(params.b);
+            let random = cx.random();
+            Ok(params.operation.apply(a, b, random).map_or(Value::Null, |n| json!(n)))
+        }
+        "compare" => {
+            let params: CompareParams = arg(args, "params")?;
+            let a = args.get("a").cloned().unwrap_or(Value::Null);
+            let b = args.get("b").cloned().unwrap_or_else(|| parse_literal(&params.b));
+            Ok(json!(params.operation.apply(&a, &b)))
+        }
+        "text" => {
+            let params: TextParams = arg(args, "params")?;
+            let a = args.get("a").cloned().unwrap_or_else(|| Value::String(params.a.clone()));
+            let b = args.get("b").cloned().unwrap_or_else(|| Value::String(params.b.clone()));
+            Ok(params.operation.apply(&a, &b, &params.replacement))
+        }
+        "clipboard" => Ok(Value::String(cx.clipboard()?)),
+        "sound_level" => Ok(Value::Object(cx.sound_level(&arg(args, "params")?)?)),
+        "sound_match" => Ok(Value::Object(cx.sound_match(&arg(args, "params")?, arg(args, "node")?)?)),
+        "notify" => {
+            let node: Option<NodeId> = arg(args, "node")?;
+            cx.notify(&arg(args, "params")?, args.get("value").cloned(), node.unwrap_or(0))?;
+            Ok(Value::Null)
         }
         other => Err(EngineError::new(format!("the Python runtime asked for an unknown operation `{other}`")).into()),
     }

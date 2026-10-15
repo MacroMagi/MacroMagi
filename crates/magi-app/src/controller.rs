@@ -768,8 +768,10 @@ impl Inner {
                     .copied()
                     .collect();
                 let cursor = self.host.cursor().unwrap_or_default();
+                // Positions are recorded relative to the display they are on.
+                let displays = magi_core::geom::Displays::new(self.host.screens().unwrap_or_default());
                 state.recording = Some(ActiveRecording {
-                    builder: RecordingBuilder::new(state.config.record.clone(), ignored, cursor),
+                    builder: RecordingBuilder::new(state.config.record.clone(), ignored, cursor, displays),
                     started: Instant::now(),
                 });
             }

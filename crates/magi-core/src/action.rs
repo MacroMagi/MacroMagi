@@ -60,6 +60,9 @@ pub enum Action {
     Move {
         x: i32,
         y: i32,
+        /// The display `x`/`y` are on (0 = primary). `None`: global coordinates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<u8>,
         /// Treat `x`/`y` as an offset from the current pointer position.
         #[serde(default)]
         relative: bool,
@@ -94,7 +97,7 @@ impl Action {
         Some(match kind {
             "key" => Action::tap(Key::Space),
             "mouse" => Action::click(MouseButton::Left),
-            "move" => Action::Move { x: 0, y: 0, relative: false, duration_ms: 0 },
+            "move" => Action::Move { x: 0, y: 0, display: Some(0), relative: false, duration_ms: 0 },
             "scroll" => Action::Scroll { dx: 0, dy: -1 },
             "text" => Action::Text { text: String::new() },
             _ => return None,

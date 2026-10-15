@@ -26,6 +26,7 @@ pub struct ClickerEnv<'a> {
     pub clicks: u64,
     pub error: Option<String>,
     pub capturing: Option<(&'a HotkeyTarget, &'a Hotkey)>,
+    pub displays: &'a magi_core::geom::Displays,
 }
 
 impl ClickerTab {
@@ -43,7 +44,9 @@ impl ClickerTab {
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.add_enabled_ui(!env.running, |ui| {
-                        for request in clicker_form::show(ui, config, "clicker", SnipTarget::ClickerPosition) {
+                        for request in
+                            clicker_form::show(ui, config, "clicker", SnipTarget::ClickerPosition, env.displays)
+                        {
                             events.push(ClickerEvent::Request(request));
                         }
                         ui.add_space(6.0);

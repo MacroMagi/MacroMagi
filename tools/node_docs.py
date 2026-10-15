@@ -12,13 +12,19 @@ import json
 import sys
 
 CATEGORIES = [
-    ("flow", "Flow", "Where a macro starts, waits, loops, branches and stops."),
+    ("flow", "Flow", "Where a macro starts, waits, loops, branches and stops, and the pieces it is built from."),
     ("input", "Input", "Sending keyboard and mouse input."),
     ("vision", "Vision", "Looking at the screen. These are value blocks: they have no place in the "
      "order of execution and are evaluated whenever another block reads them."),
+    ("sound", "Sound", "Listening to what the computer plays, or to the microphone. Value blocks, like "
+     "the vision blocks."),
     ("window", "Window", "Working with program windows."),
-    ("logic", "Logic", "Combining and producing true/false values."),
+    ("variables", "Variables", "Named values a macro reads and changes while it runs. Any setting of any "
+     "block can also follow a variable (the link button next to it)."),
+    ("logic", "Logic", "Combining and producing values: true/false, numbers and text."),
+    ("system", "System", "The clipboard and notifications."),
     ("script", "Script", "Your own code as a step of the macro."),
+    ("notes", "Notes", "Explanations on the canvas. They never run."),
     ("addon", "Add-ons", "Blocks contributed by add-ons."),
 ]
 
@@ -30,6 +36,8 @@ KIND_NAMES = {
     "mouse_button": "mouse button", "hotkey": "hotkey", "point": "screen position",
     "region": "screen area", "color": "colour", "image": "image", "recording": "recording",
     "actions": "list of inputs", "cases": "list of cases", "clicker": "Auto Clicker settings",
+    "variable": "variable", "definition": "definition", "block": "block", "display": "display",
+    "audio": "sound",
 }
 
 
@@ -46,8 +54,14 @@ def default_text(param):
         return "on" if value else "off"
     if kind == "region":
         return "whole screen"
-    if kind in ("point", "image", "recording"):
+    if kind in ("point", "image", "recording", "audio", "block"):
         return "none"
+    if kind in ("variable", "definition"):
+        return value or "none"
+    if kind == "display":
+        return "%d (primary)" % (value + 1) if value == 0 else str(value + 1)
+    if kind == "text" and value == "":
+        return "empty"
     if kind == "hotkey":
         return value or "none"
     if kind == "actions":

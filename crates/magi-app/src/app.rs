@@ -33,9 +33,10 @@ use crate::presets::PresetLibrary;
 use crate::settings::{ExportChoices, Settings, SettingsPage, Tab};
 use crate::theme::{self, Palette, ThemeMode};
 use crate::ui::autoclicker::{ClickerEnv, ClickerEvent, ClickerTab};
+use crate::ui::inspector::{self, InspectorEnv};
 use crate::ui::macro_tab::{MacroEnv, MacroEvent, MacroTab};
 use crate::ui::options::{self, OptionsEvent, RulesWindow};
-use crate::ui::overlay::TargetOverlay;
+use crate::ui::overlay::{OverlayOutcome, TargetOverlay};
 use crate::ui::recording_editor;
 use crate::ui::settings_window::{SettingsEnv, SettingsEvent, SettingsWindow, StartHotkey};
 use crate::ui::snip::{Snip, SnipOutcome};
@@ -111,6 +112,8 @@ pub struct StartupOptions {
     pub screenshot: Option<PathBuf>,
     /// Open the first recording block's information card (for screenshots).
     pub show_cards: bool,
+    /// Open View → Screen targets (for screenshots).
+    pub show_targets: bool,
     /// Select the first block of this type (for screenshots).
     pub select_kind: Option<String>,
     /// Open the settings window on this page (for screenshots).
@@ -144,6 +147,8 @@ pub struct MagiApp {
     stop_hotkeys_open: bool,
     /// The recording shown in the pop-out editor.
     recording_window: Option<String>,
+    /// The Rate block shown in the Variable Rate Editor.
+    rate_window: Option<NodeId>,
     pending: Option<Pending>,
     export: Option<ExportChoices>,
     preset_prompt: Option<(PresetKind, String)>,
@@ -161,6 +166,8 @@ pub struct MagiApp {
     activity: HashMap<NodeId, magi_engine::Activity>,
 
     background: BackgroundLayer,
+    /// The banner logo, made for light or dark mode.
+    logo: Option<(bool, egui::TextureHandle)>,
     applied_palette: Option<(bool, Option<[u8; 3]>, u32)>,
     applied_window: Option<(bool, bool, f32)>,
     applied_title: String,
@@ -210,6 +217,7 @@ impl MagiApp {
             rules_window: RulesWindow::default(),
             stop_hotkeys_open: false,
             recording_window: None,
+            rate_window: None,
             pending: None,
             export: None,
             preset_prompt: None,
@@ -224,6 +232,7 @@ impl MagiApp {
             error_node: None,
             activity: HashMap::new(),
             background: BackgroundLayer::default(),
+            logo: None,
             applied_palette: None,
             applied_window: None,
             applied_title: String::new(),
@@ -247,6 +256,9 @@ impl MagiApp {
             for node in recordings {
                 app.macro_tab.view.show_card(node);
             }
+        }
+        if options.show_targets {
+            app.overlay = TargetOverlay::begin(&cc.egui_ctx).ok();
         }
         if let Some(page) = options.settings_page {
             app.settings.settings_page = page;
@@ -488,6 +500,25 @@ impl MagiApp {
             }
             UiRequest::RecordInto(node, key) => self.toggle_recording(Some((node, key)), true),
             UiRequest::EditRecording(asset) => self.recording_window = Some(asset),
+            UiRequest::LoadSound(node, key) => {
+                let dialog = rfd::FileDialog::new().add_filter("Sounds", &["wav", "mp3", "ogg", "flac"]);
+                let Some(path) = dialog.pick_file() else { return };
+                let loaded = std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| magi_audio::prepare_upload(&bytes).map_err(|e| e.to_string()));
+                match loaded {
+                    Ok(wav) => {
+                        let name =
+                            path.file_stem().map_or_else(|| "Sound".to_owned(), |s| s.to_string_lossy().into_owned());
+                        let id = self.doc.project.assets.add_audio(name, wav);
+                        if let Some(node) = self.doc.project.graph.node_mut(node) {
+                            node.set_param(&key, id);
+                        }
+                    }
+                    Err(error) => self.toast_error(format!("Could not load the sound: {error}")),
+                }
+            }
+            UiRequest::EditRate(node) => self.rate_window = Some(node),
         }
     }
 
@@ -512,18 +543,20 @@ impl MagiApp {
                 let id = self.doc.project.assets.add_image(format!("Image {}", count + 1), png);
                 set(self, node, &key, serde_json::json!(id));
             }
-            (SnipTarget::Action(node, index), SnipOutcome::Point(point)) => {
+            (SnipTarget::Action(node, key, index), SnipOutcome::Point(point)) => {
                 let Some(node) = self.doc.project.graph.node_mut(node) else { return };
-                let mut actions: Vec<Action> = node.param("actions").unwrap_or_default();
+                let mut actions: Vec<Action> = node.param(&key).unwrap_or_default();
                 match actions.get_mut(index) {
                     Some(Action::Mouse { at, .. }) => *at = Some(point),
-                    Some(Action::Move { x, y, relative, .. }) => (*x, *y, *relative) = (point.x, point.y, false),
+                    Some(Action::Move { x, y, display, relative, .. }) => {
+                        (*x, *y, *display, *relative) = (point.x, point.y, point.display, false)
+                    }
                     _ => return,
                 }
-                node.set_param("actions", actions);
+                node.set_param(&key, actions);
             }
-            (SnipTarget::ClickerPosition, SnipOutcome::Point(Point { x, y })) => {
-                self.settings.clicker.position = ClickPosition::Fixed { x, y };
+            (SnipTarget::ClickerPosition, SnipOutcome::Point(Point { x, y, display })) => {
+                self.settings.clicker.position = ClickPosition::Fixed { x, y, display };
             }
             (SnipTarget::ClickerNode(node), SnipOutcome::Point(point)) => {
                 targets::apply(&mut self.doc.project.graph, &TargetSource::Clicker { node }, TargetShape::Point(point));
@@ -652,6 +685,23 @@ impl MagiApp {
         }
         self.activity = self.controller.monitor().activity();
 
+        // Macros that ended by themselves.
+        let finished = self.controller.monitor().take_finished();
+        if self.settings.notify_on_finish
+            && let Some(run) = finished.iter().find(|run| run.by_itself)
+        {
+            let message = if run.failed {
+                format!("“{}” stopped because of an error.", self.doc.title())
+            } else {
+                format!("“{}” has finished.", self.doc.title())
+            };
+            let notification =
+                magi_core::host::Notification { title: "MacroMagi".into(), message, sound: true, popup: true };
+            if let Err(error) = magi_platform::notify::notify(&notification) {
+                self.toast_error(format!("Could not show a notification: {}", error.0));
+            }
+        }
+
         // Settings are written a moment after they stop changing.
         if self.settings != self.saved_settings {
             let since = *self.settings_changed.get_or_insert_with(Instant::now);
@@ -727,7 +777,13 @@ impl MagiApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { 6.0 };
             if width > 470.0 {
-                ui.label(RichText::new(icon::MAGIC_WAND).size(18.0).color(theme::accent_bright()));
+                let dark = theme::palette().dark;
+                if self.logo.as_ref().is_none_or(|(made_for, _)| *made_for != dark) {
+                    self.logo = Some((dark, crate::icon::logo(ui.ctx(), dark)));
+                }
+                if let Some((_, logo)) = &self.logo {
+                    ui.add(egui::Image::new((logo.id(), vec2(24.0, 24.0))));
+                }
             }
             let names = if width < 430.0 { ("Clicker", "Macro") } else { ("Auto Clicker", "Macro") };
             widgets::segmented(ui, &mut self.settings.tab, &[(Tab::AutoClicker, names.0), (Tab::Macro, names.1)]);
@@ -806,7 +862,12 @@ impl MagiApp {
         self.file_menu(ui, &label(icon::FILE, "File"));
         let mut option_events = Vec::new();
         ui.menu_button(label(icon::SLIDERS, "Options"), |ui| {
-            option_events = options::menu(ui, &mut self.settings.options, &mut self.settings.dry_run);
+            option_events = options::menu(
+                ui,
+                &mut self.settings.options,
+                &mut self.settings.dry_run,
+                &mut self.settings.notify_on_finish,
+            );
         })
         .response
         .on_hover_text("Options for the Auto Clicker and macros");
@@ -815,9 +876,14 @@ impl MagiApp {
                 OptionsEvent::OpenStopHotkeys => self.stop_hotkeys_open = true,
                 OptionsEvent::OpenProcessRules => self.rules_window.open = true,
                 OptionsEvent::CreateShortcut => {
-                    self.spawn_job(ctx, || match magi_platform::system::create_desktop_shortcut() {
-                        Ok(path) => Job::Toast(format!("Shortcut created: {}", path.display()), false),
-                        Err(error) => Job::Toast(format!("Could not create the shortcut: {error}"), true),
+                    let icon_dir = self.paths.data_dir.join("icon");
+                    self.spawn_job(ctx, move || {
+                        let icons = crate::icon::write_shortcut_icons(&icon_dir).ok();
+                        let icon = icons.as_ref().map(|(ico, png)| magi_platform::system::ShortcutIcon { ico, png });
+                        match magi_platform::system::create_desktop_shortcut(icon) {
+                            Ok(path) => Job::Toast(format!("Shortcut created: {}", path.display()), false),
+                            Err(error) => Job::Toast(format!("Could not create the shortcut: {error}"), true),
+                        }
                     })
                 }
             }
@@ -1070,6 +1136,15 @@ impl MagiApp {
             if ui.checkbox(&mut inspector, "Block settings").changed() {
                 self.macro_tab.toggle_inspector(width);
             }
+            ui.checkbox(&mut self.settings.show_variables, "Variables");
+            ui.separator();
+            ui.checkbox(&mut self.settings.show_grid, "Grid").on_hover_text("The grid behind the blocks");
+            ui.checkbox(&mut self.settings.show_activity, "Block activity").on_hover_text("Blocks glow while they run");
+            if ui.add(egui::Button::new(format!("{}  Find…", icon::MAGNIFYING_GLASS)).shortcut_text("Ctrl+F")).clicked()
+            {
+                self.macro_tab.view.open_find();
+                ui.close();
+            }
             ui.separator();
             if ui.add(egui::Button::new(format!("{}  Fit to view", icon::CORNERS_OUT)).shortcut_text("F")).clicked() {
                 self.macro_tab.view.request_fit();
@@ -1108,11 +1183,13 @@ impl MagiApp {
         let monitor = self.controller.clicker_monitor();
         let error = monitor.logs().into_iter().rev().find(|e| e.level == LogLevel::Error).map(|e| e.message);
         let running = self.controller.clicker_running();
+        let displays = crate::displays::current();
         let env = ClickerEnv {
             running,
             clicks: monitor.clicks(),
             error,
             capturing: self.capture.as_ref().map(|(target, pending)| (target, pending)),
+            displays: &displays,
         };
         let events = self.clicker_tab.show(ui, &mut self.settings.clicker, &env);
         if running {
@@ -1134,6 +1211,8 @@ impl MagiApp {
     fn macro_editor(&mut self, ui: &mut Ui) {
         let running = self.controller.running_nodes();
         let python = self.controller.python_status();
+        let displays = crate::displays::current();
+        let live = self.controller.monitor().variables();
         let mut env = MacroEnv {
             registry: &self.registry,
             activity: &self.activity,
@@ -1149,6 +1228,12 @@ impl MagiApp {
             python: &python,
             dry_run: self.settings.dry_run,
             show_console: &mut self.settings.show_console,
+            show_variables: &mut self.settings.show_variables,
+            show_grid: self.settings.show_grid,
+            show_activity: self.settings.show_activity,
+            record: &mut self.settings.record,
+            displays: &displays,
+            live: &live,
         };
         let events = self.macro_tab.show(ui, &mut self.doc, &mut env);
         let size = self.macro_tab.view.palette_size;
@@ -1232,6 +1317,7 @@ impl MagiApp {
         }
         self.rules_window.show(ctx, &mut self.settings.options);
         self.recording_popout(ctx);
+        self.rate_editor(ctx);
         self.dialogs(ctx);
         self.toasts(ctx);
     }
@@ -1335,7 +1421,7 @@ impl MagiApp {
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(("recording", &asset)), builder, |ui, class| {
             let mut contents = |ui: &mut Ui| {
                 let height = (ui.available_height() - 150.0).max(120.0);
-                edit = recording_editor::show(ui, &recording, height, true).edit;
+                edit = recording_editor::full(ui, &recording, height).edit;
             };
             match class {
                 egui::ViewportClass::EmbeddedWindow => contents(ui),
@@ -1359,6 +1445,87 @@ impl MagiApp {
         }
         if closed {
             self.recording_window = None;
+        }
+    }
+
+    /// The Variable Rate Editor: a Rate block's timing and steps in a window
+    /// of their own.
+    fn rate_editor(&mut self, ctx: &egui::Context) {
+        let Some(node_id) = self.rate_window else { return };
+        if self.doc.project.graph.node(node_id).is_none_or(|n| n.kind != ids::RATE) {
+            self.rate_window = None;
+            return;
+        }
+        let displays = crate::displays::current();
+        let live = self.controller.monitor().variables();
+        let mut requests = Vec::new();
+        let mut open = true;
+        let size = self.settings.rate_window_size.unwrap_or([460.0, 560.0]);
+        let shown = egui::Window::new(format!("{}  Variable Rate Editor", icon::METRONOME))
+            .id(egui::Id::new("rate-editor"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size(size)
+            .min_size([340.0, 260.0])
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    let mut env = InspectorEnv {
+                        registry: &self.registry,
+                        images: &mut self.macro_tab.view.images,
+                        capturing: self.capture.as_ref().map(|(target, pending)| (target, pending)),
+                        recording: false,
+                        displays: &displays,
+                        live: &live,
+                    };
+                    let project = &mut self.doc.project;
+                    if let Some(node) = project.graph.node_mut(node_id) {
+                        ui.horizontal(|ui| {
+                            widgets::caption(ui, "Name");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut node.label)
+                                    .hint_text("Rate")
+                                    .desired_width(f32::INFINITY),
+                            );
+                        });
+                    }
+                    widgets::note(
+                        ui,
+                        "The steps run one after another, the time below apart. To change the time while the macro \
+                         runs, link it to a variable (the link button) or wire a number into the block's Rate input.",
+                    );
+                    let wired = project.graph.data_source(node_id, "rate").is_some();
+                    if wired {
+                        widgets::notice(
+                            ui,
+                            icon::PLUG,
+                            "A value is wired into Rate: it decides the time while the macro runs.",
+                            theme::accent_bright(),
+                        );
+                    }
+                    ui.add_space(4.0);
+                    requests.extend(inspector::edit_setting(ui, project, node_id, "rate_ms", &mut env));
+                    requests.extend(inspector::edit_setting(ui, project, node_id, "hold_ms", &mut env));
+                    ui.add_space(6.0);
+                    let params: magi_core::nodes::flow::RateParams =
+                        project.graph.node(node_id).map(|n| n.params_or_default()).unwrap_or_default();
+                    rate_preview(ui, &params);
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("STEPS").size(10.5).color(theme::text_faint()));
+                    if let Some(node) = project.graph.node_mut(node_id) {
+                        inspector::edit_actions(ui, node, "steps", &displays, &mut requests);
+                    }
+                });
+            });
+        if let Some(shown) = shown {
+            let rect = shown.response.rect;
+            self.settings.rate_window_size = Some([rect.width().round(), rect.height().round()]);
+        }
+        for request in requests {
+            self.handle_request(ctx, request);
+        }
+        if !open {
+            self.rate_window = None;
         }
     }
 
@@ -1688,11 +1855,22 @@ impl eframe::App for MagiApp {
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
-        if let Some(overlay) = &mut self.overlay
-            && overlay.show(&ctx, &mut self.doc.project, &self.registry)
-        {
-            self.overlay = None;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        if let Some(overlay) = &mut self.overlay {
+            match overlay.show(&ctx, &mut self.doc.project, &self.registry) {
+                OverlayOutcome::Open => {}
+                OverlayOutcome::Closed => {
+                    self.overlay = None;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                OverlayOutcome::ShowBlock(node) => {
+                    self.overlay = None;
+                    self.settings.tab = Tab::Macro;
+                    self.macro_tab.view.reveal(node);
+                    self.macro_tab.docked_inspector = true;
+                    self.macro_tab.floating_inspector = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+            }
         }
 
         egui::Panel::top("top-bar")
@@ -1720,6 +1898,45 @@ impl eframe::App for MagiApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         theme::bg_app().to_opaque().to_normalized_gamma_f32()
     }
+}
+
+/// The steps of a Rate block on a line, each at the time it happens.
+fn rate_preview(ui: &mut Ui, params: &magi_core::nodes::flow::RateParams) {
+    let count = params.steps.len();
+    if count == 0 {
+        ui.weak("No steps yet.");
+        return;
+    }
+    let total = params.rate_ms * (count.saturating_sub(1)) as f64;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 5.0, theme::bg_input());
+    let inner = rect.shrink2(vec2(14.0, 8.0));
+    painter.hline(inner.x_range(), inner.center().y, egui::Stroke::new(1.0, theme::stroke_strong()));
+    for (index, step) in params.steps.iter().enumerate() {
+        let t = if count > 1 { index as f32 / (count - 1) as f32 } else { 0.5 };
+        let x = inner.left() + t * inner.width();
+        painter.circle_filled(egui::pos2(x, inner.center().y), 4.0, theme::accent());
+        if count <= 12 {
+            painter.text(
+                egui::pos2(x, inner.top()),
+                Align2::CENTER_TOP,
+                format!("{}", index + 1),
+                egui::FontId::proportional(10.0),
+                theme::text_dim(),
+            );
+        }
+        let _ = step;
+    }
+    ui.label(
+        RichText::new(format!(
+            "{count} steps over {} · one every {}",
+            magi_core::text::format_ms(total),
+            magi_core::text::format_ms(params.rate_ms)
+        ))
+        .size(11.0)
+        .color(theme::text_faint()),
+    );
 }
 
 #[cfg(test)]
@@ -1751,6 +1968,7 @@ mod tests {
             tab: Some(Tab::AutoClicker),
             screenshot: None,
             show_cards: false,
+            show_targets: false,
             select_kind: None,
             settings_page: None,
         };
@@ -1770,6 +1988,49 @@ mod tests {
             controller.inject(InputEvent::KeyUp { key: *key });
         }
         harness.run_steps(3);
+    }
+
+    #[test]
+    fn changed_clicker_values_have_a_reset_button() {
+        let mut harness = app();
+        let undo_and_resets =
+            |harness: &Harness<'_, MagiApp>| harness.query_all_by_label(icon::ARROW_COUNTER_CLOCKWISE).count();
+        let before = undo_and_resets(&harness);
+        harness.state_mut().settings.clicker.hold_ms = 55.0;
+        harness.run_steps(3);
+        assert_eq!(undo_and_resets(&harness), before + 1, "a reset button appears next to Hold for");
+        harness.query_all_by_label(icon::ARROW_COUNTER_CLOCKWISE).last().expect("the reset button").click();
+        harness.run_steps(3);
+        assert_eq!(
+            harness.state().settings.clicker.hold_ms,
+            magi_core::autoclicker::ClickerSettings::default().hold_ms
+        );
+        assert_eq!(undo_and_resets(&harness), before, "and goes away again");
+    }
+
+    #[test]
+    fn a_block_setting_can_follow_a_new_variable() {
+        let mut harness = app_sized(1200.0, 900.0);
+        let wait = {
+            let state = harness.state_mut();
+            state.settings.tab = Tab::Macro;
+            let id = state.doc.project.graph.add(&state.registry, ids::DELAY, [0.0, 200.0]).unwrap();
+            state.macro_tab.view.focus_node(id);
+            id
+        };
+        harness.run_steps(4);
+        // The first link button belongs to the Wait block's Duration.
+        harness.query_all_by_label(icon::LINK).next().expect("a link button").click();
+        harness.run_steps(3);
+        harness.get_by_label(&format!("{}  New variable from this setting", icon::PLUS)).click();
+        harness.run_steps(3);
+
+        let project = &harness.state().doc.project;
+        assert_eq!(project.variables.len(), 1);
+        let name = project.variables[0].name.clone();
+        assert_eq!(project.variables[0].value, serde_json::json!(500.0), "it starts with the setting's value");
+        let bound = project.graph.node(wait).unwrap().params.get("ms").cloned();
+        assert_eq!(bound, Some(magi_core::variables::binding(&name)));
     }
 
     #[test]
@@ -1833,10 +2094,67 @@ mod tests {
         let before = harness.state().doc.project.assets.recording(&asset).unwrap().duration_ms;
         harness.state_mut().handle_request(&egui::Context::default(), UiRequest::EditRecording(asset.clone()));
         harness.run_steps(4);
-        harness.get_by_label("½× time").click();
+        harness.get_by_label("×2").click();
         harness.run_steps(3);
         let after = harness.state().doc.project.assets.recording(&asset).unwrap().duration_ms;
         assert!((after - before / 2.0).abs() < 1e-6, "{before} -> {after}");
+    }
+
+    #[test]
+    fn panels_and_windows_keep_their_size() {
+        let mut harness = app_sized(1280.0, 860.0);
+        let project = examples::build(0, &harness.state().registry);
+        harness.state_mut().replace_document(Document::new(project, None));
+        let find = harness.state().doc.project.graph.nodes().find(|n| n.kind == ids::FIND_IMAGE).unwrap().id;
+        harness.state_mut().macro_tab.view.focus_node(find);
+        harness.state_mut().settings.show_console = true;
+        harness.state_mut().settings.show_variables = true;
+        harness.state_mut().doc.project.variables.push(magi_core::variables::Variable::new(
+            "a rather long variable name that could push the panel wider",
+            serde_json::json!("and a long starting value as well, to be sure"),
+        ));
+        let rate = {
+            let state = harness.state_mut();
+            state.doc.project.graph.add(&state.registry, ids::RATE, [900.0, 900.0]).unwrap()
+        };
+        harness.state_mut().rate_window = Some(rate);
+        harness.state_mut().rules_window.open = true;
+        harness.state_mut().stop_hotkeys_open = true;
+        harness.state_mut().settings_window.open = true;
+        let measure = |harness: &Harness<'_, MagiApp>| {
+            let ctx = &harness.ctx;
+            let panel = |id: &str| egui::containers::panel::PanelState::load(ctx, egui::Id::new(id)).map(|p| p.size());
+            let area = |id: &str| ctx.memory(|m| m.area_rect(egui::Id::new(id))).map(|r| r.size());
+            (
+                panel("macro-inspector"),
+                panel("macro-console"),
+                area("process-rules-window"),
+                area("stop-hotkeys-window"),
+                area("settings-window"),
+                panel("macro-variables"),
+                area("rate-editor"),
+            )
+        };
+        harness.run_steps(5);
+        let first = measure(&harness);
+        harness.run_steps(60);
+        assert_eq!(measure(&harness), first, "nothing creeps wider or taller on its own");
+
+        // Whatever block is selected, the settings panel keeps its width.
+        let kinds: Vec<String> = harness.state().registry.iter().map(|def| def.id.clone()).collect();
+        for kind in kinds {
+            let state = harness.state_mut();
+            let at = state.macro_tab.view.view_center();
+            let node = state.macro_tab.view.add_node(&mut state.doc.project, &state.registry, &kind, at).unwrap();
+            state.macro_tab.view.focus_node(node);
+            harness.run_steps(6);
+            assert_eq!(measure(&harness).0, first.0, "the panel changed width for {kind}");
+        }
+        for page in SettingsPage::ALL {
+            harness.state_mut().settings.settings_page = page;
+            harness.run_steps(4);
+            assert_eq!(measure(&harness).4, first.4, "the settings window changed size on {page:?}");
+        }
     }
 
     #[test]

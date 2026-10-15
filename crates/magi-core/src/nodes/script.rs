@@ -8,6 +8,7 @@ pub const DEFAULT_PYTHON: &str = "\
 # Runs when the flow reaches this block.
 #   magi   – the scripting API: magi.click(), magi.press(), magi.sleep(), magi.log() …
 #   value  – whatever is wired into the Value input (None if nothing is)
+#   magi.vars['name'] reads and changes the macro's variables.
 # Assign to `result` to send a value out of the Result output.
 result = True
 ";
@@ -16,11 +17,13 @@ result = True
 #[serde(default)]
 pub struct PythonParams {
     pub code: String,
+    /// The variable `result` is stored in when the script ends. Empty: none.
+    pub result_variable: String,
 }
 
 impl Default for PythonParams {
     fn default() -> Self {
-        Self { code: DEFAULT_PYTHON.into() }
+        Self { code: DEFAULT_PYTHON.into(), result_variable: String::new() }
     }
 }
 
@@ -39,6 +42,10 @@ pub(super) fn register(registry: &mut Registry) {
         .flow_out(ports::OUT, "")
         .data_out("result", "Result", DataType::Any)
         .param(ParamDef::new("code", "Code", ParamKind::Code { language: "python".into() }))
+        .param(
+            ParamDef::new("result_variable", "Store the result in", ParamKind::Variable)
+                .help("When the script ends, `result` is stored in this variable."),
+        )
         .defaults(&PythonParams::default())
         .python_only()
         .summarize(|node, _| {

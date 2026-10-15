@@ -68,17 +68,20 @@ Documentation screenshots are produced by the app itself and only ever show its 
 export MACROMAGI_DATA_DIR="$(mktemp -d)"
 cargo run --release -p magi-app -- --screenshot docs/images/auto-clicker.png --tab clicker --size 440x760
 cargo run --release -p magi-app -- --screenshot docs/images/macro-editor.png --tab macro --example 0 --size 1280x860 --select vision.find_image
-cargo run --release -p magi-app -- --screenshot docs/images/recording.png --tab macro --example 2 --size 1100x680 --cards
+cargo run --release -p magi-app -- --screenshot docs/images/recording.png --tab macro --example 2 --size 1100x680 --cards --select input.recording
+echo '{"show_variables": true}' > "$MACROMAGI_DATA_DIR/settings.json"
+cargo run --release -p magi-app -- --screenshot docs/images/functions.png --tab macro --example 3 --size 1280x820 --select flow.delay
 ```
 
-`--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`).
+`--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`). `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
 
 ## Where things live
 
 ```text
 crates/magi-core/      data model, block definitions, file formats    (no OS, no UI)
 crates/magi-vision/    image matching, colour search                  (pure functions on pixels)
-crates/magi-platform/  input injection, listening, gamepads, capture  (the only OS code)
+crates/magi-audio/     loudness, pitch, sound recognition, sound files (pure functions on samples)
+crates/magi-platform/  input, listening, gamepads, capture, sound     (the only OS code)
 crates/magi-engine/    native interpreter, Python bridge, device operations
 crates/magi-app/       the application: UI, controller, command line
 runtime/python/        the Python engine (standard library only)

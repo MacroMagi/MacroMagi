@@ -19,3 +19,19 @@ class StopRun(Exception):
     def __init__(self, everything=False):
         super().__init__("stop")
         self.everything = everything
+
+
+class EndBranch(Exception):
+    """Raised by a Stop block to end this branch; inside a Repeat, its next round begins."""
+
+
+class ExitLoop(Exception):
+    """Raised by a Stop block to leave the innermost Repeat through its Done output."""
+
+
+class GoTo(Exception):
+    """Raised by a Stop block to continue from another block."""
+
+    def __init__(self, target):
+        super().__init__("go to")
+        self.target = target

@@ -18,24 +18,25 @@ This document explains how MacroMagi is put together and, more importantly, *why
                       │           │          │
             ┌─────────▼───┐   ┌───▼──────────▼───┐
             │ magi-engine │   │   magi-platform   │  the only crate that
-            └───┬─────┬───┘   └────────┬──────────┘  talks to the OS
-                │     │                │
-     ┌──────────▼┐   ┌▼────────────────▼──┐
-     │magi-vision│   │      magi-core      │  data model, no OS, no UI
-     └───────────┘   └─────────────────────┘
+            └┬────┬─────┬─┘   └────────┬──────────┘  talks to the OS
+             │    │     │              │
+ ┌───────────▼┐ ┌─▼─────────┐ ┌────────▼────────────┐
+ │ magi-vision│ │ magi-audio│ │      magi-core      │  data model, no OS, no UI
+ └────────────┘ └───────────┘ └─────────────────────┘
 ```
 
 | Crate | Owns | Must not |
 | --- | --- | --- |
 | `magi-core` | Graphs, block definitions, the input vocabulary, recordings, assets, the `.magi` and `.mp` formats, the `Host` interface | Touch the OS or draw anything |
 | `magi-vision` | Template matching and colour search on pixel buffers | Know where pixels come from |
-| `magi-platform` | Sending input, listening for input, gamepads, screen capture | Know about graphs or blocks |
+| `magi-audio` | Loudness, pitch, sound fingerprints and matching; decoding uploaded sound files | Know where sound comes from |
+| `magi-platform` | Sending input, listening for input, gamepads, screen capture, listening to sound, notifications, the clipboard | Know about graphs or blocks |
 | `magi-engine` | Running a graph: the native interpreter, the Python bridge, shared device operations | Touch the OS directly (it goes through `Host`) |
 | `magi-app` | The window, the controller thread, the command line | Contain block behaviour |
 
 Dependencies point downwards only. `magi-engine` and `magi-platform` do not know about each other: the engine asks a `Host` to do things, the platform crate provides one, and the app hands it over.
 
-The Python runtime in `runtime/python` is a sixth component. Its sources are compiled into `magi-engine` and unpacked into the data folder on first use.
+The Python runtime in `runtime/python` is a seventh component. Its sources are compiled into `magi-engine` and unpacked into the data folder on first use.
 
 ## A block is data
 
@@ -71,6 +72,18 @@ This is the contract both engines implement. If you change one, change the other
 **Truthiness.** `null`, `false`, `0` and `""` are false; everything else is true. An unwired condition is false.
 
 **Repeat.** Entering a Repeat pushes a loop frame. When the branch under *Loop* ends, execution returns to the innermost Repeat, which either starts the next iteration or pops its frame and continues through *Done*.
+
+**Repeat until / while.** A Repeat in *until* or *while* mode reads its Condition input before every round, including the first.
+
+**Stop.** A Stop block ends its run, or every run; or, inside a Repeat, only the current round (*next round*) or the whole loop (continuing from *Done*); or it continues from another block (*go to*).
+
+**Functions.** A Function block runs the blocks under the Definition block of the same name as a nested call: loops entered inside the definition belong to it, and when its branch ends, execution continues after the Function block. What is wired into the Function's Input is stored in the definition's input variable first. Definition blocks are never started by Run or a hotkey.
+
+**Rate.** A Rate block performs its list of inputs one after another, a set time apart. The time is its own setting, a variable it follows, or a number wired into its Rate input – read once, when the block starts.
+
+**Variables.** A macro's variables live in its session and are shared by all its runs. They start from the project's values whenever a run starts while nothing else is running. A setting bound to a variable (`{"$var": name}`) is resolved just before the block runs, converted to the kind of value the setting expects ([`variables.rs`](../crates/magi-core/src/variables.rs)). Both engines keep variables on the Rust side: the Python engine reads and changes them through operations on the pipe, so there is one source of truth, and the monitor shows their current values.
+
+**Groups.** A group that is turned off disables every block in it. The engines never see groups: the frozen program is built from a copy of the graph in which those blocks are disabled.
 
 **Disabled blocks.** A disabled flow block is skipped: execution continues from its `out` output (or its first output if it has no `out`). A disabled value block yields `null`.
 
@@ -125,6 +138,9 @@ pub trait Host: Send + Sync {
     fn screens(&self) -> Result<Vec<Rect>, HostError>;          // monitor rectangles
     fn foreground_process(&self) -> Option<String>;            // for program rules
     fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError>;
+    fn clipboard_text(&self) -> Result<String, HostError>;
+    fn notify(&self, notification: &Notification) -> Result<(), HostError>;
+    fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError>;  // recent sound
 }
 ```
 
@@ -134,7 +150,13 @@ Three implementations exist:
 - `SimHost` (`magi-core`) – a virtual pointer, a log of what was sent, and a picture standing in for the screen. Used by tests.
 - Dry-run hosts (`magi-app`) – real screen and pointer, input only logged.
 
-Adding a capability a macro can use (clipboard, sound, …) means adding a method here, implementing it in `SystemHost` and `SimHost`, and exposing it through an operation in `ops.rs`. *Switch to Window* was added exactly this way.
+Adding a capability a macro can use means adding a method here, implementing it in `SystemHost` and `SimHost`, and exposing it through an operation in `ops.rs`. *Switch to Window*, the clipboard, notifications and listening to sound were all added this way.
+
+**Sound.** `listen` returns the most recent stretch of sound from what the computer plays (loopback capture) or the microphone. `SystemHost` opens a source only while a macro listens: a thread owns the audio stream, keeps the last seconds in a ring buffer and closes the stream after a quiet while. The analysis – loudness, the strongest frequency, and recognising an uploaded sound by comparing the shape of its spectrum over time, independent of volume – is pure code in `magi-audio`. A recognised sound counts once: what was heard before the match is not looked at again.
+
+## Several displays
+
+Positions and areas carry an optional display number ([`geom.rs`](../crates/magi-core/src/geom.rs)). `Displays` numbers the connected displays the same way on every machine – the primary display first, then the others left to right, top to bottom – and converts between display-relative and desktop coordinates. Engines resolve positions just before they use them (the list of displays is read at most every two seconds), so a macro made on one setup still lands on the right display on another, and a position on a display that is not connected falls back to the primary one. Recordings store a *display* stroke wherever the pointer moved to another display, with the positions after it relative to that display.
 
 ## The application
 
@@ -155,6 +177,8 @@ A `magi-housekeeping` thread keeps memory low while nothing runs: an unused Pyth
 
 **Listening reliably on Windows.** Windows silently removes a low-level hook that is slow to answer, once, and never says so – the classic "hotkeys stopped working" bug. The listener thread runs at time-critical priority, does nothing in the hook but queue the event, and a watchdog compares the system's last-input time with the last event the hooks saw. If input happened that the hooks missed, they are reinstalled. Relative mouse motion (what a game camera reads) comes from Raw Input on a message-only window.
 
+**Raw Input and the keyboard hook.** The window library registers for Raw Input keyboard events. While a window of a process with such a registration is in front, Windows stops calling that same process's low-level keyboard hook – so hotkeys could not be assigned, nor fire, while MacroMagi itself was focused. The listener removes the keyboard registration and claims Raw Input for its own message-only window, re-checking every second in case the window library registers again. Details are at the top of [`listen/windows.rs`](../crates/magi-platform/src/listen/windows.rs); a system test reproduces the situation.
+
 ### Documents and undo
 
 Editing code never reports changes. Once per frame [`Document::track`](../crates/magi-app/src/document.rs) compares the project with what it last saw. From that one comparison come the revision number (which tells the controller to pick up the new version), the unsaved-changes marker and the undo steps. A gesture in progress – a drag, a text field with focus – is folded into a single undo step.
@@ -171,7 +195,7 @@ Every colour comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/the
 
 ### Screen targets
 
-[`targets.rs`](../crates/magi-core/src/targets.rs) lists every position a macro clicks and every area it searches, in the order a run reaches them, and writes edits back to the blocks they came from. *View → Screen targets* draws them over a frozen screenshot; it knows nothing about individual blocks.
+[`targets.rs`](../crates/magi-core/src/targets.rs) lists every position a macro clicks and every area it searches, in the order a run reaches them, and writes edits back to the blocks they came from. *View → Screen targets* draws them over a frozen, undimmed picture of one display; it knows nothing about individual blocks. It is a *deferred* viewport – it redraws on its own input rather than whenever the main window does – and exchanges targets and edits with the main window through shared state ([`overlay.rs`](../crates/magi-app/src/ui/overlay.rs)). Both it and the screen picker open full screen on the display MacroMagi is on, and can switch to another.
 
 The node editor draws nodes by hand instead of composing widgets. Geometry is computed up front, so wires can be drawn beneath nodes in the same frame and cost stays flat with hundreds of nodes.
 
@@ -184,6 +208,8 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | `magi-listen` | Low-level keyboard and mouse hooks and Raw Input (must stay fast – the OS waits on it), with a watchdog |
 | `magi-housekeeping` | Stops an idle Python process; hands memory back while the window is hidden |
 | `magi-gamepad` | Polls controllers |
+| `magi-audio` | Owns a sound source while a macro listens to it |
+| `magi-notify` | Keeps a notification's tray icon up for a few seconds (Windows) |
 | `magi-inject` | Owns the OS input connection; serialises everything sent |
 | `magi-run-N` | One per run on the native engine |
 | `magi-pyrun-N` | One per run on the Python engine: performs that run's device operations |
@@ -194,7 +220,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | To add… | Touch |
 | --- | --- |
 | A block | A definition, a native function, a Python function – see [ADDING_A_NODE.md](ADDING_A_NODE.md) |
-| A kind of setting | A `ParamKind` variant and one editor in `ui/inspector.rs` |
+| A kind of setting | A `ParamKind` variant and one editor in `ui/inspector.rs`; mark it `bindable` if it can follow a variable |
 | A rule about when input may be sent | `AutomationOptions` in `magi-core/src/options.rs`, checked in `RunCx::send` |
 | Something a macro can do to the machine | `Host`, then an operation in `ops.rs` |
 | Another way of seeing the screen | A function in `magi-vision`, an operation, a value block |

@@ -102,6 +102,19 @@ pub struct Wire {
     pub to: PortRef,
 }
 
+/// A named, coloured box around some blocks. Disabling a group disables
+/// every block in it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Group {
+    pub id: u64,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<[u8; 3]>,
+    pub nodes: BTreeSet<NodeId>,
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled: bool,
+}
+
 /// A self-contained piece of a graph: what copy/paste, duplicate and node
 /// presets move around. Wires are only those between the contained nodes.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -109,6 +122,9 @@ pub struct Fragment {
     pub nodes: Vec<Node>,
     #[serde(default)]
     pub wires: Vec<Wire>,
+    /// Groups whose blocks are all in the fragment.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
 }
 
 impl Fragment {
@@ -127,6 +143,7 @@ impl Fragment {
 pub struct Graph {
     nodes: BTreeMap<NodeId, Node>,
     wires: Vec<Wire>,
+    groups: Vec<Group>,
     next_id: NodeId,
 }
 
@@ -142,13 +159,22 @@ impl From<Fragment> for Graph {
             .filter(|w| nodes.contains_key(&w.from.node) && nodes.contains_key(&w.to.node))
             .filter(|w| seen.insert((w.from.clone(), w.to.clone())))
             .collect();
-        Graph { nodes, wires, next_id }
+        let groups = file
+            .groups
+            .into_iter()
+            .map(|mut g| {
+                g.nodes.retain(|id| nodes.contains_key(id));
+                g
+            })
+            .filter(|g| !g.nodes.is_empty())
+            .collect();
+        Graph { nodes, wires, groups, next_id }
     }
 }
 
 impl From<Graph> for Fragment {
     fn from(graph: Graph) -> Self {
-        Fragment { nodes: graph.nodes.into_values().collect(), wires: graph.wires }
+        Fragment { nodes: graph.nodes.into_values().collect(), wires: graph.wires, groups: graph.groups }
     }
 }
 
@@ -217,7 +243,57 @@ impl Graph {
     pub fn remove(&mut self, id: NodeId) -> Option<Node> {
         let node = self.nodes.remove(&id)?;
         self.wires.retain(|w| w.from.node != id && w.to.node != id);
+        for group in &mut self.groups {
+            group.nodes.remove(&id);
+        }
+        self.groups.retain(|g| !g.nodes.is_empty());
         Some(node)
+    }
+
+    // ---- groups -------------------------------------------------------------
+
+    pub fn groups(&self) -> &[Group] {
+        &self.groups
+    }
+
+    pub fn group_mut(&mut self, id: u64) -> Option<&mut Group> {
+        self.groups.iter_mut().find(|g| g.id == id)
+    }
+
+    /// Puts the given blocks in a new group. Returns its id.
+    pub fn add_group(&mut self, name: &str, nodes: &BTreeSet<NodeId>) -> Option<u64> {
+        let nodes: BTreeSet<NodeId> = nodes.iter().copied().filter(|id| self.nodes.contains_key(id)).collect();
+        if nodes.is_empty() {
+            return None;
+        }
+        let id = self.groups.iter().map(|g| g.id + 1).max().unwrap_or(1);
+        self.groups.push(Group { id, name: name.to_owned(), color: None, nodes, enabled: true });
+        Some(id)
+    }
+
+    /// Removes a group; its blocks stay.
+    pub fn remove_group(&mut self, id: u64) {
+        self.groups.retain(|g| g.id != id);
+    }
+
+    /// Whether a block runs: it is enabled, and so is every group it is in.
+    pub fn is_active(&self, id: NodeId) -> bool {
+        self.nodes.get(&id).is_some_and(|n| n.enabled)
+            && self.groups.iter().filter(|g| g.nodes.contains(&id)).all(|g| g.enabled)
+    }
+
+    /// A copy in which blocks of disabled groups are themselves disabled,
+    /// which is all the engines need to know about groups.
+    pub fn with_groups_applied(&self) -> Graph {
+        let mut graph = self.clone();
+        for group in self.groups.iter().filter(|g| !g.enabled) {
+            for id in &group.nodes {
+                if let Some(node) = graph.nodes.get_mut(id) {
+                    node.enabled = false;
+                }
+            }
+        }
+        graph
     }
 
     /// The input a flow output leads to.
@@ -334,6 +410,7 @@ impl Graph {
     /// Copies the given nodes and the wires between them.
     pub fn fragment(&self, ids: &BTreeSet<NodeId>) -> Fragment {
         Fragment {
+            groups: self.groups.iter().filter(|g| g.nodes.is_subset(ids)).cloned().collect(),
             nodes: ids.iter().filter_map(|id| self.node(*id).cloned()).collect(),
             wires: self
                 .wires
@@ -363,6 +440,24 @@ impl Graph {
                 });
             }
         }
+        for group in &fragment.groups {
+            let nodes: BTreeSet<NodeId> = group.nodes.iter().filter_map(|id| remap.get(id).copied()).collect();
+            if let Some(id) = self.add_group(&group.name, &nodes)
+                && let Some(new) = self.group_mut(id)
+            {
+                (new.color, new.enabled) = (group.color, group.enabled);
+            }
+        }
+        // A Stop block that continues from a copied block continues from the copy.
+        for &id in remap.values() {
+            if let Some(node) = self.nodes.get_mut(&id)
+                && node.kind == ids::STOP
+                && let Some(target) = node.params.get("target").and_then(Value::as_u64)
+                && let Some(&new) = remap.get(&target)
+            {
+                node.params.insert("target".into(), Value::from(new));
+            }
+        }
         fragment.nodes.iter().map(|n| remap[&n.id]).collect()
     }
 
@@ -373,7 +468,7 @@ impl Graph {
         for node in self.nodes() {
             let Some(def) = registry.get(&node.kind) else { continue };
             for param in &def.params {
-                if matches!(param.kind, ParamKind::Image | ParamKind::Recording)
+                if matches!(param.kind, ParamKind::Image | ParamKind::Recording | ParamKind::Audio)
                     && let Some(Value::String(id)) = node.params.get(&param.key)
                     && !id.is_empty()
                 {

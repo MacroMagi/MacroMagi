@@ -137,6 +137,14 @@ pub struct Settings {
     /// What the export dialog offers by default.
     pub export: ExportChoices,
     pub show_console: bool,
+    /// View → Grid: the canvas grid.
+    pub show_grid: bool,
+    /// View → Block activity: blocks glow while they run.
+    pub show_activity: bool,
+    /// View → Variables: the panel listing the macro's variables.
+    pub show_variables: bool,
+    /// A sound and a desktop notification when a macro finishes by itself.
+    pub notify_on_finish: bool,
     pub window_size: Option<[f32; 2]>,
     pub settings_size: Option<[f32; 2]>,
     pub settings_page: SettingsPage,
@@ -144,6 +152,8 @@ pub struct Settings {
     pub palette_size: [f32; 2],
     /// Size of the pop-out recording editor.
     pub recording_window_size: Option<[f32; 2]>,
+    /// Size of the Variable Rate Editor.
+    pub rate_window_size: Option<[f32; 2]>,
     pub recent_files: Vec<PathBuf>,
 }
 
@@ -167,11 +177,16 @@ impl Default for Settings {
             dry_run: false,
             export: ExportChoices::default(),
             show_console: false,
+            show_grid: true,
+            show_activity: true,
+            show_variables: false,
+            notify_on_finish: false,
             window_size: None,
             settings_size: None,
             settings_page: SettingsPage::General,
             palette_size: [280.0, 420.0],
             recording_window_size: None,
+            rate_window_size: None,
             recent_files: Vec::new(),
         }
     }

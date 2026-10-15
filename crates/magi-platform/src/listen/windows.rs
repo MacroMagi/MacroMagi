@@ -15,20 +15,33 @@
 //!   reinstalls them when they have gone quiet;
 //! * it reads relative mouse motion through Raw Input, which is what games
 //!   with a locked pointer see, for smart recordings.
+//!
+//! ## Raw Input and the keyboard hook
+//!
+//! Raw Input registrations are per process: one window per device type. The
+//! window library registers the process for raw *keyboard* input when its
+//! event loop starts. While that registration exists and a MacroMagi window
+//! is in front, Windows does not call this process's low-level keyboard hook:
+//! keys pressed in MacroMagi never reach the hotkey system (so a hotkey could
+//! not be set), while mouse buttons keep working. MacroMagi needs no raw
+//! keyboard input, so the listener removes that registration, claims raw
+//! mouse input for its own window, and the watchdog keeps it that way.
 
 use std::cell::{Cell, RefCell};
 use std::ptr;
 use std::time::Instant;
 
 use magi_core::input::{InputEvent, MouseButton};
-use windows_sys::Win32::Devices::HumanInterfaceDevice::{HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC};
+use windows_sys::Win32::Devices::HumanInterfaceDevice::{
+    HID_USAGE_GENERIC_KEYBOARD, HID_USAGE_GENERIC_MOUSE, HID_USAGE_PAGE_GENERIC,
+};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 use windows_sys::Win32::UI::Input::{
-    GetRawInputData, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE, RAWINPUTHEADER, RID_INPUT,
-    RIDEV_INPUTSINK, RIM_TYPEMOUSE, RegisterRawInputDevices,
+    GetRawInputData, GetRegisteredRawInputDevices, HRAWINPUT, MOUSE_MOVE_ABSOLUTE, RAWINPUT, RAWINPUTDEVICE,
+    RAWINPUTHEADER, RID_INPUT, RIDEV_INPUTSINK, RIDEV_REMOVE, RIM_TYPEMOUSE, RegisterRawInputDevices,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, HC_ACTION, HHOOK, HWND_MESSAGE, KBDLLHOOKSTRUCT,
@@ -169,8 +182,8 @@ unsafe extern "system" fn raw_window_proc(hwnd: HWND, message: u32, wparam: WPAR
 }
 
 /// A hidden window that receives Raw Input mouse reports even while other
-/// programs have focus. Failure only costs relative motion, so it is not fatal.
-fn create_raw_input_window() {
+/// programs have focus. `None` only costs relative motion, so it is not fatal.
+fn create_raw_input_window() -> Option<HWND> {
     let class: Vec<u16> = "MacroMagiRawInput\0".encode_utf16().collect();
     // SAFETY: plain Win32 calls with valid, null-terminated strings and a
     // window procedure of the required signature.
@@ -196,16 +209,59 @@ fn create_raw_input_window() {
             module,
             ptr::null(),
         );
-        if window.is_null() {
-            return;
+        (!window.is_null()).then_some(window)
+    }
+}
+
+/// This process's Raw Input registrations, as (usage, target window).
+fn raw_input_registrations() -> Vec<(u16, HWND)> {
+    let size = std::mem::size_of::<RAWINPUTDEVICE>() as u32;
+    let mut count = 0u32;
+    // SAFETY: a null buffer asks only for the count; the second call gets a
+    // buffer of exactly that many entries.
+    unsafe {
+        GetRegisteredRawInputDevices(ptr::null_mut(), &mut count, size);
+        let mut devices: Vec<RAWINPUTDEVICE> = vec![std::mem::zeroed(); count as usize];
+        let read = GetRegisteredRawInputDevices(devices.as_mut_ptr(), &mut count, size);
+        if read == u32::MAX {
+            return Vec::new();
         }
-        let device = RAWINPUTDEVICE {
+        devices.truncate(read as usize);
+        devices
+            .into_iter()
+            .filter(|d| d.usUsagePage == HID_USAGE_PAGE_GENERIC)
+            .map(|d| (d.usUsage, d.hwndTarget))
+            .collect()
+    }
+}
+
+/// Removes any raw keyboard registration (it silences the keyboard hook) and
+/// points raw mouse input at `window`. Cheap when nothing needs changing.
+fn claim_raw_input(window: Option<HWND>) {
+    let registrations = raw_input_registrations();
+    let size = std::mem::size_of::<RAWINPUTDEVICE>() as u32;
+    if registrations.iter().any(|(usage, _)| *usage == HID_USAGE_GENERIC_KEYBOARD) {
+        let keyboard = RAWINPUTDEVICE {
+            usUsagePage: HID_USAGE_PAGE_GENERIC,
+            usUsage: HID_USAGE_GENERIC_KEYBOARD,
+            dwFlags: RIDEV_REMOVE,
+            hwndTarget: ptr::null_mut(),
+        };
+        // SAFETY: one fully initialised entry, with its size.
+        unsafe { RegisterRawInputDevices(&keyboard, 1, size) };
+    }
+    let Some(window) = window else { return };
+    let mouse_is_ours =
+        registrations.iter().any(|(usage, target)| *usage == HID_USAGE_GENERIC_MOUSE && *target == window);
+    if !mouse_is_ours {
+        let mouse = RAWINPUTDEVICE {
             usUsagePage: HID_USAGE_PAGE_GENERIC,
             usUsage: HID_USAGE_GENERIC_MOUSE,
             dwFlags: RIDEV_INPUTSINK,
             hwndTarget: window,
         };
-        RegisterRawInputDevices(&device, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
+        // SAFETY: one fully initialised entry, with its size.
+        unsafe { RegisterRawInputDevices(&mouse, 1, size) };
     }
 }
 
@@ -264,7 +320,9 @@ pub(crate) fn run(sink: impl FnMut(Observed) + 'static) -> Result<(), String> {
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL) };
 
     let mut hooks = Hooks::install()?;
-    create_raw_input_window();
+    let raw_window = create_raw_input_window();
+    claim_raw_input(raw_window);
+    let mut last_claim = Instant::now();
     LAST_HOOK_EVENT.set(last_system_input());
 
     loop {
@@ -282,6 +340,12 @@ pub(crate) fn run(sink: impl FnMut(Observed) + 'static) -> Result<(), String> {
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
+        }
+
+        // The window library may register raw keyboard input again.
+        if last_claim.elapsed().as_millis() >= u128::from(WATCHDOG_MS) {
+            claim_raw_input(raw_window);
+            last_claim = Instant::now();
         }
 
         // The system saw input that the hooks did not: they were removed.

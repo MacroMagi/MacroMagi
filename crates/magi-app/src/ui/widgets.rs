@@ -3,7 +3,7 @@
 use egui::{Color32, DragValue, Response, RichText, Sense, Stroke, Ui, Vec2, vec2};
 use egui_phosphor::regular as icon;
 use magi_core::autoclicker::{MAX_DURATION_MS, TimeUnit};
-use magi_core::geom::Point;
+use magi_core::geom::{Displays, Point, Rect};
 use magi_core::hotkey::Hotkey;
 use magi_core::input::{Button, Key, MouseButton};
 use magi_core::text::{format_ms, trim_float};
@@ -34,6 +34,25 @@ pub fn fixed_label(ui: &mut Ui, text: impl Into<egui::WidgetText>, width: f32) -
     ui.allocate_ui_with_layout(vec2(width, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
         ui.set_min_width(width);
         ui.add(egui::Label::new(text).sense(Sense::click()).truncate())
+    })
+    .inner
+}
+
+/// A text field that takes the rest of the row after `trailing` (drawn at
+/// the right end). Never asks for more width than there is, so the window
+/// or panel around it cannot creep wider frame by frame.
+pub fn field_with_trailing<R>(
+    ui: &mut Ui,
+    field: egui::TextEdit<'_>,
+    trailing: impl FnOnce(&mut Ui) -> R,
+) -> (Response, R) {
+    ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let result = trailing(ui);
+            let response = ui.add_sized([ui.available_width(), 22.0], field);
+            (response, result)
+        })
+        .inner
     })
     .inner
 }
@@ -213,17 +232,37 @@ pub fn duration_edit(ui: &mut Ui, ms: &mut f64) -> Response {
     .on_hover_text("Drag to change, or click and type e.g. 250ms, 1.5s, 2m")
 }
 
-/// A drop-down of time units.
+/// A drop-down of time units, named in the plural ("seconds").
 pub fn unit_picker(
     ui: &mut Ui,
     id: impl std::hash::Hash + std::fmt::Debug,
     unit: &mut TimeUnit,
     allowed: &[TimeUnit],
 ) -> bool {
+    unit_picker_named(ui, id, unit, allowed, TimeUnit::label)
+}
+
+/// A drop-down of time units, named in the singular ("per second").
+pub fn unit_picker_singular(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    unit: &mut TimeUnit,
+    allowed: &[TimeUnit],
+) -> bool {
+    unit_picker_named(ui, id, unit, allowed, TimeUnit::singular)
+}
+
+fn unit_picker_named(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    unit: &mut TimeUnit,
+    allowed: &[TimeUnit],
+    name: fn(TimeUnit) -> &'static str,
+) -> bool {
     let mut changed = false;
     egui::ComboBox::from_id_salt(id).width(46.0).selected_text(unit.short()).show_ui(ui, |ui| {
         for &option in allowed {
-            if ui.selectable_label(option == *unit, option.label()).clicked() && option != *unit {
+            if ui.selectable_label(option == *unit, name(option)).clicked() && option != *unit {
                 *unit = option;
                 changed = true;
             }
@@ -346,6 +385,81 @@ pub fn hotkey_button(ui: &mut Ui, hotkey: &Hotkey, capturing: Option<&Hotkey>) -
         }
     });
     action
+}
+
+/// A small "back to the default" button, drawn only while `changed`.
+/// Returns true when clicked.
+pub fn reset_button(ui: &mut Ui, changed: bool) -> bool {
+    if !changed {
+        return false;
+    }
+    let button = egui::Button::new(RichText::new(icon::ARROW_COUNTER_CLOCKWISE).size(12.5).color(theme::text_faint()))
+        .frame(false)
+        .min_size(Vec2::splat(18.0));
+    ui.add(button).on_hover_text("Back to the default").clicked()
+}
+
+/// Which display a position is on: one of the displays, or (when `global` is
+/// allowed) "all displays", meaning the position is on the whole desktop.
+pub fn display_picker(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    display: &mut Option<u8>,
+    displays: &Displays,
+    global: bool,
+) -> bool {
+    let shown = |d: Option<u8>| match d {
+        None => "All displays".to_owned(),
+        Some(d) if displays.is_empty() => format!("Display {}", d + 1),
+        Some(d) => displays.label(d),
+    };
+    let short = |d: Option<u8>| match d {
+        None => format!("{}  All", icon::MONITOR),
+        Some(d) => format!("{}  {}", icon::MONITOR, d + 1),
+    };
+    let mut changed = false;
+    let count = (displays.len() as u8).max(display.map_or(1, |d| d + 1)).max(1);
+    egui::ComboBox::from_id_salt(id)
+        .width(58.0)
+        .selected_text(short(*display))
+        .show_ui(ui, |ui| {
+            ui.set_min_width(220.0);
+            if global
+                && ui
+                    .selectable_label(display.is_none(), shown(None))
+                    .on_hover_text("Positions on the whole desktop")
+                    .clicked()
+            {
+                *display = None;
+                changed = true;
+            }
+            for d in 0..count {
+                if ui.selectable_label(*display == Some(d), shown(Some(d))).clicked() && *display != Some(d) {
+                    *display = Some(d);
+                    changed = true;
+                }
+            }
+        })
+        .response
+        .on_hover_text(format!("On {}", shown(*display)));
+    changed
+}
+
+/// The same place, said relative to another display (or to the whole desktop).
+pub fn point_on(point: Point, display: Option<u8>, displays: &Displays) -> Point {
+    match display {
+        None => displays.to_global(point),
+        Some(d) => {
+            let local = displays.to_local(point);
+            if local.display == Some(d) { local } else { displays.move_to_display(point, d) }
+        }
+    }
+}
+
+/// An area moved to another display (or made global), keeping its size.
+pub fn rect_on(rect: Rect, display: Option<u8>, displays: &Displays) -> Rect {
+    let origin = point_on(rect.origin(), display, displays);
+    Rect { x: origin.x, y: origin.y, w: rect.w, h: rect.h, display: origin.display }
 }
 
 /// Two number fields for a screen position.

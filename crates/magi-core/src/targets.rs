@@ -23,8 +23,9 @@ pub enum TargetShape {
 pub enum TargetSource {
     /// A `Point` or `Region` parameter of a block.
     Param { node: NodeId, key: String },
-    /// The position of one input of an Input block.
-    Action { node: NodeId, index: usize },
+    /// The position of one input in a list of inputs (an Input block's
+    /// `actions`, a Rate block's `steps`).
+    Action { node: NodeId, key: String, index: usize },
     /// The fixed position of an Auto Click block.
     Clicker { node: NodeId },
 }
@@ -58,28 +59,32 @@ pub fn screen_targets(graph: &Graph, registry: &Registry) -> Vec<ScreenTarget> {
             targets.push(ScreenTarget { order: targets.len() + 1, node: id, label, shape, source })
         };
         match node.kind.as_str() {
-            ids::INPUT => {
-                let actions: Vec<Action> = node.param("actions").unwrap_or_default();
-                for (index, action) in actions.iter().enumerate() {
-                    let point = match action {
-                        Action::Mouse { at: Some(p), .. } => Some(*p),
-                        Action::Move { x, y, relative: false, .. } => Some(Point::new(*x, *y)),
-                        _ => None,
-                    };
-                    if let Some(point) = point {
-                        push(title.clone(), TargetShape::Point(point), TargetSource::Action { node: id, index });
-                    }
-                }
-            }
             ids::AUTOCLICK => {
                 let params: AutoClickParams = node.params_or_default();
-                if let ClickPosition::Fixed { x, y } = params.clicker.position {
-                    push(title.clone(), TargetShape::Point(Point::new(x, y)), TargetSource::Clicker { node: id });
+                if let Some(point) = params.clicker.position.point() {
+                    push(title.clone(), TargetShape::Point(point), TargetSource::Clicker { node: id });
                 }
             }
             _ => {
                 let Some(def) = registry.get(&node.kind) else { continue };
                 for param in &def.params {
+                    if param.kind == ParamKind::Actions {
+                        let actions: Vec<Action> = node.param(&param.key).unwrap_or_default();
+                        for (index, action) in actions.iter().enumerate() {
+                            let point = match action {
+                                Action::Mouse { at: Some(p), .. } => Some(*p),
+                                Action::Move { x, y, display, relative: false, .. } => {
+                                    Some(Point { x: *x, y: *y, display: *display })
+                                }
+                                _ => None,
+                            };
+                            if let Some(point) = point {
+                                let source = TargetSource::Action { node: id, key: param.key.clone(), index };
+                                push(title.clone(), TargetShape::Point(point), source);
+                            }
+                        }
+                        continue;
+                    }
                     let shape = match param.kind {
                         ParamKind::Point => node.param::<Option<Point>>(&param.key).flatten().map(TargetShape::Point),
                         ParamKind::Region => node.param::<Option<Rect>>(&param.key).flatten().map(TargetShape::Region),
@@ -143,20 +148,20 @@ pub fn apply(graph: &mut Graph, source: &TargetSource, shape: TargetShape) {
                 }
             }
         }
-        TargetSource::Action { node, index } => {
+        TargetSource::Action { node, key, index } => {
             let (Some(node), TargetShape::Point(p)) = (graph.node_mut(*node), shape) else { return };
-            let mut actions: Vec<Action> = node.param("actions").unwrap_or_default();
+            let mut actions: Vec<Action> = node.param(key).unwrap_or_default();
             match actions.get_mut(*index) {
                 Some(Action::Mouse { at, .. }) => *at = Some(p),
-                Some(Action::Move { x, y, .. }) => (*x, *y) = (p.x, p.y),
+                Some(Action::Move { x, y, display, .. }) => (*x, *y, *display) = (p.x, p.y, p.display),
                 _ => return,
             }
-            node.set_param("actions", actions);
+            node.set_param(key, actions);
         }
         TargetSource::Clicker { node } => {
             let (Some(node), TargetShape::Point(p)) = (graph.node_mut(*node), shape) else { return };
             let mut params: AutoClickParams = node.params_or_default();
-            params.clicker.position = ClickPosition::Fixed { x: p.x, y: p.y };
+            params.clicker.position = ClickPosition::Fixed { x: p.x, y: p.y, display: p.display };
             node.set_params(&params);
         }
     }

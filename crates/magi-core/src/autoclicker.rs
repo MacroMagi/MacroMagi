@@ -67,6 +67,17 @@ impl TimeUnit {
         }
     }
 
+    /// "per second", "per minute"…
+    pub fn singular(self) -> &'static str {
+        match self {
+            TimeUnit::Milliseconds => "millisecond",
+            TimeUnit::Seconds => "second",
+            TimeUnit::Minutes => "minute",
+            TimeUnit::Hours => "hour",
+            TimeUnit::Days => "day",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             TimeUnit::Milliseconds => "milliseconds",
@@ -104,11 +115,11 @@ impl<T> Toggled<T> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DualMode {
-    /// Both keys go down together and come up together.
-    #[default]
-    Together,
     /// The first key on one click, the second on the next, and so on.
+    #[default]
     Alternate,
+    /// Both keys go down together and come up together.
+    Together,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -156,7 +167,23 @@ pub enum ClickPosition {
     /// Wherever the pointer happens to be.
     Cursor,
     /// Move the pointer here before every click.
-    Fixed { x: i32, y: i32 },
+    Fixed {
+        x: i32,
+        y: i32,
+        /// The display `x, y` are on (0 = primary). `None`: global coordinates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display: Option<u8>,
+    },
+}
+
+impl ClickPosition {
+    /// The fixed position, if any.
+    pub fn point(&self) -> Option<Point> {
+        match *self {
+            ClickPosition::Fixed { x, y, display } => Some(Point { x, y, display }),
+            ClickPosition::Cursor => None,
+        }
+    }
 }
 
 /// How the speed is entered. Both describe the same `interval_ms`.
@@ -409,10 +436,7 @@ impl AutoClickerConfig {
 
     /// The fixed click position, if any.
     pub fn fixed_position(&self) -> Option<Point> {
-        match self.position {
-            ClickPosition::Fixed { x, y } => Some(Point::new(x, y)),
-            ClickPosition::Cursor => None,
-        }
+        self.settings.position.point()
     }
 }
 

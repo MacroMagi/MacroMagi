@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
 use magi_core::graph::NodeId;
+use serde_json::{Map, Value};
 
 const MAX_LOG_LINES: usize = 2000;
 /// Node activity alone wakes the UI at most this often.
@@ -51,9 +52,21 @@ pub struct Monitor {
     clicks: AtomicU64,
 }
 
+/// A run that came to an end, as reported to whoever started it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinishedRun {
+    /// The block the run started at.
+    pub node: NodeId,
+    /// It ended on its own – not because someone pressed stop.
+    pub by_itself: bool,
+    pub failed: bool,
+}
+
 #[derive(Default)]
 struct State {
     activity: HashMap<NodeId, Activity>,
+    variables: Map<String, Value>,
+    finished: Vec<FinishedRun>,
     logs: VecDeque<LogEntry>,
     next_seq: u64,
     waker: Option<Waker>,
@@ -85,6 +98,50 @@ impl Monitor {
         if let Some(waker) = waker {
             waker();
         }
+    }
+
+    /// Wakes the UI unless it was woken very recently.
+    fn wake_throttled(&self) {
+        let now = Instant::now();
+        let waker = {
+            let mut state = self.lock();
+            let due = state.last_wake.is_none_or(|last| now.duration_since(last) >= WAKE_INTERVAL);
+            if !due {
+                return;
+            }
+            state.last_wake = Some(now);
+            state.waker.clone()
+        };
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
+
+    /// The current values of the macro's variables.
+    pub fn set_variables(&self, values: Map<String, Value>) {
+        self.lock().variables = values;
+        self.wake_throttled();
+    }
+
+    pub fn variables(&self) -> Map<String, Value> {
+        self.lock().variables.clone()
+    }
+
+    pub fn run_finished(&self, run: FinishedRun) {
+        {
+            let mut state = self.lock();
+            // Nobody may be collecting these; keep only the most recent.
+            if state.finished.len() >= 64 {
+                state.finished.remove(0);
+            }
+            state.finished.push(run);
+        }
+        self.wake();
+    }
+
+    /// Runs that ended since the last call.
+    pub fn take_finished(&self) -> Vec<FinishedRun> {
+        std::mem::take(&mut self.lock().finished)
     }
 
     /// Records that a node started executing.

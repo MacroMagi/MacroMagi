@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.95"
 authors = ["MacroMagi contributors"]
@@ -13,9 +13,10 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates. Dependency direction is strictly downwards:
-#   app -> engine -> { vision, core }      platform -> core
+#   app -> engine -> { vision, audio, core }      platform -> core
 magi-core = { path = "crates/magi-core" }
 magi-vision = { path = "crates/magi-vision" }
+magi-audio = { path = "crates/magi-audio" }
 magi-platform = { path = "crates/magi-platform" }
 magi-engine = { path = "crates/magi-engine" }
 
@@ -61,6 +62,10 @@ opt-level = 2
 
 # Template matching is a tight numeric loop; unoptimised it takes seconds.
 [profile.dev.package.magi-vision]
+opt-level = 3
+
+# Sound fingerprints are FFTs over every frame: same story.
+[profile.dev.package.magi-audio]
 opt-level = 3
 
 [profile.release]

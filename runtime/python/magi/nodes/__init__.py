@@ -39,5 +39,8 @@ from . import flow as _flow  # noqa: E402,F401
 from . import input as _input  # noqa: E402,F401
 from . import logic as _logic  # noqa: E402,F401
 from . import script as _script  # noqa: E402,F401
+from . import sound as _sound  # noqa: E402,F401
+from . import system as _system  # noqa: E402,F401
+from . import variables as _variables  # noqa: E402,F401
 from . import vision as _vision  # noqa: E402,F401
 from . import window as _window  # noqa: E402,F401

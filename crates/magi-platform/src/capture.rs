@@ -40,6 +40,13 @@ pub fn monitors() -> Result<Vec<MonitorInfo>, HostError> {
     Ok(list)
 }
 
+/// Every monitor's area, in the order the operating system lists them. This
+/// is the order windowing libraries number monitors in (winit's
+/// `available_monitors`), which a window needs to go full screen on one.
+pub fn system_order() -> Result<Vec<Rect>, HostError> {
+    Monitor::all().map_err(error)?.iter().map(|m| describe(m).map(|info| info.rect)).collect()
+}
+
 /// Captures a region of the virtual desktop, or the whole primary monitor for `None`.
 ///
 /// A region is captured from the monitor it overlaps most and clipped to it;

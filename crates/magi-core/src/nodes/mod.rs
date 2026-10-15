@@ -15,7 +15,11 @@
 pub mod flow;
 pub mod input;
 pub mod logic;
+pub mod notes;
 pub mod script;
+pub mod sound;
+pub mod system;
+pub mod variables;
 pub mod vision;
 pub mod window;
 
@@ -46,6 +50,20 @@ pub mod ids {
     pub const PYTHON: &str = "script.python";
     pub const AUTOCLICK: &str = "input.autoclick";
     pub const FOCUS_WINDOW: &str = "window.focus";
+    pub const RATE: &str = "flow.rate";
+    pub const DEFINE: &str = "flow.define";
+    pub const CALL: &str = "flow.call";
+    pub const VARIABLE: &str = "var.get";
+    pub const SET_VARIABLE: &str = "var.set";
+    pub const COUNTER: &str = "var.counter";
+    pub const MATH: &str = "logic.math";
+    pub const COMPARE: &str = "logic.compare";
+    pub const TEXT: &str = "logic.text";
+    pub const CLIPBOARD: &str = "system.clipboard";
+    pub const NOTIFY: &str = "system.notify";
+    pub const COMMENT: &str = "note.comment";
+    pub const SOUND_LEVEL: &str = "sound.level";
+    pub const SOUND_MATCH: &str = "sound.match";
 }
 
 /// Ids of ports that engines and the editor refer to by name.
@@ -76,20 +94,28 @@ pub enum Category {
     Flow,
     Input,
     Vision,
+    Sound,
     Window,
+    Variables,
     Logic,
+    System,
     Script,
+    Notes,
     Addon,
 }
 
 impl Category {
-    pub const ALL: [Category; 7] = [
+    pub const ALL: [Category; 11] = [
         Category::Flow,
         Category::Input,
         Category::Vision,
+        Category::Sound,
         Category::Window,
+        Category::Variables,
         Category::Logic,
+        Category::System,
         Category::Script,
+        Category::Notes,
         Category::Addon,
     ];
 
@@ -98,9 +124,13 @@ impl Category {
             Category::Flow => "Flow",
             Category::Input => "Input",
             Category::Vision => "Vision",
+            Category::Sound => "Sound",
             Category::Window => "Window",
+            Category::Variables => "Variables",
             Category::Logic => "Logic",
+            Category::System => "System",
             Category::Script => "Script",
+            Category::Notes => "Notes",
             Category::Addon => "Add-ons",
         }
     }
@@ -246,6 +276,36 @@ pub enum ParamKind {
     Cases,
     /// Auto Clicker settings ([`ClickerSettings`](crate::autoclicker::ClickerSettings)).
     Clicker,
+    /// The name of one of the project's variables.
+    Variable,
+    /// The name of a Definition block.
+    Definition,
+    /// The id of a block of the same macro, or `null`.
+    Block,
+    /// A display number (0 = primary).
+    Display,
+    /// Id of a sound asset.
+    Audio,
+}
+
+impl ParamKind {
+    /// Whether settings of this kind can be bound to a variable.
+    pub fn bindable(&self) -> bool {
+        matches!(
+            self,
+            ParamKind::Bool
+                | ParamKind::Int { .. }
+                | ParamKind::Float { .. }
+                | ParamKind::Duration
+                | ParamKind::Percent
+                | ParamKind::Text { .. }
+                | ParamKind::Choice { .. }
+                | ParamKind::Point
+                | ParamKind::Region
+                | ParamKind::Color
+                | ParamKind::Display
+        )
+    }
 }
 
 impl ParamKind {
@@ -481,9 +541,14 @@ impl Registry {
         flow::register(&mut registry);
         input::register(&mut registry);
         vision::register(&mut registry);
+        sound::register(&mut registry);
         logic::register(&mut registry);
         script::register(&mut registry);
         window::register(&mut registry);
+        flow::register_structure(&mut registry);
+        variables::register(&mut registry);
+        system::register(&mut registry);
+        notes::register(&mut registry);
         registry
     }
 
@@ -522,12 +587,47 @@ impl Registry {
         }
     }
 
-    /// The text shown on a node's face.
+    /// The text shown on a node's face. Settings bound to variables are
+    /// summarised with their defaults, and the variables are named.
     pub fn summary(&self, node: &Node, assets: &AssetStore) -> Vec<String> {
-        match self.get(&node.kind) {
-            Some(def) => def.summarize.map(|f| f(node, assets)).unwrap_or_default(),
-            None => vec![format!("Unknown node type “{}”", node.kind)],
+        self.summary_with(node, assets, &[])
+    }
+
+    /// The text shown on a node's face, with settings bound to variables
+    /// summarised with the values the variables start with.
+    pub fn summary_with(
+        &self,
+        node: &Node,
+        assets: &AssetStore,
+        variables: &[crate::variables::Variable],
+    ) -> Vec<String> {
+        let Some(def) = self.get(&node.kind) else {
+            return vec![format!("Unknown node type “{}”", node.kind)];
+        };
+        let bound: Vec<(&String, &str)> = node
+            .params
+            .iter()
+            .filter_map(|(key, value)| crate::variables::bound_name(value).map(|name| (key, name)))
+            .collect();
+        if bound.is_empty() {
+            return def.summarize.map(|f| f(node, assets)).unwrap_or_default();
         }
+        let mut shown = node.clone();
+        let defaults = def.default_params();
+        for (key, name) in &bound {
+            let default = defaults.get(*key).cloned().unwrap_or(Value::Null);
+            let value = match variables.iter().find(|v| v.name == *name) {
+                Some(variable) => crate::variables::coerce(&variable.value, &default),
+                None => default,
+            };
+            shown.params.insert((*key).clone(), value);
+        }
+        let mut lines = def.summarize.map(|f| f(&shown, assets)).unwrap_or_default();
+        let mut names: Vec<&str> = bound.iter().map(|(_, name)| *name).collect();
+        names.sort_unstable();
+        names.dedup();
+        lines.push(format!("Follows {}", names.join(", ")));
+        lines
     }
 
     /// The title of a node: its custom label if set, else the type's name.
@@ -552,7 +652,8 @@ mod tests {
             assert!(!def.description.is_empty(), "{} needs a description", def.id);
             for param in &def.params {
                 assert!(
-                    !param.default.is_null() || matches!(param.kind, ParamKind::Point | ParamKind::Region),
+                    !param.default.is_null()
+                        || matches!(param.kind, ParamKind::Point | ParamKind::Region | ParamKind::Block),
                     "{}.{} has no default",
                     def.id,
                     param.key

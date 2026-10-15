@@ -1,15 +1,20 @@
-//! The Macro tab: Run and Record, the node graph, the inspector and the console.
-//! File, Add, Presets and Undo/Redo live in the app's banner.
+//! The Macro tab: Run and Record, the node graph, the inspector, the
+//! variables and the console. File, Add, Presets and Undo/Redo live in the
+//! app's banner.
 
 use std::collections::HashMap;
 
 use egui::{RichText, Ui, vec2};
 use egui_phosphor::regular as icon;
+use magi_core::geom::Displays;
 use magi_core::graph::NodeId;
 use magi_core::hotkey::Hotkey;
-use magi_core::nodes::Registry;
-use magi_core::project::EnginePreference;
+use magi_core::nodes::{ParamKind, Registry};
+use magi_core::project::{EnginePreference, Project};
+use magi_core::recording::{MouseRecording, RecordOptions};
+use magi_core::variables::{self, Variable};
 use magi_engine::{Activity, EngineKind, LogEntry, LogLevel, PythonStatus};
+use serde_json::{Map, Value};
 
 use super::graph::{GraphEnv, GraphEvent, GraphView};
 use super::inspector::{self, InspectorEnv};
@@ -66,6 +71,14 @@ pub struct MacroEnv<'a> {
     pub python: &'a PythonStatus,
     pub dry_run: bool,
     pub show_console: &'a mut bool,
+    pub show_variables: &'a mut bool,
+    pub show_grid: bool,
+    pub show_activity: bool,
+    /// What Record records.
+    pub record: &'a mut RecordOptions,
+    pub displays: &'a Displays,
+    /// The variables' values in the latest run.
+    pub live: &'a Map<String, Value>,
 }
 
 /// A button label with its hotkey: `▶  Run  F7`.
@@ -99,6 +112,23 @@ impl MacroTab {
             .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::symmetric(10, 6)))
             .show(ui, |ui| self.toolbar(ui, doc, env, &mut events));
 
+        if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) && !ui.ctx().text_edit_focused() {
+            self.view.open_find();
+        }
+
+        if *env.show_variables {
+            egui::Panel::left("macro-variables")
+                .resizable(true)
+                .default_size(230.0)
+                .size_range(180.0..=480.0)
+                .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(10)))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        variables_panel(ui, &mut doc.project, env.registry, env.live);
+                    });
+                });
+        }
+
         if *env.show_console {
             egui::Panel::bottom("macro-console")
                 .resizable(true)
@@ -119,7 +149,8 @@ impl MacroTab {
                 .size_range(240.0..=560.0)
                 .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(12)))
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    // Content wider than the panel scrolls; the panel keeps the width it was given.
+                    egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
                         self.inspector(ui, doc, node, env, &mut events);
                     });
                 });
@@ -131,6 +162,8 @@ impl MacroTab {
                 activity: env.activity,
                 running: env.running,
                 error_node: env.error_node,
+                show_grid: env.show_grid,
+                show_activity: env.show_activity,
             };
             for event in self.view.show(ui, &mut doc.project, &graph_env) {
                 match event {
@@ -157,13 +190,12 @@ impl MacroTab {
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(true)
+                .scroll(true)
                 .default_width(INSPECTOR_WIDTH)
-                .max_height(ui.ctx().content_rect().height() - 120.0)
-                .anchor(egui::Align2::RIGHT_TOP, vec2(-10.0, 96.0))
+                .default_height(ui.ctx().content_rect().height() - 140.0)
+                .default_pos(egui::pos2(ui.ctx().content_rect().right() - INSPECTOR_WIDTH - 20.0, 96.0))
                 .show(ui.ctx(), |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        self.inspector(ui, doc, node, env, &mut events);
-                    });
+                    self.inspector(ui, doc, node, env, &mut events);
                 });
             if !open {
                 self.floating_inspector = false;
@@ -185,6 +217,8 @@ impl MacroTab {
             images: &mut self.view.images,
             capturing: env.capturing,
             recording: env.recording.is_some(),
+            displays: env.displays,
+            live: env.live,
         };
         for request in inspector::show(ui, &mut doc.project, node, &mut inspector_env) {
             events.push(MacroEvent::Request(request));
@@ -240,15 +274,38 @@ impl MacroTab {
                     env.record_hotkey.label()
                 )
             };
-            if ui.add(record.min_size(vec2(0.0, 28.0))).on_hover_text(record_hint).clicked() {
-                events.push(MacroEvent::ToggleRecording);
-            }
+            ui.scope(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                if ui.add(record.min_size(vec2(0.0, 28.0))).on_hover_text(record_hint).clicked() {
+                    events.push(MacroEvent::ToggleRecording);
+                }
+                let caret = egui::Button::new(RichText::new(icon::CARET_DOWN).size(12.0)).min_size(vec2(18.0, 28.0));
+                egui::containers::menu::MenuButton::from_button(caret)
+                    .ui(ui, |ui| record_options(ui, env.record))
+                    .0
+                    .on_hover_text(format!(
+                        "What Record records · movement: {}",
+                        match env.record.mouse_mode {
+                            MouseRecording::Smart => "smart",
+                            MouseRecording::Positions => "screen positions",
+                            MouseRecording::Relative => "relative motion",
+                        }
+                    ));
+            });
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if widgets::icon_toggle(ui, icon::TERMINAL_WINDOW, *env.show_console, "Show or hide the console")
                     .clicked()
                 {
                     *env.show_console = !*env.show_console;
+                }
+                if widgets::icon_toggle(ui, icon::BRACKETS_CURLY, *env.show_variables, "Show or hide the variables")
+                    .clicked()
+                {
+                    *env.show_variables = !*env.show_variables;
+                }
+                if widgets::icon_button(ui, icon::MAGNIFYING_GLASS, "Find blocks and groups (Ctrl+F)").clicked() {
+                    self.view.open_find();
                 }
                 let shown = self.inspector_shown(width);
                 if widgets::icon_toggle(
@@ -314,6 +371,124 @@ impl MacroTab {
                 }
             },
         );
+    }
+}
+
+/// The menu beside Record: what is recorded, and how movement is recorded.
+fn record_options(ui: &mut Ui, options: &mut RecordOptions) {
+    ui.set_min_width(250.0);
+    ui.label(RichText::new("RECORD").size(10.5).color(theme::text_faint()));
+    ui.checkbox(&mut options.keyboard, "Keyboard");
+    ui.checkbox(&mut options.mouse_buttons, "Mouse buttons");
+    ui.checkbox(&mut options.mouse_moves, "Mouse movement");
+    ui.checkbox(&mut options.scroll, "Scroll wheel");
+    ui.checkbox(&mut options.gamepad, "Gamepad");
+    ui.separator();
+    ui.label(RichText::new("MOVEMENT").size(10.5).color(theme::text_faint()));
+    for mode in MouseRecording::ALL {
+        let label = if mode == MouseRecording::Smart { "Smart Recording (recommended)" } else { mode.label() };
+        ui.radio_value(&mut options.mouse_mode, mode, label).on_hover_text(match mode {
+            MouseRecording::Smart => {
+                "Screen positions, and relative motion where a game keeps the pointer locked, so cameras turn on \
+                 playback"
+            }
+            MouseRecording::Positions => "Only screen positions",
+            MouseRecording::Relative => "Only relative motion, for games",
+        });
+    }
+    ui.separator();
+    ui.checkbox(&mut options.trim_start, "Skip the pause before the first input");
+}
+
+/// Renames a variable everywhere it is used: settings that follow it and
+/// blocks that name it.
+fn rename_variable(project: &mut Project, registry: &Registry, old: &str, new: &str) {
+    for node in project.graph.nodes_mut() {
+        let kinds: Vec<String> = registry
+            .get(&node.kind)
+            .map(|def| def.params.iter().filter(|p| p.kind == ParamKind::Variable).map(|p| p.key.clone()).collect())
+            .unwrap_or_default();
+        for (key, value) in node.params.iter_mut() {
+            if variables::bound_name(value) == Some(old) {
+                *value = variables::binding(new);
+            } else if kinds.contains(key) && value.as_str() == Some(old) {
+                *value = Value::String(new.to_owned());
+            }
+        }
+    }
+}
+
+/// The variables: their names, the values they start with, and the values
+/// they had in the latest run.
+fn variables_panel(ui: &mut Ui, project: &mut Project, registry: &Registry, live: &Map<String, Value>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("VARIABLES").size(10.5).color(theme::text_faint()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::icon_button(ui, icon::PLUS, "Add a variable").clicked() {
+                let taken = |name: &str| project.variables.iter().any(|v| v.name == name);
+                let name = (1..).map(|n| format!("variable {n}")).find(|n| !taken(n)).expect("unbounded");
+                project.variables.push(Variable::new(name, serde_json::json!(0)));
+            }
+        });
+    });
+    widgets::note(
+        ui,
+        "Blocks and Python scripts read and change these while a macro runs. Settings follow one through their \
+         link button.",
+    );
+    ui.add_space(4.0);
+    if project.variables.is_empty() {
+        ui.weak("No variables yet.");
+        return;
+    }
+    let mut remove = None;
+    let mut rename = None;
+    for index in 0..project.variables.len() {
+        ui.push_id(index, |ui| {
+            egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(6).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let variable = &mut project.variables[index];
+                let mut name = variable.name.clone();
+                let (field, delete) = widgets::field_with_trailing(
+                    ui,
+                    egui::TextEdit::singleline(&mut name).font(egui::TextStyle::Monospace),
+                    |ui| widgets::icon_button(ui, icon::TRASH, "Remove this variable").clicked(),
+                );
+                if field.changed() && !name.trim().is_empty() {
+                    rename = Some((variable.name.clone(), name.trim().to_owned()));
+                }
+                if delete {
+                    remove = Some(index);
+                }
+                ui.horizontal(|ui| {
+                    widgets::caption(ui, "Starts as");
+                    let mut text = variables::as_text(&variable.value);
+                    if ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width())).changed() {
+                        variable.value = variables::parse_literal(&text);
+                    }
+                });
+                if let Some(value) = live.get(&variable.name) {
+                    ui.label(
+                        RichText::new(format!("{}  Now {}", icon::LIGHTNING, variables::as_text(value)))
+                            .size(11.5)
+                            .color(theme::accent_bright()),
+                    )
+                    .on_hover_text("Its value in the latest run");
+                }
+            });
+        });
+        ui.add_space(3.0);
+    }
+    if let Some((old, new)) = rename
+        && !project.variables.iter().any(|v| v.name == new)
+    {
+        if let Some(variable) = project.variables.iter_mut().find(|v| v.name == old) {
+            variable.name = new.clone();
+        }
+        rename_variable(project, registry, &old, &new);
+    }
+    if let Some(index) = remove {
+        project.variables.remove(index);
     }
 }
 

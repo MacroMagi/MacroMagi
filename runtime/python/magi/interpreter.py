@@ -8,13 +8,15 @@ contract both follow is described in docs/ARCHITECTURE.md ("Execution model").
 import threading
 
 from . import nodes
-from .errors import MacroError, Stopped, StopRun
+from .errors import EndBranch, ExitLoop, GoTo, MacroError, Stopped, StopRun
 
 FLOW_IN = "in"
 OUT = "out"
 
 # Value blocks may feed value blocks; this bounds the chain.
 MAX_VALUE_DEPTH = 64
+# Function blocks may call definitions that call definitions; this bounds it.
+MAX_CALL_DEPTH = 64
 # After this many steps without waiting, yield so a tight loop cannot pin a core.
 BUSY_STEPS = 2000
 
@@ -35,9 +37,13 @@ class Program:
             else:
                 self.data_sources[(target["node"], target["port"])] = (source["node"], source["port"])
         self.assets = data.get("assets", [])
-        # State shared by all Python Script blocks of this program (`magi.vars`).
-        self.variables = {}
-        self.variables_lock = threading.RLock()
+
+    def definition(self, name):
+        """The Definition block with this name, or None."""
+        for node in self.nodes.values():
+            if node["type"] == "flow.define" and node["params"].get("name") == name:
+                return node
+        return None
 
     def asset_id(self, name_or_id, kind):
         """Resolves an asset given by id or by display name."""
@@ -101,6 +107,7 @@ class Run:
         # Outputs of flow blocks (e.g. a script's result), kept between steps.
         self.outputs = {}
         self.depth = 0
+        self.calls = 0
         # Set by anything that waits; lets the loop below spot busy spinning.
         self.waited = False
 
@@ -118,6 +125,33 @@ class Run:
         self.host.sleep(ms, jitter_ms)
 
     # -- execution ---------------------------------------------------------
+
+    def resolved(self, node):
+        """The node with settings bound to variables replaced by their current values."""
+        if not node.get("bound"):
+            return node
+        resolved = dict(node)
+        resolved["params"] = self.host.call("resolve", node=node["id"])
+        return resolved
+
+    def call_definition(self, name, input_wired, input_value):
+        """Runs a Definition block's flow as part of this run (a Function block)."""
+        definition = self.program.definition(name)
+        if definition is None:
+            raise MacroError("there is no Definition block named “%s”" % name)
+        if self.calls >= MAX_CALL_DEPTH:
+            raise MacroError("Function blocks call each other without end")
+        variable = (self.resolved(definition)["params"].get("input_variable") or "").strip()
+        if variable and input_wired:
+            self.host.call("var_set", name=variable, value=input_value)
+        # The definition starts with no loops of its own; the caller's resume afterwards.
+        loops, self.loops = self.loops, []
+        self.calls += 1
+        try:
+            self._run_from(definition["id"])
+        finally:
+            self.calls -= 1
+            self.loops = loops
 
     def execute(self, start):
         """Runs to completion. Returns (error message or None, node id or None)."""
@@ -172,13 +206,28 @@ class Run:
             if behaviour is None:
                 raise MacroError("“%s” cannot be run by the Python engine" % kind, current)
             try:
-                port = behaviour(self, node)
+                port = behaviour(self, self.resolved(node))
             except MacroError as error:
                 if error.node is None:
                     error.node = current
                 raise
             except (Stopped, StopRun):
                 raise
+            except EndBranch:
+                current = None
+                continue
+            except ExitLoop:
+                if self.loops:
+                    frame = self.loops.pop()
+                    current = program.flow_targets.get((frame[0], "done"))
+                else:
+                    current = None
+                continue
+            except GoTo as jump:
+                if jump.target not in program.nodes:
+                    raise MacroError("the block to continue from no longer exists", current)
+                current = jump.target
+                continue
             except Exception as error:
                 raise MacroError("%s: %s" % (type(error).__name__, error), current)
             current = program.flow_targets.get((current, port)) if port is not None else None
@@ -208,7 +257,7 @@ class Run:
             self.channel.send({"t": "enter", "run": self.id, "node": source_id})
             self.depth += 1
             try:
-                self.memo[source_id] = evaluate(self, source_node)
+                self.memo[source_id] = evaluate(self, self.resolved(source_node))
             except MacroError as error:
                 if error.node is None:
                     error.node = source_id

@@ -11,9 +11,11 @@ mod app;
 mod background;
 mod cli;
 mod controller;
+mod displays;
 mod document;
 mod examples;
 mod history;
+mod icon;
 mod paths;
 mod presets;
 mod settings;
@@ -70,7 +72,7 @@ fn gui(options: StartupOptions) -> ExitCode {
         .with_app_id("macromagi")
         .with_inner_size(size)
         .with_min_inner_size(MIN_SIZE)
-        .with_icon(Arc::new(icon()));
+        .with_icon(Arc::new(icon::window_icon()));
     let native_options = eframe::NativeOptions {
         viewport,
         // MacroMagi is portable: eframe must not store window state in the user profile.
@@ -91,32 +93,4 @@ fn gui(options: StartupOptions) -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// The window icon: a white four-pointed sparkle on a black tile, drawn in
-/// code so the app needs no image files. Always monochrome, whatever the theme.
-fn icon() -> egui::IconData {
-    const SIZE: usize = 64;
-    let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
-    let center = (SIZE as f32 - 1.0) / 2.0;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let (dx, dy) = ((x as f32 - center) / center, (y as f32 - center) / center);
-            // A rounded square (superellipse) for the tile.
-            let tile = dx.abs().powi(5) + dy.abs().powi(5) <= 0.86;
-            // An astroid for the sparkle.
-            let sparkle = dx.abs().sqrt() + dy.abs().sqrt() <= 1.06;
-            // A faint top-left light keeps the black tile from looking flat.
-            let shade = 0x10 as f32 + (1.0 - (dx + dy + 2.0) / 4.0) * 0x22 as f32;
-            let pixel = if !tile {
-                [0, 0, 0, 0]
-            } else if sparkle {
-                [255, 255, 255, 255]
-            } else {
-                [shade as u8, shade as u8, shade as u8, 255]
-            };
-            rgba.extend_from_slice(&pixel);
-        }
-    }
-    egui::IconData { rgba, width: SIZE as u32, height: SIZE as u32 }
 }

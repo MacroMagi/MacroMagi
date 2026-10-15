@@ -61,6 +61,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
         tab: None,
         screenshot: None,
         show_cards: false,
+        show_targets: false,
         select_kind: None,
         settings_page: None,
     };
@@ -98,6 +99,7 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 });
             }
             "--cards" => options.show_cards = true,
+            "--targets" => options.show_targets = true,
             "--select" => options.select_kind = Some(value("--select")?.to_owned()),
             "--settings" => {
                 let page = value("--settings")?.to_lowercase();

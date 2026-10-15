@@ -1,4 +1,5 @@
-//! Assets: the data files a macro links to – template images and recordings.
+//! Assets: the data files a macro links to – template images, recordings
+//! and sounds.
 //!
 //! Nodes refer to assets by id, so the node graph itself stays a small,
 //! readable text document while the bulky data lives next to it.
@@ -13,6 +14,8 @@ pub enum AssetData {
     /// An encoded image file (PNG), exactly as stored in the project archive.
     Image(Arc<Vec<u8>>),
     Recording(Arc<Recording>),
+    /// A sound to listen for, as a WAV file (mono, 16-bit).
+    Audio(Arc<Vec<u8>>),
 }
 
 impl PartialEq for AssetData {
@@ -22,6 +25,7 @@ impl PartialEq for AssetData {
         match (self, other) {
             (AssetData::Image(a), AssetData::Image(b)) => Arc::ptr_eq(a, b) || a == b,
             (AssetData::Recording(a), AssetData::Recording(b)) => Arc::ptr_eq(a, b) || a == b,
+            (AssetData::Audio(a), AssetData::Audio(b)) => Arc::ptr_eq(a, b) || a == b,
             _ => false,
         }
     }
@@ -31,6 +35,7 @@ impl PartialEq for AssetData {
 pub enum AssetKind {
     Image,
     Recording,
+    Audio,
 }
 
 impl AssetKind {
@@ -38,6 +43,7 @@ impl AssetKind {
         match self {
             AssetKind::Image => "image",
             AssetKind::Recording => "recording",
+            AssetKind::Audio => "audio",
         }
     }
 
@@ -45,6 +51,7 @@ impl AssetKind {
         match id {
             "image" => Some(AssetKind::Image),
             "recording" => Some(AssetKind::Recording),
+            "audio" => Some(AssetKind::Audio),
             _ => None,
         }
     }
@@ -54,6 +61,7 @@ impl AssetKind {
         match self {
             AssetKind::Image => "png",
             AssetKind::Recording => "json",
+            AssetKind::Audio => "wav",
         }
     }
 }
@@ -71,6 +79,7 @@ impl Asset {
         match self.data {
             AssetData::Image(_) => AssetKind::Image,
             AssetData::Recording(_) => AssetKind::Recording,
+            AssetData::Audio(_) => AssetKind::Audio,
         }
     }
 }
@@ -118,6 +127,24 @@ impl AssetStore {
             AssetData::Image(bytes) => Some(bytes),
             _ => None,
         }
+    }
+
+    pub fn audio(&self, id: &str) -> Option<&Arc<Vec<u8>>> {
+        match &self.get(id)?.data {
+            AssetData::Audio(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// Adds a sound (a WAV file). Identical sounds share one asset.
+    pub fn add_audio(&mut self, name: impl Into<String>, wav: Vec<u8>) -> String {
+        let id = format!("snd-{:016x}", fnv1a(&wav));
+        self.assets.entry(id.clone()).or_insert_with(|| Asset {
+            id: id.clone(),
+            name: name.into(),
+            data: AssetData::Audio(Arc::new(wav)),
+        });
+        id
     }
 
     pub fn recording(&self, id: &str) -> Option<&Arc<Recording>> {

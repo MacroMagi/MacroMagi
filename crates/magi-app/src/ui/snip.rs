@@ -1,11 +1,14 @@
 //! The screen picker: choose a point, an area, an image or a colour on screen.
 //!
-//! It works like a screenshot tool. The screen is captured once and shown
-//! frozen in a full-screen window; the user points or drags on that picture.
-//! Freezing means menus and hover states stay put while they are selected.
+//! It works like a screenshot tool. One display is captured and shown frozen
+//! in a full-screen window on that display; the user points or drags on that
+//! picture. Freezing means menus and hover states stay put while they are
+//! selected. With several displays, buttons at the top switch between them.
+//!
+//! Positions and areas come back relative to the display they were picked on.
 
 use egui::{Align2, Color32, FontId, Key, Pos2, Sense, Stroke, StrokeKind, TextureHandle, Vec2, pos2, vec2};
-use magi_core::geom::{Point, Rect};
+use magi_core::geom::{Displays, Point, Rect};
 use magi_core::host::Frame;
 use magi_core::text::format_hex_color;
 use magi_vision::ImageRef;
@@ -33,16 +36,44 @@ pub struct Snip {
     texture: TextureHandle,
     /// Where the drag began, in frame pixels.
     anchor: Option<Pos2>,
+    displays: Displays,
+    /// The display shown; `None` when the displays could not be told apart.
+    display: Option<u8>,
+}
+
+/// Captures one display (or, without a list of displays, the primary screen).
+fn capture(ctx: &egui::Context, displays: &Displays, display: Option<u8>) -> Result<(Frame, TextureHandle), String> {
+    let area = display.and_then(|d| displays.get(d));
+    let frame = magi_platform::capture::capture(area).map_err(|e| e.to_string())?;
+    let texture = super::images::screen_texture(ctx, "magi-snip", frame.width, frame.height, &frame.rgba);
+    Ok((frame, texture))
+}
+
+/// The display MacroMagi's window is on, to start there.
+pub fn display_of_window(ctx: &egui::Context, displays: &Displays) -> Option<u8> {
+    if displays.is_empty() {
+        return None;
+    }
+    let (rect, scale) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().native_pixels_per_point));
+    let center = rect.map(|r| r.center().to_vec2() * scale.unwrap_or(1.0));
+    let display = center.and_then(|c| displays.index_of(Point::new(c.x as i32, c.y as i32)));
+    Some(display.unwrap_or(0))
 }
 
 impl Snip {
-    /// Captures the primary screen and prepares the picker.
+    /// Captures the display MacroMagi is on and prepares the picker.
     pub fn begin(ctx: &egui::Context, mode: SnipMode, target: SnipTarget) -> Result<Self, String> {
-        let frame = magi_platform::capture::capture(None).map_err(|e| e.to_string())?;
-        let image =
-            egui::ColorImage::from_rgba_unmultiplied([frame.width as usize, frame.height as usize], &frame.rgba);
-        let texture = ctx.load_texture("magi-snip", image, egui::TextureOptions::LINEAR);
-        Ok(Self { mode, target, frame, texture, anchor: None })
+        let displays = crate::displays::current();
+        let display = display_of_window(ctx, &displays);
+        let (frame, texture) = capture(ctx, &displays, display)?;
+        Ok(Self { mode, target, frame, texture, anchor: None, displays, display })
+    }
+
+    /// Shows another display instead.
+    fn switch_to(&mut self, ctx: &egui::Context, display: u8) {
+        if let Ok((frame, texture)) = capture(ctx, &self.displays, Some(display)) {
+            (self.frame, self.texture, self.display, self.anchor) = (frame, texture, Some(display), None);
+        }
     }
 
     fn pixel(&self, x: u32, y: u32) -> [u8; 3] {
@@ -55,12 +86,15 @@ impl Snip {
     /// Shows the picker. Returns `None` while the user is still choosing,
     /// `Some(None)` if they cancelled, `Some(Some(outcome))` when done.
     pub fn show(&mut self, ctx: &egui::Context) -> Option<Option<SnipOutcome>> {
-        let builder = egui::ViewportBuilder::default()
+        let mut builder = egui::ViewportBuilder::default()
             .with_title("MacroMagi – pick on screen")
             .with_decorations(false)
             .with_fullscreen(true)
             .with_always_on_top()
             .with_active(true);
+        if let Some(index) = self.display.and_then(crate::displays::monitor_index) {
+            builder = builder.with_monitor(index);
+        }
         let mut result = None;
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("magi-snip"), builder, |ui, _class| {
             result = self.contents(ui);
@@ -84,7 +118,11 @@ impl Snip {
         let hover = response.hover_pos().or(response.interact_pointer_pos());
         let hover_px = hover.map(to_pixels);
         let origin = self.frame.origin;
-        let screen_point = |p: Pos2| Point::new(origin.x + p.x.floor() as i32, origin.y + p.y.floor() as i32);
+        let display = self.display;
+        let screen_point = |p: Pos2| match display {
+            Some(d) => Point::on(d, p.x.floor() as i32, p.y.floor() as i32),
+            None => Point::new(origin.x + p.x.floor() as i32, origin.y + p.y.floor() as i32),
+        };
 
         if ui.input(|i| i.key_pressed(Key::Escape)) || response.secondary_clicked() {
             return Some(None);
@@ -107,8 +145,11 @@ impl Snip {
                     painter.vline(pos.x, area.y_range(), line);
                     let point = screen_point(px);
                     let rgb = self.pixel(px.x.max(0.0) as u32, px.y.max(0.0) as u32);
-                    let label = match self.mode {
-                        SnipMode::Color => format_hex_color(rgb),
+                    let label = match (self.mode, point.display) {
+                        (SnipMode::Color, _) => format_hex_color(rgb),
+                        (_, Some(d)) if self.displays.len() > 1 => {
+                            format!("{}, {}  on display {}", point.x, point.y, d + 1)
+                        }
                         _ => format!("{}, {}", point.x, point.y),
                     };
                     self.tag(
@@ -187,6 +228,37 @@ impl Snip {
         painter.rect_stroke(banner, 10.0, Stroke::new(1.0, theme::stroke_strong()), StrokeKind::Inside);
         painter.galley(banner.center() - galley.size() / 2.0, galley, Color32::WHITE);
 
+        // With several displays: a button for each, under the instructions.
+        if self.displays.len() > 1 && self.anchor.is_none() {
+            let mut switch = None;
+            egui::Area::new(egui::Id::new("magi-snip-displays"))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .pivot(Align2::CENTER_TOP)
+                .fixed_pos(pos2(area.center().x, banner.bottom() + 10.0))
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new().fill(Color32::from_black_alpha(200)).corner_radius(8).inner_margin(6).show(
+                        ui,
+                        |ui| {
+                            ui.horizontal(|ui| {
+                                for (d, _) in self.displays.iter() {
+                                    let text = egui::RichText::new(format!("Display {}", d + 1)).color(Color32::WHITE);
+                                    if ui.selectable_label(self.display == Some(d), text).clicked()
+                                        && self.display != Some(d)
+                                    {
+                                        switch = Some(d);
+                                    }
+                                }
+                            });
+                        },
+                    );
+                });
+            if let Some(d) = switch {
+                self.switch_to(ui.ctx(), d);
+                return None;
+            }
+        }
+
         ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         result
     }
@@ -223,7 +295,13 @@ impl Snip {
 
     fn finish(&self, region: Rect) -> Option<SnipOutcome> {
         if self.mode == SnipMode::Region {
-            return Some(SnipOutcome::Region(region));
+            let origin = self.frame.origin;
+            return Some(SnipOutcome::Region(match self.display {
+                Some(d) => {
+                    Rect { x: region.x - origin.x, y: region.y - origin.y, w: region.w, h: region.h, display: Some(d) }
+                }
+                None => region,
+            }));
         }
         let crop = self.frame.crop(region)?;
         let png = magi_vision::encode_png(ImageRef::new(crop.width, crop.height, &crop.rgba)).ok()?;

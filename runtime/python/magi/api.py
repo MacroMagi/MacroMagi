@@ -90,8 +90,9 @@ class Magi:
 
     @property
     def vars(self):
-        """A dict shared by every script block of the macro, for keeping state."""
-        return self._run.program.variables
+        """The macro's variables: magi.vars["delay"] reads one, magi.vars["delay"] = 50
+        changes it. Every block bound to a variable follows its new value."""
+        return Variables(self._run)
 
     def log(self, *values):
         """Write a line to the MacroMagi console."""
@@ -173,3 +174,32 @@ class Magi:
 def _sighting(result):
     position = result.get("position") or {}
     return Sighting(bool(result.get("found")), position.get("x"), position.get("y"), result.get("score", 0.0))
+
+
+class Variables:
+    """The macro's variables, kept by the app and shared by every run."""
+
+    def __init__(self, run):
+        self._run = run
+
+    def __getitem__(self, name):
+        return self._run.host.call("var_get", name=name)
+
+    def __setitem__(self, name, value):
+        self._run.host.call("var_set", name=name, value=value)
+
+    def get(self, name, default=None):
+        value = self[name]
+        return default if value is None else value
+
+    def __contains__(self, name):
+        return name in self._run.host.call("vars")
+
+    def keys(self):
+        return list(self._run.host.call("vars").keys())
+
+    def items(self):
+        return list(self._run.host.call("vars").items())
+
+    def __repr__(self):
+        return repr(self._run.host.call("vars"))

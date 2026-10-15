@@ -64,7 +64,8 @@ pub struct Palette {
     pub danger: Color32,
     pub warning: Color32,
     pub flow: Color32,
-    categories: [Color32; 7],
+    /// One per [`Category`], in [`Category::ALL`] order.
+    categories: [Color32; 11],
     data: [Color32; 5],
 }
 
@@ -155,7 +156,19 @@ impl Palette {
                 danger: hex(0xF0_5D_6A),
                 warning: hex(0xE9_B1_4F),
                 flow: gray(0xD6),
-                categories: [gray(0xD8), gray(0xBC), gray(0xA4), gray(0x94), gray(0xC8), gray(0xE4), gray(0x86)],
+                categories: [
+                    gray(0xD8),
+                    gray(0xBC),
+                    gray(0xA4),
+                    gray(0x9C),
+                    gray(0xE4),
+                    gray(0xC4),
+                    gray(0x94),
+                    gray(0xB0),
+                    gray(0xC8),
+                    gray(0x8E),
+                    gray(0x86),
+                ],
                 data: [gray(0xE0), gray(0xB0), gray(0xC8), gray(0x98), gray(0x80)],
             }
         } else {
@@ -182,7 +195,19 @@ impl Palette {
                 danger: hex(0xC7_2C_3B),
                 warning: hex(0xA8_6A_00),
                 flow: gray(0x3A),
-                categories: [gray(0x2A), gray(0x48), gray(0x60), gray(0x72), gray(0x3A), gray(0x1E), gray(0x80)],
+                categories: [
+                    gray(0x2A),
+                    gray(0x48),
+                    gray(0x60),
+                    gray(0x5A),
+                    gray(0x1E),
+                    gray(0x40),
+                    gray(0x72),
+                    gray(0x52),
+                    gray(0x3A),
+                    gray(0x78),
+                    gray(0x80),
+                ],
                 data: [gray(0x22), gray(0x50), gray(0x38), gray(0x66), gray(0x7C)],
             }
         };
@@ -197,13 +222,18 @@ impl Palette {
             palette.accent_bright =
                 if dark { mix(accent, Color32::WHITE, 0.3) } else { mix(accent, Color32::BLACK, 0.25) };
             palette.on_accent = if luminance(accent) > 0.55 { gray(0x0B) } else { Color32::WHITE };
+            // Flow, Input, Vision, Sound, Window, Variables, Logic, System, Script, Notes, Add-ons.
             palette.categories = [
                 around(0.0),
                 around(0.58),
                 around(0.42),
-                around(0.11),
-                around(0.88),
+                around(0.32),
                 around(0.72),
+                around(0.19),
+                around(0.11),
+                around(0.8),
+                around(0.88),
+                mix(around(0.05), palette.text_dim, 0.5),
                 around(0.0).gamma_multiply(0.7),
             ];
             palette.data =
@@ -312,7 +342,7 @@ pub fn accent_from(rgb: Option<[u8; 3]>) -> Option<Color32> {
 
 pub fn category_color(category: Category) -> Color32 {
     let index = Category::ALL.iter().position(|c| *c == category).unwrap_or(0);
-    palette().categories[index.min(6)]
+    palette().categories[index.min(Category::ALL.len() - 1)]
 }
 
 pub fn data_color(ty: DataType) -> Color32 {

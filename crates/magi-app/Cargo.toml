@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 magi-core.workspace = true
 magi-vision.workspace = true
+magi-audio.workspace = true
 magi-platform.workspace = true
 magi-engine.workspace = true
 eframe.workspace = true
@@ -26,6 +27,10 @@ ureq.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[target.'cfg(windows)'.build-dependencies]
+# Embeds the icon and version information in the Windows executable.
+winresource = "0.1"
 
 [dev-dependencies]
 # Drives the UI headlessly: simulated pointer and keyboard, no window.

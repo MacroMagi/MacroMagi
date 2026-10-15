@@ -12,11 +12,13 @@
 //! (X11) are implemented through cross-platform crates and need the usual
 //! permissions (Accessibility / Screen Recording on macOS).
 
+pub mod audio;
 pub mod capture;
 mod gamepad;
 mod inject;
 pub mod keymap;
 mod listen;
+pub mod notify;
 pub mod system;
 
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -24,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use magi_core::geom::{Point, Rect};
-use magi_core::host::{Frame, Host, HostError, WindowInfo, WindowQuery};
+use magi_core::host::{Frame, Host, HostError, Notification, SoundClip, SoundSource, WindowInfo, WindowQuery};
 use magi_core::input::InputEvent;
 
 pub use inject::{INJECTION_MARKER, Injector};
@@ -65,6 +67,7 @@ pub fn attach_parent_console() {
 #[derive(Default)]
 pub struct SystemHost {
     injector: Injector,
+    listener: audio::Listener,
 }
 
 impl SystemHost {
@@ -96,6 +99,18 @@ impl Host for SystemHost {
 
     fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError> {
         system::focus_window(query)
+    }
+
+    fn clipboard_text(&self) -> Result<String, HostError> {
+        notify::clipboard_text()
+    }
+
+    fn notify(&self, notification: &Notification) -> Result<(), HostError> {
+        notify::notify(notification)
+    }
+
+    fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
+        self.listener.listen(source, ms)
     }
 }
 

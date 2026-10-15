@@ -18,13 +18,14 @@ use magi_core::autoclicker::{
 };
 use magi_core::geom::{Point, Rect};
 use magi_core::graph::{NodeId, PortRef};
-use magi_core::host::{Frame, SimHost, WindowInfo};
+use magi_core::host::{Frame, SimHost, SoundClip, WindowInfo};
 use magi_core::input::{InputEvent, Key, MouseButton};
 use magi_core::nodes::window::ScreenKind;
 use magi_core::nodes::{Registry, ids, ports};
 use magi_core::options::{ProcessRule, ProcessRules, RuleAction, RuleMode};
 use magi_core::project::Project;
 use magi_core::recording::{LookPoint, PathPoint, RecordOptions, Recording, RecordingBuilder, Stroke, StrokeInput};
+use magi_core::variables::{Variable, binding};
 use magi_engine::{EngineKind, LogLevel, Monitor, Program, PythonConfig, PythonRuntime, PythonStatus, Session};
 use magi_vision::ImageRef;
 use serde_json::json;
@@ -544,7 +545,7 @@ fn disabled_blocks_are_skipped() {
 
 #[test]
 fn recordings_replay_press_and_release_in_time() {
-    let mut recorder = RecordingBuilder::new(RecordOptions::default(), vec![], Point::new(5, 5));
+    let mut recorder = RecordingBuilder::new(RecordOptions::default(), vec![], Point::new(5, 5), Default::default());
     recorder.push(0.0, &InputEvent::KeyDown { key: Key::KeyA });
     recorder.push(20.0, &InputEvent::KeyDown { key: Key::KeyB });
     recorder.push(40.0, &InputEvent::KeyUp { key: Key::KeyA });
@@ -652,7 +653,7 @@ fn double_clicks_and_fixed_positions() {
     let (project, start) = clicker_project(|c| {
         c.clicks = 2;
         c.double_click_delay_ms = 5.0;
-        c.position = ClickPosition::Fixed { x: 40, y: 50 };
+        c.position = ClickPosition::Fixed { x: 40, y: 50, display: None };
         c.limit = ClickLimit::Count { count: 2 };
     });
     on_all(&project, start, SimHost::new, |kind, outcome| {
@@ -930,4 +931,337 @@ fn a_missing_interpreter_is_reported_not_fatal() {
     let runtime = PythonRuntime::new(config, Arc::new(Monitor::new()));
     assert!(matches!(runtime.probe(), PythonStatus::Unavailable(_)));
     let _ = std::fs::remove_dir_all(dir);
+}
+
+// ---- variables, counters and calculations ------------------------------------
+
+fn with_variables(b: &mut Builder, variables: &[(&str, serde_json::Value)]) {
+    b.project.variables = variables.iter().map(|(name, value)| Variable::new(*name, value.clone())).collect();
+}
+
+#[test]
+fn bound_settings_follow_their_variable() {
+    let mut b = Builder::new();
+    with_variables(&mut b, &[("greeting", json!("hello"))]);
+    let start = b.node(ids::START, json!({}));
+    let first = b.node(ids::LOG, json!({ "message": binding("greeting") }));
+    let change = b.node(ids::SET_VARIABLE, json!({ "variable": "greeting", "operation": "set", "value": "bye" }));
+    let second = b.node(ids::LOG, json!({ "message": binding("greeting") }));
+    b.chain(&[start, first, change, second]);
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["hello", "bye"], "{kind:?}");
+    });
+    // The next run starts from the starting value again.
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["hello", "bye"], "{kind:?}");
+    });
+}
+
+#[test]
+fn counters_reach_their_limit_and_start_again() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let repeat = b.node(ids::REPEAT, json!({ "mode": "count", "count": 5 }));
+    let counter = b.node(ids::COUNTER, json!({ "variable": "n", "step": 1.0, "limit": 3.0 }));
+    let reached = b.log("three");
+    let shown = b.log("count");
+    b.flow(start, ports::OUT, repeat).flow(repeat, ports::LOOP, counter);
+    b.flow(counter, "reached", reached).flow(counter, ports::OUT, shown);
+    b.wire(counter, "count", shown, "value");
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["count 1", "count 2", "three", "count 1", "count 2"], "{kind:?}");
+    });
+}
+
+#[test]
+fn math_compare_and_text_calculate_the_same_everywhere() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let sum = b.node(ids::MATH, json!({ "operation": "add", "a": 2.0, "b": 3.0 }));
+    let log_sum = b.log("sum");
+    let joined = b.node(ids::TEXT, json!({ "operation": "join", "a": "ab", "b": "cd" }));
+    let contains = b.node(ids::COMPARE, json!({ "operation": "contains", "b": "BC" }));
+    let decide = b.node(ids::DECISION, json!({}));
+    let yes = b.tap(Key::KeyY);
+    let no = b.tap(Key::KeyN);
+    b.chain(&[start, log_sum, decide]);
+    b.wire(sum, ports::OUT, log_sum, "value");
+    b.wire(joined, ports::OUT, contains, "a");
+    b.wire(contains, ports::OUT, decide, "cond:1");
+    b.flow(decide, "case:1", yes).flow(decide, ports::ELSE, no);
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["sum 5"], "{kind:?}");
+        assert_eq!(outcome.taps(), [Key::KeyY], "{kind:?}: “abcd” contains “BC”, ignoring case");
+    });
+}
+
+#[test]
+fn repeat_until_checks_its_condition_before_every_round() {
+    let mut b = Builder::new();
+    with_variables(&mut b, &[("n", json!(0.0))]);
+    let start = b.node(ids::START, json!({}));
+    let repeat = b.node(ids::REPEAT, json!({ "mode": "until" }));
+    let n = b.node(ids::VARIABLE, json!({ "variable": "n" }));
+    let done = b.node(ids::COMPARE, json!({ "operation": "greater_or_equal", "b": "3" }));
+    let counter = b.node(ids::COUNTER, json!({ "variable": "n" }));
+    let round = b.log("round");
+    let after = b.log("after");
+    b.flow(start, ports::OUT, repeat).flow(repeat, ports::LOOP, counter).flow(counter, ports::OUT, round);
+    b.flow(repeat, ports::DONE, after);
+    b.wire(n, ports::OUT, done, "a").wire(done, ports::OUT, repeat, "condition");
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["round", "round", "round", "after"], "{kind:?}");
+    });
+}
+
+#[test]
+fn stop_can_skip_a_round_leave_a_loop_or_jump() {
+    // Skip the second round.
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let repeat = b.node(ids::REPEAT, json!({ "mode": "count", "count": 4 }));
+    let counter = b.node(ids::COUNTER, json!({ "variable": "c" }));
+    let second = b.node(ids::COMPARE, json!({ "operation": "equal", "b": "2" }));
+    let decide = b.node(ids::DECISION, json!({}));
+    let skip = b.node(ids::STOP, json!({ "scope": "next" }));
+    let key = b.tap(Key::KeyK);
+    b.flow(start, ports::OUT, repeat).flow(repeat, ports::LOOP, counter).flow(counter, ports::OUT, decide);
+    b.wire(counter, "count", second, "a").wire(second, ports::OUT, decide, "cond:1");
+    b.flow(decide, "case:1", skip).flow(decide, ports::ELSE, key);
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyK; 3], "{kind:?}");
+    });
+
+    // Leave a loop that would run for ever.
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let repeat = b.node(ids::REPEAT, json!({ "mode": "forever" }));
+    let counter = b.node(ids::COUNTER, json!({ "variable": "c" }));
+    let third = b.node(ids::COMPARE, json!({ "operation": "greater_or_equal", "b": "3" }));
+    let decide = b.node(ids::DECISION, json!({}));
+    let leave = b.node(ids::STOP, json!({ "scope": "exit_loop" }));
+    let key = b.tap(Key::KeyK);
+    let after = b.tap(Key::KeyD);
+    b.flow(start, ports::OUT, repeat).flow(repeat, ports::LOOP, counter).flow(counter, ports::OUT, decide);
+    b.flow(repeat, ports::DONE, after);
+    b.wire(counter, "count", third, "a").wire(third, ports::OUT, decide, "cond:1");
+    b.flow(decide, "case:1", leave).flow(decide, ports::ELSE, key);
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyK, Key::KeyK, Key::KeyD], "{kind:?}");
+    });
+
+    // Jump to a block nothing is wired to.
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let target = b.log("jumped");
+    let jump = b.node(ids::STOP, json!({ "scope": "go_to", "target": target }));
+    b.chain(&[start, jump]);
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["jumped"], "{kind:?}");
+    });
+}
+
+#[test]
+fn rate_blocks_press_their_steps_a_set_time_apart() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let steps = [Action::tap(Key::KeyA), Action::tap(Key::KeyD), Action::tap(Key::KeyW)];
+    let rate = b.node(ids::RATE, json!({ "rate_ms": 20.0, "hold_ms": 1.0, "steps": steps }));
+    b.chain(&[start, rate]);
+    for kind in engines() {
+        let began = std::time::Instant::now();
+        let outcome = run_on(kind, &b.project, start, SimHost::new());
+        assert_eq!(outcome.taps(), [Key::KeyA, Key::KeyD, Key::KeyW], "{kind:?}");
+        assert!(began.elapsed() >= Duration::from_millis(40), "{kind:?}: two gaps of 20 ms");
+    }
+}
+
+#[test]
+fn function_blocks_run_a_definition_and_pass_it_a_value() {
+    let mut b = Builder::new();
+    let define = b.node(ids::DEFINE, json!({ "name": "greet", "input_variable": "who" }));
+    let greet = b.node(ids::LOG, json!({ "message": binding("who") }));
+    b.chain(&[define, greet]);
+    let start = b.node(ids::START, json!({}));
+    let call = b.node(ids::CALL, json!({ "definition": "greet" }));
+    let name = b.node(ids::TEXT, json!({ "operation": "join", "a": "Ada", "b": "" }));
+    let after = b.log("after");
+    b.chain(&[start, call, after]);
+    b.wire(name, ports::OUT, call, "input");
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert_eq!(outcome.logs, ["Ada", "after"], "{kind:?}");
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+    });
+}
+
+#[test]
+fn the_clipboard_and_notifications_reach_the_machine() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let clipboard = b.node(ids::CLIPBOARD, json!({}));
+    let keep = b.node(ids::SET_VARIABLE, json!({ "variable": "clip" }));
+    let read = b.node(ids::VARIABLE, json!({ "variable": "clip" }));
+    let notify = b.node(ids::NOTIFY, json!({ "title": "T", "message": "Copied", "sound": false }));
+    b.chain(&[start, keep, notify]);
+    b.wire(clipboard, ports::OUT, keep, "value").wire(read, ports::OUT, notify, "value");
+    for kind in engines() {
+        let host = Arc::new(SimHost::new());
+        host.set_clipboard("hello");
+        let monitor = Arc::new(Monitor::new());
+        let session = session(kind, &b.project, Arc::clone(&host), monitor);
+        session.start(start).unwrap();
+        assert!(session.wait_idle(Some(TIMEOUT)), "{kind:?}");
+        let shown = host.notifications();
+        assert_eq!(shown.len(), 1, "{kind:?}");
+        assert_eq!(
+            (shown[0].message.as_str(), shown[0].sound, shown[0].popup),
+            ("Copied hello", false, true),
+            "{kind:?}"
+        );
+    }
+}
+
+// ---- several displays ------------------------------------------------------
+
+fn two_displays() -> SimHost {
+    let host = SimHost::new();
+    host.set_screens(vec![Rect::new(0, 0, 320, 200), Rect::new(320, 0, 320, 200)]);
+    host
+}
+
+#[test]
+fn positions_on_a_display_land_on_that_display() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let click = b.node(
+        ids::INPUT,
+        json!({ "actions": [Action::Mouse { button: MouseButton::Left, mode: PressMode::Tap, clicks: 1, at: Some(Point::on(1, 10, 20)) }], "hold_ms": 1.0 }),
+    );
+    b.chain(&[start, click]);
+    on_all(&b.project, start, two_displays, |kind, outcome| {
+        assert_eq!(outcome.sent.first(), Some(&InputEvent::MoveTo { x: 330, y: 20 }), "{kind:?}");
+    });
+}
+
+#[test]
+fn recordings_replay_on_the_display_they_were_made_on() {
+    let recording = Recording {
+        duration_ms: 10.0,
+        screen: None,
+        strokes: vec![
+            Stroke { at: 0.0, hold: 0.0, input: StrokeInput::Display { index: 1 } },
+            Stroke {
+                at: 1.0,
+                hold: 2.0,
+                input: StrokeInput::Mouse { button: MouseButton::Left, x: 5, y: 6, end: None, here: false },
+            },
+        ],
+    };
+    let mut b = Builder::new();
+    let asset = b.project.assets.add_recording("on two", recording);
+    let start = b.node(ids::START, json!({}));
+    let play = b.node(ids::PLAY_RECORDING, json!({ "recording": asset }));
+    b.chain(&[start, play]);
+    on_all(&b.project, start, two_displays, |kind, outcome| {
+        assert_eq!(outcome.sent.first(), Some(&InputEvent::MoveTo { x: 325, y: 6 }), "{kind:?}");
+    });
+}
+
+#[test]
+fn runs_that_end_by_themselves_are_reported() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let wait = b.node(ids::DELAY, json!({ "ms": 1.0 }));
+    b.chain(&[start, wait]);
+    for kind in engines() {
+        let monitor = Arc::new(Monitor::new());
+        let session = session(kind, &b.project, Arc::new(SimHost::new()), Arc::clone(&monitor));
+        session.start(start).unwrap();
+        assert!(session.wait_idle(Some(TIMEOUT)), "{kind:?}");
+        let finished = monitor.take_finished();
+        assert_eq!(finished.len(), 1, "{kind:?}");
+        assert!(finished[0].by_itself && !finished[0].failed, "{kind:?}");
+    }
+}
+
+// ---- sound -----------------------------------------------------------------
+
+const RATE: u32 = magi_audio::ANALYSIS_RATE;
+
+fn tone(hz: f32, seconds: f32, amplitude: f32) -> Vec<f32> {
+    let n = (seconds * RATE as f32) as usize;
+    (0..n).map(|i| amplitude * (2.0 * std::f32::consts::PI * hz * i as f32 / RATE as f32).sin()).collect()
+}
+
+fn hearing(samples: Vec<f32>) -> SimHost {
+    let host = SimHost::new();
+    host.set_sound(SoundClip { sample_rate: RATE, samples });
+    host
+}
+
+#[test]
+fn sound_detection_reacts_to_loudness_and_pitch() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let listen = b.node(ids::SOUND_LEVEL, json!({ "threshold_db": -20.0 }));
+    let decision = b.node(ids::DECISION, json!({}));
+    let heard = b.tap(Key::KeyY);
+    let quiet = b.tap(Key::KeyN);
+    b.flow(start, ports::OUT, decision)
+        .wire(listen, "detected", decision, "cond:1")
+        .flow(decision, "case:1", heard)
+        .flow(decision, ports::ELSE, quiet);
+    let loud = || hearing(tone(440.0, 1.0, 0.5)); // about -9 dB
+    on_all(&b.project, start, loud, |kind, outcome| assert_eq!(outcome.taps(), [Key::KeyY], "{kind:?}"));
+    on_all(
+        &b.project,
+        start,
+        || hearing(tone(440.0, 1.0, 0.01)),
+        |kind, outcome| {
+            assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}: too quiet");
+        },
+    );
+
+    let mut high = b.project.clone();
+    let node = high.graph.node_mut(listen).unwrap();
+    node.params.extend(json!({ "use_pitch": true, "min_hz": 1000.0, "max_hz": 3000.0 }).as_object().unwrap().clone());
+    on_all(&high, start, loud, |kind, outcome| assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}: pitch too low"));
+    on_all(
+        &high,
+        start,
+        || hearing(tone(1500.0, 1.0, 0.5)),
+        |kind, outcome| {
+            assert_eq!(outcome.taps(), [Key::KeyY], "{kind:?}");
+        },
+    );
+}
+
+#[test]
+fn sound_recognition_hears_an_uploaded_sound_once_each_time_it_plays() {
+    let tune: Vec<f32> = [440.0, 660.0, 550.0].iter().flat_map(|&hz| tone(hz, 0.25, 0.5)).collect();
+    let mut b = Builder::new();
+    let wav = magi_audio::prepare_upload(&magi_audio::encode_wav(&tune, RATE)).unwrap();
+    let sound = b.project.assets.add_audio("tune.wav", wav);
+    let start = b.node(ids::START, json!({}));
+    let repeat = b.node(ids::REPEAT, json!({ "mode": "count", "count": 3 }));
+    let listen = b.node(ids::SOUND_MATCH, json!({ "sound": sound }));
+    let decision = b.node(ids::DECISION, json!({}));
+    let heard = b.tap(Key::KeyY);
+    let not_heard = b.tap(Key::KeyN);
+    b.flow(start, ports::OUT, repeat).flow(repeat, ports::LOOP, decision);
+    b.wire(listen, "found", decision, "cond:1").flow(decision, "case:1", heard).flow(decision, ports::ELSE, not_heard);
+
+    let playing = || {
+        let mut samples = vec![0.0; RATE as usize / 2];
+        samples.extend(tune.iter().map(|s| s * 0.4));
+        samples.extend(vec![0.0; RATE as usize / 10]);
+        hearing(samples)
+    };
+    on_all(&b.project, start, playing, |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyY, Key::KeyN, Key::KeyN], "{kind:?}: heard once, not again");
+    });
+    let other = || hearing([300.0, 900.0, 1200.0].iter().flat_map(|&hz| tone(hz, 0.25, 0.5)).collect());
+    on_all(&b.project, start, other, |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyN; 3], "{kind:?}: a different sound");
+    });
 }

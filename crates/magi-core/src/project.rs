@@ -27,6 +27,7 @@ use crate::graph::Graph;
 use crate::nodes::{Registry, ids};
 use crate::options::AutomationOptions;
 use crate::preset::Preset;
+use crate::variables::Variable;
 
 pub const FORMAT: &str = "macromagi.project";
 pub const FORMAT_VERSION: u32 = 1;
@@ -75,6 +76,8 @@ pub struct Project {
     pub options: Option<AutomationOptions>,
     /// Auto Clicker settings saved with the project.
     pub clicker: Option<AutoClickerConfig>,
+    /// The macro's variables and their starting values.
+    pub variables: Vec<Variable>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -98,6 +101,8 @@ struct Manifest {
     options: Option<AutomationOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     clicker: Option<AutoClickerConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    variables: Vec<Variable>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -132,7 +137,7 @@ impl Project {
             let kind = asset.kind();
             let file = format!("assets/{}.{}", asset.id, kind.extension());
             match &asset.data {
-                AssetData::Image(bytes) => {
+                AssetData::Image(bytes) | AssetData::Audio(bytes) => {
                     zip.start_file(file.as_str(), stored)?;
                     zip.write_all(bytes)?;
                 }
@@ -163,6 +168,7 @@ impl Project {
             presets: preset_files,
             options: self.options.clone(),
             clicker: self.clicker.clone(),
+            variables: self.variables.clone(),
         };
         zip.start_file(MANIFEST, text)?;
         zip.write_all(serde_json::to_string_pretty(&manifest)?.as_bytes())?;
@@ -196,6 +202,7 @@ impl Project {
             let data = match kind {
                 AssetKind::Image => AssetData::Image(Arc::new(bytes)),
                 AssetKind::Recording => AssetData::Recording(Arc::new(serde_json::from_slice(&bytes)?)),
+                AssetKind::Audio => AssetData::Audio(Arc::new(bytes)),
             };
             assets.insert(Asset { id: entry.id, name: entry.name, data });
         }
@@ -215,6 +222,7 @@ impl Project {
             presets,
             options: manifest.options,
             clicker: manifest.clicker,
+            variables: manifest.variables,
         })
     }
 
@@ -269,7 +277,8 @@ mod tests {
         let find = project.graph.add(&registry, ids::FIND_IMAGE, [-260.0, 120.0]).unwrap();
         project.graph.connect(&registry, PortRef::new(start, ports::OUT), PortRef::new(play, ports::FLOW_IN)).unwrap();
 
-        let mut builder = RecordingBuilder::new(RecordOptions::default(), vec![], Default::default());
+        let mut builder =
+            RecordingBuilder::new(RecordOptions::default(), vec![], Default::default(), Default::default());
         builder.push(0.0, &InputEvent::KeyDown { key: Key::KeyA });
         builder.push(80.0, &InputEvent::KeyUp { key: Key::KeyA });
         let recording = project.assets.add_recording("Recording 1", builder.finish(100.0, Some((1920, 1080))));

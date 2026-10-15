@@ -78,6 +78,10 @@ pub enum EmbeddedData {
     Recording {
         recording: Recording,
     },
+    /// Base64 of a WAV file.
+    Audio {
+        wav_base64: String,
+    },
 }
 
 /// Parameter keys of a node that hold asset ids.
@@ -86,7 +90,7 @@ fn asset_params<'a>(registry: &'a Registry, kind: &str) -> impl Iterator<Item = 
         .get(kind)
         .into_iter()
         .flat_map(|def| def.params.iter())
-        .filter(|p| matches!(p.kind, ParamKind::Image | ParamKind::Recording))
+        .filter(|p| matches!(p.kind, ParamKind::Image | ParamKind::Recording | ParamKind::Audio))
         .map(|p| p.key.as_str())
 }
 
@@ -111,6 +115,7 @@ impl NodePreset {
                 data: match &asset.data {
                     AssetData::Image(bytes) => EmbeddedData::Image { base64: BASE64.encode(bytes.as_slice()) },
                     AssetData::Recording(recording) => EmbeddedData::Recording { recording: (**recording).clone() },
+                    AssetData::Audio(bytes) => EmbeddedData::Audio { wav_base64: BASE64.encode(bytes.as_slice()) },
                 },
             })
             .collect();
@@ -138,6 +143,12 @@ impl NodePreset {
                     assets.add_image(embedded.name.clone(), bytes)
                 }
                 EmbeddedData::Recording { recording } => assets.add_recording(embedded.name.clone(), recording.clone()),
+                EmbeddedData::Audio { wav_base64 } => {
+                    let bytes = BASE64
+                        .decode(wav_base64)
+                        .map_err(|e| Error::format(format!("preset sound `{}` is corrupt: {e}", embedded.name)))?;
+                    assets.add_audio(embedded.name.clone(), bytes)
+                }
             };
             renamed.insert(&embedded.id, id);
         }

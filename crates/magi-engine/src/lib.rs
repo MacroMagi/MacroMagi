@@ -21,6 +21,7 @@ pub mod ops;
 pub mod program;
 pub mod python;
 pub mod timing;
+pub mod vars;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,12 +32,13 @@ use magi_core::graph::NodeId;
 use magi_core::host::{Host, HostError};
 use thiserror::Error;
 
-pub use monitor::{Activity, LogEntry, LogLevel, Monitor};
+pub use monitor::{Activity, FinishedRun, LogEntry, LogLevel, Monitor};
 pub use native::NativeNodes;
 pub use ops::{RunCx, SharedRules};
 pub use program::Program;
 pub use python::{PythonConfig, PythonRuntime, PythonStatus};
 pub use timing::StopToken;
+pub use vars::Variables;
 
 /// A failure while running a macro, phrased for the person who built it.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -126,6 +128,8 @@ struct Shared {
     program: Arc<Program>,
     host: Arc<dyn Host>,
     monitor: Arc<Monitor>,
+    /// The macro's variables, shared by all its runs.
+    vars: Variables,
     rules: Mutex<Option<ops::SharedRules>>,
     backend: Backend,
     runs: Mutex<HashMap<RunId, ActiveRun>>,
@@ -154,10 +158,14 @@ impl Shared {
     }
 
     fn finish(&self, run: RunId, outcome: Result<(), EngineError>) {
+        let failed = outcome.is_err();
         if let Err(error) = outcome {
             self.monitor.log(LogLevel::Error, error.node, error.message);
         }
-        self.runs().remove(&run);
+        let removed = self.runs().remove(&run);
+        if let Some(active) = removed {
+            self.monitor.run_finished(FinishedRun { node: active.node, by_itself: !active.stop.is_stopped(), failed });
+        }
         self.idle.notify_all();
         self.monitor.wake();
     }
@@ -199,10 +207,12 @@ impl Session {
     }
 
     fn with_backend(program: Arc<Program>, host: Arc<dyn Host>, monitor: Arc<Monitor>, backend: Backend) -> Self {
+        let vars = Variables::new(&program.variables, Arc::clone(&monitor));
         let shared = Arc::new(Shared {
             program,
             host,
             monitor,
+            vars,
             rules: Mutex::new(None),
             backend,
             runs: Mutex::new(HashMap::new()),
@@ -233,10 +243,20 @@ impl Session {
         &self.shared.monitor
     }
 
+    /// The macro's variables.
+    pub fn variables(&self) -> &Variables {
+        &self.shared.vars
+    }
+
     /// Starts running the flow that begins at `node` (normally a Start block).
     pub fn start(&self, node: NodeId) -> Result<RunId, EngineError> {
         let shared = &self.shared;
         shared.program.node(node)?;
+        // Variables start afresh with a fresh start, not when a second Start
+        // block joins one that is already running.
+        if shared.runs().is_empty() {
+            shared.vars.reset();
+        }
         let run = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
         let stop = StopToken::new();
 
@@ -253,6 +273,7 @@ impl Session {
             stop.clone(),
             stop_everything,
         )
+        .with_variables(shared.vars.clone())
         .with_rules(shared.rules.lock().unwrap_or_else(|p| p.into_inner()).clone());
         shared.runs().insert(run, ActiveRun { node, stop });
 

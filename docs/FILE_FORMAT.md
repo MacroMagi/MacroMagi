@@ -15,6 +15,7 @@ A `.magi` file is a standard ZIP archive. Rename it to `.zip` to open it.
 project.json           required – the macro
 assets/<id>.png        images
 assets/<id>.json       recordings
+assets/<id>.wav        sounds (for Sound Recognition)
 presets/<nn>-<name>.mp bundled presets (optional)
 ```
 
@@ -26,7 +27,7 @@ presets/<nn>-<name>.mp bundled presets (optional)
 {
   "format": "macromagi.project",
   "version": 1,
-  "app": "0.1.0",
+  "app": "0.1.1",
   "meta": { "name": "Click when ready", "description": "", "author": "" },
   "engine": "auto",
   "graph": {
@@ -34,19 +35,24 @@ presets/<nn>-<name>.mp bundled presets (optional)
       { "id": 1, "type": "flow.start", "pos": [0.0, 0.0],
         "params": { "hotkey": "F7", "mode": "toggle", "run_on_start": true } },
       { "id": 2, "type": "input.action", "pos": [0.0, 120.0], "label": "Click it",
-        "params": { "actions": [ { "kind": "mouse", "button": "Left", "mode": "tap", "clicks": 1 } ], "hold_ms": 30.0 } },
+        "params": { "actions": [ { "kind": "mouse", "button": "Left", "mode": "tap", "clicks": 1 } ],
+                    "hold_ms": { "$var": "hold" } } },
       { "id": 3, "type": "vision.find_image", "pos": [-260.0, 100.0],
         "params": { "image": "img-9f2c61d0a4b7e113", "region": null, "threshold": 0.8 } }
     ],
     "wires": [
       { "from": { "node": 1, "port": "out" },      "to": { "node": 2, "port": "in" } },
       { "from": { "node": 3, "port": "position" }, "to": { "node": 2, "port": "position" } }
+    ],
+    "groups": [
+      { "id": 1, "name": "Find and click", "color": [63, 127, 230], "nodes": [2, 3] }
     ]
   },
   "assets": [
     { "id": "img-9f2c61d0a4b7e113", "name": "Ready button", "kind": "image", "file": "assets/img-9f2c61d0a4b7e113.png" }
   ],
   "presets": [],
+  "variables": [ { "name": "hold", "value": 30 } ],
   "options": { "stop_on_task_switch": true, "stop_hotkeys": ["Escape"] }
 }
 ```
@@ -58,9 +64,10 @@ presets/<nn>-<name>.mp bundled presets (optional)
 | `app` | The MacroMagi version that wrote the file. Informational. |
 | `meta` | Name, description and author. All optional. |
 | `engine` | `auto` (follow the app setting), `python` or `native`. |
-| `graph` | The nodes and wires. |
+| `graph` | The nodes, wires and [groups](#groups). |
 | `assets` | One entry per file under `assets/`. |
 | `presets` | Paths of bundled `.mp` files inside the archive. |
+| `variables` | Optional. The macro's [variables](#variables) and the values they start with. |
 | `options` | Optional. [Automation options](#automation-options) that travel with the macro. |
 | `clicker` | Optional. [Auto Clicker settings](#kind-auto_clicker) that travel with the macro. |
 
@@ -109,6 +116,36 @@ The meaning of `params` is defined per block type. `macromagi nodes` prints ever
 
 A node whose `type` is unknown to the reading app is kept untouched and written back as it was.
 
+### Variables
+
+```json
+"variables": [ { "name": "hold", "value": 30 }, { "name": "greeting", "value": "hello" } ]
+```
+
+A variable has a `name` and a starting `value` (a number, text or true/false). Every run starts from these values; Set Variable, Counter and Python scripts change them while it runs.
+
+**Bound settings.** Any setting of a block can be bound to a variable instead of holding a value of its own. It is then stored as
+
+```json
+"hold_ms": { "$var": "hold" }
+```
+
+and takes the variable's value each time the block runs, converted to the kind of value the setting expects (a number for durations and counts, text for text, true/false for switches). A binding to a variable that does not exist uses the setting's default.
+
+### Groups
+
+```json
+"groups": [ { "id": 1, "name": "Find and click", "color": [63, 127, 230], "nodes": [2, 3], "enabled": false } ]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | A positive integer, unique among the groups. |
+| `name` | Shown on the group's box. |
+| `color` | Optional `[r, g, b]`; omitted for the theme colour. |
+| `nodes` | Ids of the blocks in the group. Ids of missing blocks are dropped on load; a group left empty is dropped. |
+| `enabled` | Optional; `false` turns the group off, which skips every block in it as if each were disabled. Omitted when `true`. |
+
 ### Wires
 
 A wire goes **from an output port to an input port**.
@@ -126,8 +163,9 @@ Wires that refer to missing nodes are dropped on load.
 | --- | --- | --- |
 | `image` | `assets/<id>.png` | A PNG image. |
 | `recording` | `assets/<id>.json` | A [recording](#recordings). |
+| `audio` | `assets/<id>.wav` | A sound to listen for: a 16-bit mono WAV file, 16 kHz, at most 10 seconds. Uploaded MP3, OGG and FLAC files are converted to this. |
 
-Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`). Image ids are derived from the image's content, so the same picture is stored once.
+Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`, `"sound": "snd-…"`). Image and sound ids are derived from the content, so the same picture or sound is stored once.
 
 ### Recordings
 
@@ -144,7 +182,11 @@ A recording is a list of **strokes** – one per thing the user did – rather t
     { "at": 1100.0,"hold": 300.0, "type": "mouse",  "button": "Left", "x": 10, "y": 10, "end": { "x": 200, "y": 90 } },
     { "at": 1380.0,"hold": 0.0,   "type": "scroll", "dx": 0, "dy": -2 },
     { "at": 1500.0,"hold": 90.0,  "type": "look",   "path": [[0.0, 12, -3], [8.0, 15, -2]] },
-    { "at": 1530.0,"hold": 40.0,  "type": "mouse",  "button": "Left", "x": 960, "y": 540, "here": true }
+    { "at": 1530.0,"hold": 40.0,  "type": "mouse",  "button": "Left", "x": 960, "y": 540, "here": true },
+    { "at": 1600.0,"hold": 0.0,   "type": "display", "index": 1 },
+    { "at": 1650.0,"hold": 0.0,   "type": "key_down", "key": "ShiftLeft" },
+    { "at": 1700.0,"hold": 60.0,  "type": "key",    "key": "KeyA" },
+    { "at": 1790.0,"hold": 0.0,   "type": "key_up", "key": "ShiftLeft" }
   ]
 }
 ```
@@ -163,8 +205,11 @@ Every stroke has:
 | `scroll` | `dx`, `dy` | Wheel notches. Positive `dy` is up, positive `dx` is right. |
 | `pad_button` | `button` | |
 | `pad_axis` | `axis`, `value` | |
+| `key_down`, `key_up` | `key` | A key pressed while other inputs happened, and its release. A key pressed and released with nothing else in between is a single `key` stroke with a `hold`. |
+| `mouse_down`, `mouse_up` | `button`, `x`, `y`, optional `here` | The same for mouse buttons. |
+| `display` | `index` | The positions of the strokes after it are relative to this display (0 is the primary display). Recordings made across displays have one wherever the pointer moved to another display. Positions before the first `display` stroke are on the whole desktop. |
 
-Strokes need not be sorted; playback orders events by time. `screen` is the size of the primary screen at recording time, used to find the centre a game re-centres the pointer on, and kept for future rescaling.
+Strokes need not be sorted; playback orders events by time (strokes with the same time keep their order). `screen` is the size of the primary screen at recording time, used to find the centre a game re-centres the pointer on, and kept for future rescaling.
 
 A Play Recording block's `mouse` parameter says how movement is replayed: `recorded` (each stroke as it was recorded), `absolute` (`move` strokes only) or `relative` (everything as relative motion).
 
@@ -176,7 +221,7 @@ A preset is a single JSON file.
 {
   "format": "macromagi.preset",
   "version": 1,
-  "app": "0.1.0",
+  "app": "0.1.1",
   "name": "Rapid fire",
   "description": "",
   "kind": "auto_clicker",
@@ -215,7 +260,7 @@ A preset is a single JSON file.
 
 | Field | Values |
 | --- | --- |
-| `target` | `{ "kind": "mouse", "button": … }`, `{ "kind": "key", "key": … }` or `{ "kind": "dual_keys", "first": …, "second": …, "mode": "together" \| "alternate" }` |
+| `target` | `{ "kind": "mouse", "button": … }`, `{ "kind": "key", "key": … }` or `{ "kind": "dual_keys", "first": …, "second": …, "mode": "alternate" \| "together" }` (`alternate` when omitted) |
 | `clicks` | `1`, `2` or `3` (mouse only); `double_click_delay_ms` is the pause between them |
 | `interval_ms` | Time from one click to the next. This is the speed; `speed_mode`, `rate_unit` and `interval_unit` only say how it is shown. |
 | `*_unit` | `ms`, `seconds`, `minutes`, `hours` or `days` |
@@ -223,7 +268,7 @@ A preset is a single JSON file.
 | `duty_cycle` | Hold each click for a random share (percent) of the interval, instead of `hold_ms` |
 | `limit` | `{ "kind": "forever" }` or `{ "kind": "count", "count": 100 }` |
 | `time_limit` | Stop after this many milliseconds (at most 365 days) |
-| `position` | `{ "kind": "cursor" }` or `{ "kind": "fixed", "x": 300, "y": 400 }` |
+| `position` | `{ "kind": "cursor" }` or `{ "kind": "fixed", "x": 300, "y": 400, "display": 0 }` (`display` optional, see [screen positions](#shared-vocabulary)) |
 | `corner_stop` | Stop within this many pixels of a corner: top-left, top-right, bottom-left, bottom-right |
 | `edge_stop` | Stop within this many pixels of an edge: top, right, bottom, left |
 | `course_correction` | Keep clicks on schedule by shortening the wait after a late click |
@@ -242,12 +287,13 @@ Missing fields take their defaults. Files from the first version, which had only
   "wires": [],
   "assets": [
     { "id": "img-…", "name": "Ready button", "kind": "image", "base64": "iVBORw0KGgo…" },
-    { "id": "rec-1", "name": "Take 1", "kind": "recording", "recording": { "duration_ms": 0.0, "strokes": [] } }
+    { "id": "rec-1", "name": "Take 1", "kind": "recording", "recording": { "duration_ms": 0.0, "strokes": [] } },
+    { "id": "snd-…", "name": "Alarm", "kind": "audio", "wav_base64": "UklGRi…" }
   ]
 }
 ```
 
-When a nodes preset is inserted, its nodes get fresh ids and its assets are imported (images are de-duplicated by content). This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
+A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images and sounds are de-duplicated by content). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
 
 ## Shared vocabulary
 
@@ -259,7 +305,7 @@ When a nodes preset is inserted, its nodes get fresh ids and its assets are impo
 
 **Hotkeys** are the buttons to hold, joined by `+`: `F6`, `ControlLeft+ShiftLeft+KeyK`, `Mouse:Back`, `ControlLeft+Pad:South`. Modifier keys are written as their left-hand variant and match either side. An empty string means "no hotkey".
 
-**Screen positions** are `{ "x": …, "y": … }`, **screen areas** `{ "x": …, "y": …, "w": …, "h": … }`, both in physical pixels with the origin at the top-left of the primary monitor.
+**Screen positions** are `{ "x": …, "y": … }`, **screen areas** `{ "x": …, "y": …, "w": …, "h": … }`, both in physical pixels. With `"display": n` they are relative to the top-left corner of display `n`; without it, to the top-left of the primary display (the desktop's origin). Displays are numbered the same way on every machine: the primary display is 0, the others follow from left to right, then top to bottom. A position on a display that is not connected falls back to the primary display.
 
 **Durations** are milliseconds and may be fractional.
 
@@ -270,5 +316,5 @@ When a nodes preset is inserted, its nodes get fresh ids and its assets are impo
 `version` is a single integer per format, currently `1` for both.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1. Files from 0.1.0 load unchanged; 0.1.0 may refuse files that use these additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

@@ -72,9 +72,15 @@ pub enum OptionsEvent {
 }
 
 /// The contents of the Options menu.
-pub fn menu(ui: &mut Ui, options: &mut AutomationOptions, dry_run: &mut bool) -> Vec<OptionsEvent> {
+pub fn menu(
+    ui: &mut Ui,
+    options: &mut AutomationOptions,
+    dry_run: &mut bool,
+    notify_on_finish: &mut bool,
+) -> Vec<OptionsEvent> {
     let mut events = Vec::new();
-    ui.set_min_width(270.0);
+    // Rows with a switch at the right end fill the width they are given.
+    ui.set_width(250.0);
     widgets::toggle_row(
         ui,
         "Strict hotkey modifiers",
@@ -109,7 +115,7 @@ pub fn menu(ui: &mut Ui, options: &mut AutomationOptions, dry_run: &mut bool) ->
         ui.close();
     }
     ui.menu_button(format!("{}  Behaviours", icon::SLIDERS_HORIZONTAL), |ui| {
-        ui.set_min_width(300.0);
+        ui.set_width(290.0);
         widgets::toggle_row(
             ui,
             "Stop the auto clicker when editing a hotkey",
@@ -124,6 +130,12 @@ pub fn menu(ui: &mut Ui, options: &mut AutomationOptions, dry_run: &mut bool) ->
         "Macros and the auto clicker run normally but nothing is pressed or clicked. The console lists what would \
          have been sent.",
         dry_run,
+    );
+    widgets::toggle_row(
+        ui,
+        "Notify when a macro finishes",
+        "A sound and a desktop notification when a macro ends by itself (not when you stop it).",
+        notify_on_finish,
     );
     ui.separator();
     if ui.button(format!("{}  Create desktop shortcut", icon::DESKTOP)).clicked() {
@@ -146,6 +158,7 @@ pub fn stop_hotkeys_window(
         .open(open)
         .collapsible(false)
         .resizable(true)
+        .scroll([false, true])
         .default_width(330.0)
         .show(ctx, |ui| {
             widgets::note(
@@ -210,7 +223,7 @@ impl RulesWindow {
             .collapsible(false)
             .resizable(true)
             .default_size([380.0, 460.0])
-            .min_width(300.0)
+            .min_width(260.0)
             .show(ctx, |ui| self.contents(ui, options));
         self.open = open;
         if !open {
@@ -266,7 +279,7 @@ impl RulesWindow {
                 ui.push_id(index, |ui| {
                     ui.horizontal(|ui| {
                         widgets::toggle(ui, &mut rule.enabled).on_hover_text("Switch this rule on or off");
-                        ui.add(egui::Label::new(&rule.name).truncate());
+                        // Buttons first, from the right; the name gets what is left.
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if widgets::icon_button(ui, icon::TRASH, "Remove").clicked() {
                                 remove = Some(index);
@@ -280,6 +293,9 @@ impl RulesWindow {
                                     ui.selectable_value(&mut rule.action, RuleAction::Pause, "Pause")
                                         .on_hover_text("Wait, and carry on once an allowed program is in front again");
                                 });
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.add(egui::Label::new(&rule.name).truncate());
+                            });
                         });
                     });
                 });
@@ -289,12 +305,9 @@ impl RulesWindow {
             }
 
             ui.separator();
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text(format!("{}  Search running programs", icon::MAGNIFYING_GLASS))
-                        .desired_width(ui.available_width() - 30.0),
-                );
+            let search = egui::TextEdit::singleline(&mut self.search)
+                .hint_text(format!("{}  Search running programs", icon::MAGNIFYING_GLASS));
+            widgets::field_with_trailing(ui, search, |ui| {
                 if widgets::icon_button(ui, icon::ARROWS_CLOCKWISE, "Refresh the list").clicked() {
                     running_programs(true);
                 }
@@ -321,25 +334,23 @@ impl RulesWindow {
                             let glyph = if program.has_window { icon::APP_WINDOW } else { icon::GEAR };
                             ui.label(RichText::new(glyph).color(theme::text_faint()));
                             ui.add(egui::Label::new(&program.name).truncate());
+                            ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
                         });
                     }
                 });
-            ui.horizontal(|ui| {
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.typed_name)
-                        .hint_text("Or type a program name, e.g. game.exe")
-                        .desired_width(ui.available_width() - 56.0),
-                );
-                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                let name = self.typed_name.trim().to_owned();
-                if (ui.add_enabled(!name.is_empty(), egui::Button::new("Add")).clicked() || entered) && !name.is_empty()
-                {
-                    if !list.iter().any(|rule| rule.name.eq_ignore_ascii_case(&name)) {
-                        list.push(ProcessRule { name, enabled: true, action: RuleAction::Stop });
-                    }
-                    self.typed_name.clear();
-                }
+            let name = self.typed_name.trim().to_owned();
+            let typed =
+                egui::TextEdit::singleline(&mut self.typed_name).hint_text("Or type a program name, e.g. game.exe");
+            let (field, add) = widgets::field_with_trailing(ui, typed, |ui| {
+                ui.add_enabled(!name.is_empty(), egui::Button::new("Add"))
             });
+            let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (add.clicked() || entered) && !name.is_empty() {
+                if !list.iter().any(|rule| rule.name.eq_ignore_ascii_case(&name)) {
+                    list.push(ProcessRule { name, enabled: true, action: RuleAction::Stop });
+                }
+                self.typed_name.clear();
+            }
         });
     }
 }

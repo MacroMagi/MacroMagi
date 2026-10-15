@@ -52,7 +52,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libclang-dev libx11-dev libxi-dev libxtst-dev libxcb1-dev \
-            libxrandr-dev libxkbcommon-dev libwayland-dev libegl-dev libdbus-1-dev libpipewire-0.3-dev libudev-dev
+            libxrandr-dev libxkbcommon-dev libwayland-dev libegl-dev libdbus-1-dev libpipewire-0.3-dev libudev-dev libasound2-dev
 
       # rust-toolchain.toml selects the compiler; add the target being built.
       - name: Set up Rust

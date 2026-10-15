@@ -98,6 +98,35 @@ pub struct WindowInfo {
     pub foreground: bool,
 }
 
+/// A notification for the person at the computer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Notification {
+    pub title: String,
+    pub message: String,
+    /// Play a short sound.
+    pub sound: bool,
+    /// Show a desktop notification.
+    pub popup: bool,
+}
+
+/// Where sound is listened to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoundSource {
+    /// What the computer is playing (speakers or headphones).
+    #[default]
+    Output,
+    /// The microphone.
+    Input,
+}
+
+/// A stretch of sound: mono samples in `-1..=1`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundClip {
+    pub sample_rate: u32,
+    pub samples: Vec<f32>,
+}
+
 pub trait Host: Send + Sync {
     /// Sends one input event to the system.
     fn send(&self, event: &InputEvent) -> Result<(), HostError>;
@@ -125,6 +154,24 @@ pub trait Host: Send + Sync {
         let _ = query;
         Err(HostError::new("switching windows is not supported on this system yet"))
     }
+
+    /// The text on the clipboard; empty when it holds no text.
+    fn clipboard_text(&self) -> Result<String, HostError> {
+        Err(HostError::new("the clipboard is not available here"))
+    }
+
+    /// Plays a sound and/or shows a desktop notification.
+    fn notify(&self, notification: &Notification) -> Result<(), HostError> {
+        let _ = notification;
+        Err(HostError::new("notifications are not available here"))
+    }
+
+    /// The last `ms` milliseconds of sound from `source`. The first call may
+    /// return less while listening starts.
+    fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
+        let _ = (source, ms);
+        Err(HostError::new("listening to sound is not available here"))
+    }
 }
 
 /// A host that sends nothing. It keeps a virtual pointer and a log of
@@ -141,6 +188,10 @@ struct SimState {
     screen: Option<Frame>,
     foreground: Option<String>,
     windows: Vec<WindowInfo>,
+    clipboard: String,
+    notifications: Vec<Notification>,
+    sound: SoundClip,
+    screens: Option<Vec<Rect>>,
 }
 
 impl SimHost {
@@ -167,6 +218,25 @@ impl SimHost {
     /// Pretends these windows exist, for Switch to Window.
     pub fn set_windows(&self, windows: Vec<WindowInfo>) {
         self.lock().windows = windows;
+    }
+
+    /// Pretends these displays exist (instead of one, the size of the screen picture).
+    pub fn set_screens(&self, screens: Vec<Rect>) {
+        self.lock().screens = Some(screens);
+    }
+
+    pub fn set_clipboard(&self, text: &str) {
+        self.lock().clipboard = text.to_owned();
+    }
+
+    /// Notifications shown so far.
+    pub fn notifications(&self) -> Vec<Notification> {
+        self.lock().notifications.clone()
+    }
+
+    /// Makes `listen` return this sound.
+    pub fn set_sound(&self, clip: SoundClip) {
+        self.lock().sound = clip;
     }
 
     /// Everything sent so far.
@@ -225,6 +295,31 @@ impl Host for SimHost {
         let Some(found) = found.cloned() else { return Ok(None) };
         state.foreground = Some(found.process.clone());
         Ok(Some(WindowInfo { foreground: true, ..found }))
+    }
+
+    fn screens(&self) -> Result<Vec<Rect>, HostError> {
+        let screens = self.lock().screens.clone();
+        match screens {
+            Some(screens) => Ok(screens),
+            None => Ok(vec![self.capture(None)?.rect()]),
+        }
+    }
+
+    fn clipboard_text(&self) -> Result<String, HostError> {
+        Ok(self.lock().clipboard.clone())
+    }
+
+    fn notify(&self, notification: &Notification) -> Result<(), HostError> {
+        self.lock().notifications.push(notification.clone());
+        Ok(())
+    }
+
+    fn listen(&self, _source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
+        let state = self.lock();
+        let clip = &state.sound;
+        let wanted = ((ms / 1000.0) * f64::from(clip.sample_rate)) as usize;
+        let start = clip.samples.len().saturating_sub(wanted);
+        Ok(SoundClip { sample_rate: clip.sample_rate, samples: clip.samples[start..].to_vec() })
     }
 }
 
