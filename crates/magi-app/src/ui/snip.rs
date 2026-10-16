@@ -3,7 +3,8 @@
 //! It works like a screenshot tool. One display is captured and shown frozen
 //! in a full-screen window on that display; the user points or drags on that
 //! picture. Freezing means menus and hover states stay put while they are
-//! selected. With several displays, buttons at the top switch between them.
+//! selected. With several displays, a small bar of buttons – opening just
+//! below the pointer, and draggable – switches between them.
 //!
 //! Positions and areas come back relative to the display they were picked on.
 
@@ -37,8 +38,16 @@ pub struct Snip {
     /// Where the drag began, in frame pixels.
     anchor: Option<Pos2>,
     displays: Displays,
+    /// Bumped whenever the display bar should open afresh under the pointer.
+    bar: u32,
     /// The display shown; `None` when the displays could not be told apart.
     display: Option<u8>,
+}
+
+/// A fresh id for the display bar, so each picker opens it under the pointer again.
+fn next_bar() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Captures one display (or, without a list of displays, the primary screen).
@@ -66,13 +75,14 @@ impl Snip {
         let displays = crate::displays::current();
         let display = display_of_window(ctx, &displays);
         let (frame, texture) = capture(ctx, &displays, display)?;
-        Ok(Self { mode, target, frame, texture, anchor: None, displays, display })
+        Ok(Self { mode, target, frame, texture, anchor: None, displays, bar: next_bar(), display })
     }
 
     /// Shows another display instead.
     fn switch_to(&mut self, ctx: &egui::Context, display: u8) {
         if let Ok((frame, texture)) = capture(ctx, &self.displays, Some(display)) {
             (self.frame, self.texture, self.display, self.anchor) = (frame, texture, Some(display), None);
+            self.bar = next_bar();
         }
     }
 
@@ -228,19 +238,33 @@ impl Snip {
         painter.rect_stroke(banner, 10.0, Stroke::new(1.0, theme::stroke_strong()), StrokeKind::Inside);
         painter.galley(banner.center() - galley.size() / 2.0, galley, Color32::WHITE);
 
-        // With several displays: a button for each, under the instructions.
+        // With several displays: a button for each, in a bar that opens just
+        // below the pointer (kept inside the display) and can be dragged away.
         if self.displays.len() > 1 && self.anchor.is_none() {
             let mut switch = None;
-            egui::Area::new(egui::Id::new("magi-snip-displays"))
+            let pointer = hover.or_else(|| {
+                let cursor = magi_platform::system::cursor_position()?;
+                let local = pos2((cursor.x - origin.x) as f32, (cursor.y - origin.y) as f32);
+                Some(to_points(local))
+            });
+            let start = pointer.map_or(pos2(area.center().x, banner.bottom() + 10.0), |p| p + vec2(0.0, 28.0));
+            egui::Area::new(egui::Id::new(("magi-snip-displays", self.bar)))
                 .order(egui::Order::Foreground)
                 .fade_in(false)
                 .pivot(Align2::CENTER_TOP)
-                .fixed_pos(pos2(area.center().x, banner.bottom() + 10.0))
+                .default_pos(start)
+                .constrain_to(area.shrink(8.0))
+                .movable(true)
                 .show(ui.ctx(), |ui| {
-                    egui::Frame::new().fill(Color32::from_black_alpha(200)).corner_radius(8).inner_margin(6).show(
+                    egui::Frame::new().fill(Color32::from_black_alpha(215)).corner_radius(8).inner_margin(6).show(
                         ui,
                         |ui| {
                             ui.horizontal(|ui| {
+                                ui.label(
+                                    egui::RichText::new(egui_phosphor::regular::DOTS_SIX_VERTICAL)
+                                        .color(Color32::from_white_alpha(150)),
+                                )
+                                .on_hover_text("Drag to move");
                                 for (d, _) in self.displays.iter() {
                                     let text = egui::RichText::new(format!("Display {}", d + 1)).color(Color32::WHITE);
                                     if ui.selectable_label(self.display == Some(d), text).clicked()

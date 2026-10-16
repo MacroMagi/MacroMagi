@@ -57,6 +57,47 @@ impl Bitmap {
     }
 }
 
+/// Shrinks an image by a whole factor, each pixel the average of a
+/// `factor × factor` block. Matching shrunk images is much faster, at the
+/// cost of fine detail.
+pub fn shrink(image: ImageRef<'_>, factor: u32) -> Bitmap {
+    let factor = factor.max(1);
+    let (width, height) = ((image.width / factor).max(1), (image.height / factor).max(1));
+    if factor == 1 {
+        return Bitmap { width: image.width, height: image.height, rgba: image.rgba.to_vec() };
+    }
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let stride = image.width as usize * 4;
+    for y in 0..height as usize {
+        for x in 0..width as usize {
+            let mut sum = [0u32; 4];
+            let mut count = 0;
+            for dy in 0..factor as usize {
+                let row = y * factor as usize + dy;
+                if row >= image.height as usize {
+                    break;
+                }
+                for dx in 0..factor as usize {
+                    let col = x * factor as usize + dx;
+                    if col >= image.width as usize {
+                        break;
+                    }
+                    let i = row * stride + col * 4;
+                    for (total, value) in sum.iter_mut().zip(&image.rgba[i..i + 4]) {
+                        *total += u32::from(*value);
+                    }
+                    count += 1;
+                }
+            }
+            let o = (y * width as usize + x) * 4;
+            for c in 0..4 {
+                rgba[o + c] = (sum[c] / count.max(1)) as u8;
+            }
+        }
+    }
+    Bitmap { width, height, rgba }
+}
+
 /// Decodes an image file (PNG, JPEG, BMP, WebP or GIF) into pixels.
 pub fn decode(bytes: &[u8]) -> Result<Bitmap, VisionError> {
     let image = image::load_from_memory(bytes).map_err(|e| VisionError::Decode(e.to_string()))?.into_rgba8();

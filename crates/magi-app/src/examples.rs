@@ -101,9 +101,13 @@ fn react_to_screen(registry: &Registry) -> Project {
         "What do I see?",
         json!({ "cases": [{ "id": "1", "label": "Accept" }, { "id": "2", "label": "Decline" }] }),
     );
-    let see_accept = b.node(ids::FIND_IMAGE, [-20.0, 150.0], "See Accept", json!({ "image": accept }));
-    let see_decline =
-        b.node(ids::FIND_IMAGE, [-20.0, 392.0], "See Decline", json!({ "image": decline, "threshold": 0.85 }));
+    let see_accept = b.node(ids::FIND_IMAGE, [-20.0, 60.0], "See Accept", json!({ "images": [{ "image": accept }] }));
+    let see_decline = b.node(
+        ids::FIND_IMAGE,
+        [-20.0, 390.0],
+        "See Decline",
+        json!({ "images": [{ "image": decline }], "threshold": 0.85 }),
+    );
     let click = b.node(
         ids::INPUT,
         [286.0, 500.0],

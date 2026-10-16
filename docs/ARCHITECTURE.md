@@ -12,31 +12,31 @@ This document explains how MacroMagi is put together and, more importantly, *why
 ## The crates
 
 ```text
-                  ┌─────────────────────────────┐
-                  │           magi-app           │  egui UI, controller, CLI
-                  └───┬───────────┬──────────┬───┘
-                      │           │          │
-            ┌─────────▼───┐   ┌───▼──────────▼───┐
-            │ magi-engine │   │   magi-platform   │  the only crate that
-            └┬────┬─────┬─┘   └────────┬──────────┘  talks to the OS
-             │    │     │              │
- ┌───────────▼┐ ┌─▼─────────┐ ┌────────▼────────────┐
- │ magi-vision│ │ magi-audio│ │      magi-core      │  data model, no OS, no UI
- └────────────┘ └───────────┘ └─────────────────────┘
+magi-app                egui UI, controller, CLI, the Magic tab
+├── magi-engine         runs macros
+│   ├── magi-vision     pictures: image and colour search
+│   ├── magi-audio      sound: loudness, pitch, recognising sounds
+│   ├── magi-ml         AI models: preparing pictures, running them
+│   └── magi-core
+├── magi-ml
+├── magi-platform       the only crate that talks to the OS
+│   └── magi-core
+└── magi-core           data model, no OS, no UI
 ```
 
 | Crate | Owns | Must not |
 | --- | --- | --- |
-| `magi-core` | Graphs, block definitions, the input vocabulary, recordings, assets, the `.magi` and `.mp` formats, the `Host` interface | Touch the OS or draw anything |
+| `magi-core` | Graphs, block definitions, the input vocabulary, recordings, assets, the `.magi`, `.mp` and `.magic` formats, the `Host` interface | Touch the OS or draw anything |
 | `magi-vision` | Template matching and colour search on pixel buffers | Know where pixels come from |
 | `magi-audio` | Loudness, pitch, sound fingerprints and matching; decoding uploaded sound files | Know where sound comes from |
-| `magi-platform` | Sending input, listening for input, gamepads, screen capture, listening to sound, notifications, the clipboard | Know about graphs or blocks |
+| `magi-ml` | Running small vision models (ONNX): preparing a picture the way a model expects, the built-in engine, ONNX Runtime when it has been downloaded, choosing the CPU or a graphics card | Capture the screen or know about blocks |
+| `magi-platform` | Sending input, listening for input, gamepads, screen capture, listening to sound, notifications, the clipboard, listing graphics cards and sound inputs | Know about graphs or blocks |
 | `magi-engine` | Running a graph: the native interpreter, the Python bridge, shared device operations | Touch the OS directly (it goes through `Host`) |
-| `magi-app` | The window, the controller thread, the command line | Contain block behaviour |
+| `magi-app` | The window, the controller thread, the command line, the Magic tab and its importer, optional downloads | Contain block behaviour |
 
 Dependencies point downwards only. `magi-engine` and `magi-platform` do not know about each other: the engine asks a `Host` to do things, the platform crate provides one, and the app hands it over.
 
-The Python runtime in `runtime/python` is a seventh component. Its sources are compiled into `magi-engine` and unpacked into the data folder on first use.
+The Python runtime in `runtime/python` is an eighth component. Its sources are compiled into `magi-engine` and unpacked into the data folder on first use.
 
 ## A block is data
 
@@ -81,11 +81,15 @@ This is the contract both engines implement. If you change one, change the other
 
 **Rate.** A Rate block performs its list of inputs one after another, a set time apart. The time is its own setting, a variable it follows, or a number wired into its Rate input – read once, when the block starts.
 
-**Variables.** A macro's variables live in its session and are shared by all its runs. They start from the project's values whenever a run starts while nothing else is running. A setting bound to a variable (`{"$var": name}`) is resolved just before the block runs, converted to the kind of value the setting expects ([`variables.rs`](../crates/magi-core/src/variables.rs)). Both engines keep variables on the Rust side: the Python engine reads and changes them through operations on the pipe, so there is one source of truth, and the monitor shows their current values.
+**Variables.** A macro's variables live in its session and are shared by all its runs. They start from the project's values whenever a run starts while nothing else is running – except variables set to keep their value, which carry on from the last run, also after the macro is edited, until MacroMagi closes. A setting bound to a variable (`{"$var": name}`) is resolved just before the block runs, converted to the kind of value the setting expects ([`variables.rs`](../crates/magi-core/src/variables.rs)). Both engines keep variables on the Rust side: the Python engine reads and changes them through operations on the pipe, so there is one source of truth, and the monitor shows their current values.
 
 **Groups.** A group that is turned off disables every block in it. The engines never see groups: the frozen program is built from a copy of the graph in which those blocks are disabled.
 
 **Disabled blocks.** A disabled flow block is skipped: execution continues from its `out` output (or its first output if it has no `out`). A disabled value block yields `null`.
+
+**Blocks one engine cannot run.** Python Script blocks need the Python engine. The native engine treats them as disabled and says so once in the console; the editor marks them while the Python engine is not available.
+
+**AI models.** An AI block names a model asset – a `.magic` file embedded in the macro. The program loads a model once, the first time a block uses it, onto the engine chosen under *Settings → AI*. A look captures the model's screen area, prepares the picture as the model's description says, runs the model and decides: the likeliest answer *acts* when its class is marked to act and the model is at least as sure as that class's threshold. The block's own setting values are applied over the model's first. AI Watch repeats this, waits the class's delay before pressing the model's key, and then ignores answers for the cooldown so one event is not acted on twice. Both engines call the same operations, so a model behaves the same on either.
 
 **Errors.** A failure ends the run and is reported against the block it happened in.
 
@@ -114,7 +118,7 @@ This is the contract both engines implement. If you change one, change the other
                    └─────────┘
 ```
 
-Both engines decide *what happens next*. Neither clicks or looks at the screen itself: they call the shared device operations in [`ops.rs`](../crates/magi-engine/src/ops.rs). The Python engine does so over its pipe.
+Both engines decide *what happens next*. Neither clicks, looks at the screen, listens nor runs an AI model itself: they call the shared device operations in [`ops.rs`](../crates/magi-engine/src/ops.rs). The Python engine does so over its pipe.
 
 Consequences:
 
@@ -140,7 +144,7 @@ pub trait Host: Send + Sync {
     fn focus_window(&self, query: &WindowQuery) -> Result<Option<WindowInfo>, HostError>;
     fn clipboard_text(&self) -> Result<String, HostError>;
     fn notify(&self, notification: &Notification) -> Result<(), HostError>;
-    fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError>;  // recent sound
+    fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError>;  // recent sound
 }
 ```
 
@@ -152,7 +156,26 @@ Three implementations exist:
 
 Adding a capability a macro can use means adding a method here, implementing it in `SystemHost` and `SimHost`, and exposing it through an operation in `ops.rs`. *Switch to Window*, the clipboard, notifications and listening to sound were all added this way.
 
-**Sound.** `listen` returns the most recent stretch of sound from what the computer plays (loopback capture) or the microphone. `SystemHost` opens a source only while a macro listens: a thread owns the audio stream, keeps the last seconds in a ring buffer and closes the stream after a quiet while. The analysis – loudness, the strongest frequency, and recognising an uploaded sound by comparing the shape of its spectrum over time, independent of volume – is pure code in `magi-audio`. A recognised sound counts once: what was heard before the match is not looked at again.
+**Sound.** `listen` returns the most recent stretch of sound from what the computer plays (loopback capture) or a microphone – a named one, or the system's default. `SystemHost` opens a source only while a macro listens: a thread owns the audio stream, keeps the last seconds in a ring buffer and closes the stream after a quiet while. Each clip says where it ends in the stream, so a listener knows which part it has already heard. The analysis – loudness, the strongest frequency, and recognising an uploaded sound by comparing the shape of its spectrum over time, independent of volume – is pure code in `magi-audio`. Recognition keeps a running fingerprint of the stream rather than re-analysing it on every look, which keeps long sounds cheap, and can recognise a sound by its first part while it is still playing. A recognised sound counts once: what was heard before the match is not looked at again.
+
+**Images.** An Image Detection block may look for several images. Images that share a search area share one screen capture, and the images are matched in parallel. With less *Detail*, the capture and the images are shrunk before matching; shrunk images are cached by the program, so this costs nothing per look.
+
+## AI models
+
+[`magi-ml`](../crates/magi-ml/src/lib.rs) runs a model on a prepared picture and knows nothing about screens or blocks. It has two engines:
+
+| Engine | What | When |
+| --- | --- | --- |
+| Built-in | [tract](https://github.com/sonos/tract), pure Rust, compiled in | Always available; the CPU only |
+| ONNX Runtime | Microsoft's runtime, loaded from the data folder at run time | Once downloaded on the AI settings page; the CPU, or on Windows any DirectX 12 graphics card through DirectML |
+
+ONNX Runtime is loaded with `ort`'s *load-dynamic* feature: MacroMagi does not link it, so the executable stays a single file and works without it. A process can load it once, so installing or removing it takes effect after a restart.
+
+*Settings → AI → Run models on* is **Automatic**, **CPU** or a particular graphics card. Automatic times each candidate on the model itself (a few warm-up runs, then the median of several) and keeps the fastest, remembering the answer per model; when a graphics card is not faster – small models often are not, because of the copying – the CPU is used.
+
+Image Detection stays on the CPU: its coarse-to-fine search already finishes in a few milliseconds, and a graphics card would spend longer receiving the picture.
+
+`magi_ml::prepare` turns pixels into a model's input: resized with antialiasing, laid out channels-first or channels-last, in RGB or BGR order, each value `(v × scale − mean) / std`. These are the settings in a model's description, so a model trained elsewhere can be matched exactly.
 
 ## Several displays
 
@@ -191,7 +214,20 @@ The Auto Clicker's form ([`clicker_form.rs`](../crates/magi-app/src/ui/clicker_f
 
 ### Look
 
-Every colour comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/theme.rs), built from three choices: light or dark (or the system's), the theme colour (none = monochrome), and how opaque panels are over a background picture. UI code asks for colours by role – `theme::text()`, `theme::accent()`, `theme::category_color(…)` – never by value, so changing the theme recolours everything at once, block categories and icons included.
+Every colour comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/theme.rs), built from three choices: light or dark (or the system's), the theme colour (none = monochrome), and how opaque panels are over a background picture. UI code asks for colours by role – `theme::text()`, `theme::accent()`, `theme::category_color(…)` – never by value, so changing the theme recolours everything at once, block categories and icons included. The banner logo is recoloured from the icon by brightness: its ink takes the colour the buttons have, and its white parts are cut out.
+
+### The Magic tab
+
+The Magic tab edits one model at a time – a [`MagicFile`](../crates/magi-core/src/magic.rs): the ONNX bytes, a description (`MagicModel`) and optional training pictures.
+
+- **Importing** ([`magic/import.rs`](../crates/magi-app/src/magic/import.rs)) takes an `.onnx` file, or a folder or ZIP that contains one, and reads the project's text files for hints: class names (a Markdown table or a dictionary in code), which classes act, colour statistics, the screen area, the key, and adjustable settings (a `settings.json`, or typed declarations in code). It reads files; it never runs them. Everything it found or guessed becomes a note in the tab.
+- **Trying** a model runs it on a `magi-magic-test` thread against the same host as macros (so dry run applies), and shows the picture it saw and its answers.
+- **Use in Macro** embeds the model as an asset (`.magic` bytes without training pictures, with an id derived from the content). An earlier model of the same name is replaced and the blocks that used it are pointed at the new one; when no block uses the model yet, its blocks are added.
+- Replacing the model in the tab asks first, unless its changes are saved or already in the macro.
+
+### Optional downloads
+
+[`components.rs`](../crates/magi-app/src/components.rs) installs parts that some features need and MacroMagi does not ship – ONNX Runtime, ONNX Runtime for graphics cards, Python and PyTorch – into `data/components/<part>`, and removes them again. It also reports copies already on the computer (a system Python, PyTorch in the Python in use). Downloads come from each part's publisher only when the user clicks *Install*. A part in use cannot be deleted on Windows, so it is marked and deleted at the next start, and nothing uses a marked part in the meantime.
 
 ### Screen targets
 
@@ -209,6 +245,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | `magi-housekeeping` | Stops an idle Python process; hands memory back while the window is hidden |
 | `magi-gamepad` | Polls controllers |
 | `magi-audio` | Owns a sound source while a macro listens to it |
+| `magi-magic-test` | Runs the Magic tab's model on the screen while it is being tried |
 | `magi-notify` | Keeps a notification's tray icon up for a few seconds (Windows) |
 | `magi-inject` | Owns the OS input connection; serialises everything sent |
 | `magi-run-N` | One per run on the native engine |
@@ -224,6 +261,8 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 | A rule about when input may be sent | `AutomationOptions` in `magi-core/src/options.rs`, checked in `RunCx::send` |
 | Something a macro can do to the machine | `Host`, then an operation in `ops.rs` |
 | Another way of seeing the screen | A function in `magi-vision`, an operation, a value block |
+| A model format or engine | `magi-ml` (a `Backend`), and its options in *Settings → AI* |
+| Something to download | A `Component` in `magi-app/src/components.rs` |
 | An engine | Something that can start and stop runs behind `Session` |
 | An operating system backend | A module in `magi-platform` |
 
@@ -231,7 +270,7 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 
 **Add-ons.** An add-on would be a folder with a manifest listing `NodeDef`s (the same JSON `macromagi nodes` prints) and a Python module registering behaviour for them with the existing `@flow_node` / `@value_node` decorators. The registry already accepts definitions at run time, the editor already draws from definitions, and unknown blocks already survive a round trip. What is missing is discovery, loading and a trust model for third-party code.
 
-**A local vision model.** A function in `magi-vision` taking pixels and a reference image or prompt, an operation in `ops.rs`, and a value block with the same outputs as Image Detection. Nothing else needs to know.
+**Training in the Magic tab.** Models are made elsewhere for now. A `.magic` file can already hold training and fine-tuning pictures, sorted by class, and PyTorch can be downloaded into MacroMagi's Python. Training is meant to be a Python script run in that Python, which writes an ONNX model back into the file; the tab, the file format and the blocks need no change for it.
 
 **Sending gamepad input.** `InputEvent` already has gamepad events, and recordings already contain them. What is missing is a backend in `magi-platform` that owns a virtual controller. On Windows that requires a driver, which a portable app cannot install; the intended approach is to use one if present and say so clearly if not.
 
@@ -239,6 +278,6 @@ The node editor draws nodes by hand instead of composing widgets. Geometry is co
 
 - Write only inside `Paths::data_dir` (next to the executable, or `MACROMAGI_DATA_DIR`). Background pictures are copied into it, so settings never point elsewhere.
 - No registry keys, no files in the user profile, no background services. `eframe`'s own persistence is switched off. The single exception is *Options → Create desktop shortcut*, which writes a shortcut when – and only when – the user asks for one.
-- No network access, except downloading a background picture from an address the user typed.
+- No network access, except downloading a background picture from an address the user typed, and the optional parts on the AI settings page when the user installs one – each from its publisher (python.org, Microsoft, the Python Package Index).
 - The Python engine sets `PYTHONDONTWRITEBYTECODE` so it leaves no caches behind.
 - Anything that needs something installed (Python, a driver) must be optional, detected at run time, and explained when missing.

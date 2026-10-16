@@ -4,7 +4,8 @@
 //!
 //! * [`loudness_db`] and [`dominant_frequency`] describe what is heard now;
 //! * [`Fingerprint`] and [`similarity`] recognise a recorded sound inside
-//!   what is heard, however loud it is;
+//!   what is heard, however loud it is; [`Listening`] does the same on a live
+//!   stream, analysing each piece of sound only once;
 //! * [`decode`] reads the sound files people upload (WAV, MP3, OGG, FLAC),
 //!   and [`encode_wav`] stores them compactly inside a macro.
 //!
@@ -186,48 +187,79 @@ pub fn dominant_frequency(samples: &[f32], sample_rate: u32) -> Option<f64> {
     Some(f64::from((peak as f32 + shift) * resolution))
 }
 
+/// One short frame of a sound, described by how its energy is spread over
+/// frequency bands: a unit vector, so comparing two frames is a dot product.
+type Bands = [f32; BANDS];
+
+/// What every frame is analysed with, worked out once.
+struct Analyzer {
+    window: Vec<f32>,
+    /// FFT bins where each band starts (and the last one ends).
+    edges: Vec<usize>,
+}
+
+fn analyzer() -> &'static Analyzer {
+    static ANALYZER: std::sync::OnceLock<Analyzer> = std::sync::OnceLock::new();
+    ANALYZER.get_or_init(|| Analyzer {
+        window: (0..FRAME).map(|i| hann(i, FRAME)).collect(),
+        edges: (0..=BANDS)
+            .map(|b| {
+                let hz = LOW_HZ * (HIGH_HZ / LOW_HZ).powf(b as f32 / BANDS as f32);
+                ((hz * FRAME as f32 / ANALYSIS_RATE as f32).round() as usize).clamp(1, FRAME / 2)
+            })
+            .collect(),
+    })
+}
+
+/// Describes one frame of [`FRAME`] samples at the analysis rate. The flag
+/// says whether the frame is silent.
+fn analyze(samples: &[f32]) -> (Bands, bool) {
+    let analyzer = analyzer();
+    let mut re: Vec<f32> = samples.iter().zip(&analyzer.window).map(|(s, w)| s * w).collect();
+    let mut im = vec![0.0f32; FRAME];
+    fft(&mut re, &mut im);
+    let mut bands = [0.0f32; BANDS];
+    for (band, value) in bands.iter_mut().enumerate() {
+        let (from, to) = (analyzer.edges[band], analyzer.edges[band + 1].max(analyzer.edges[band] + 1));
+        *value = (from..to).map(|k| re[k] * re[k] + im[k] * im[k]).sum::<f32>() / (to - from) as f32;
+    }
+    let total: f32 = bands.iter().sum();
+    // Only the loudest part of each frame counts: quiet bands (mostly
+    // background noise) are flattened to one level.
+    let peak = bands.iter().copied().fold(0.0f32, f32::max);
+    let floor = (peak * DYNAMIC_RANGE).max(1e-12);
+    bands.iter_mut().for_each(|v| *v = v.max(floor).ln());
+    let mean = bands.iter().sum::<f32>() / BANDS as f32;
+    bands.iter_mut().for_each(|v| *v -= mean);
+    let norm = bands.iter().map(|v| v * v).sum::<f32>().sqrt();
+    if norm > f32::EPSILON {
+        bands.iter_mut().for_each(|v| *v /= norm);
+    } else {
+        bands = [0.0; BANDS];
+    }
+    (bands, total < SILENT_FRAME)
+}
+
 /// The shape of a sound over time: for each short frame, how its energy is
 /// spread over frequency bands, independent of how loud it is.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Fingerprint {
-    frames: Vec<[f32; BANDS]>,
+    frames: Vec<Bands>,
     silent: Vec<bool>,
 }
 
 impl Fingerprint {
     pub fn of(audio: &Audio) -> Self {
         let samples = resample(&audio.samples, audio.sample_rate, ANALYSIS_RATE);
-        let mut frames = Vec::new();
-        let mut silent = Vec::new();
-        let edges: Vec<usize> = (0..=BANDS)
-            .map(|b| {
-                let hz = LOW_HZ * (HIGH_HZ / LOW_HZ).powf(b as f32 / BANDS as f32);
-                ((hz * FRAME as f32 / ANALYSIS_RATE as f32).round() as usize).clamp(1, FRAME / 2)
-            })
-            .collect();
+        let mut out = Self::default();
         let mut start = 0;
         while start + FRAME <= samples.len() {
-            let mut re: Vec<f32> = (0..FRAME).map(|i| samples[start + i] * hann(i, FRAME)).collect();
-            let mut im = vec![0.0f32; FRAME];
-            fft(&mut re, &mut im);
-            let mut bands = [0.0f32; BANDS];
-            for (band, value) in bands.iter_mut().enumerate() {
-                let (from, to) = (edges[band], edges[band + 1].max(edges[band] + 1));
-                *value = (from..to).map(|k| re[k] * re[k] + im[k] * im[k]).sum::<f32>() / (to - from) as f32;
-            }
-            let total: f32 = bands.iter().sum();
-            // Only the loudest part of each frame counts: quiet bands (mostly
-            // background noise) are flattened to one level.
-            let peak = bands.iter().copied().fold(0.0f32, f32::max);
-            let floor = (peak * DYNAMIC_RANGE).max(1e-12);
-            bands.iter_mut().for_each(|v| *v = v.max(floor).ln());
-            let mean = bands.iter().sum::<f32>() / BANDS as f32;
-            bands.iter_mut().for_each(|v| *v -= mean);
-            frames.push(bands);
-            silent.push(total < SILENT_FRAME);
+            let (bands, silent) = analyze(&samples[start..start + FRAME]);
+            out.frames.push(bands);
+            out.silent.push(silent);
             start += HOP;
         }
-        Self { frames, silent }
+        out
     }
 
     pub fn len(&self) -> usize {
@@ -240,40 +272,189 @@ impl Fingerprint {
 
     /// How long the sound is, in milliseconds.
     pub fn duration_ms(&self) -> f64 {
-        (self.frames.len() * HOP + FRAME) as f64 * 1000.0 / f64::from(ANALYSIS_RATE)
+        frames_to_ms(self.frames.len())
+    }
+
+    /// Only its first `ms` milliseconds (all of it for zero or more than it has).
+    /// A long sound is recognised sooner – and with less work – by its beginning.
+    pub fn prefix(&self, ms: f64) -> Self {
+        if ms <= 0.0 || ms >= self.duration_ms() {
+            return self.clone();
+        }
+        let frames = ms_to_frames(ms).max(1).min(self.frames.len());
+        Self { frames: self.frames[..frames].to_vec(), silent: self.silent[..frames].to_vec() }
     }
 }
 
-fn cosine(a: &[f32; BANDS], b: &[f32; BANDS]) -> f32 {
-    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
-    let norm = (a.iter().map(|x| x * x).sum::<f32>() * b.iter().map(|y| y * y).sum::<f32>()).sqrt();
-    if norm <= f32::EPSILON { 0.0 } else { dot / norm }
+fn frames_to_ms(frames: usize) -> f64 {
+    if frames == 0 { 0.0 } else { ((frames - 1) * HOP + FRAME) as f64 * 1000.0 / f64::from(ANALYSIS_RATE) }
+}
+
+fn ms_to_frames(ms: f64) -> usize {
+    let samples = ms / 1000.0 * f64::from(ANALYSIS_RATE);
+    ((samples - FRAME as f64) / HOP as f64).floor().max(0.0) as usize + 1
+}
+
+/// The score of `template` laid over `frames` starting at `offset`, looking
+/// at every `step`-th template frame. `None` when what is heard there is
+/// mostly silence: a match must be heard, not inferred from silence.
+fn score_at(
+    template: &Fingerprint,
+    wanted: &[usize],
+    frames: &[Bands],
+    silent: &[bool],
+    offset: usize,
+    step: usize,
+) -> Option<f32> {
+    let mut sum = 0.0f32;
+    let (mut counted, mut quiet) = (0usize, 0usize);
+    for &i in wanted.iter().step_by(step) {
+        if silent[offset + i] {
+            quiet += 1;
+        }
+        let (a, b) = (&template.frames[i], &frames[offset + i]);
+        sum += a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        counted += 1;
+    }
+    (counted > 0 && quiet * 2 <= counted).then(|| sum / counted as f32)
+}
+
+/// Where `template` best matches inside `frames`: the score (0 to 1) and the
+/// index just past the end of the match. Long sounds are first compared
+/// coarsely – every other frame at every other position – and only the
+/// best few positions in full.
+fn best_match(template: &Fingerprint, frames: &[Bands], silent: &[bool]) -> Option<(f64, usize)> {
+    let wanted: Vec<usize> = (0..template.len()).filter(|&i| !template.silent[i]).collect();
+    if wanted.is_empty() || frames.len() < template.len() {
+        return None;
+    }
+    let last = frames.len() - template.len();
+    let full = |offset: usize| score_at(template, &wanted, frames, silent, offset, 1);
+    let best = if template.len() < 48 {
+        (0..=last).filter_map(|o| full(o).map(|s| (s, o))).max_by(|a, b| a.0.total_cmp(&b.0))
+    } else {
+        let mut coarse: Vec<(f32, usize)> = (0..=last)
+            .step_by(2)
+            .filter_map(|o| score_at(template, &wanted, frames, silent, o, 2).map(|s| (s, o)))
+            .collect();
+        coarse.sort_by(|a, b| b.0.total_cmp(&a.0));
+        coarse
+            .iter()
+            .take(3)
+            .flat_map(|&(_, o)| o.saturating_sub(2)..=(o + 2).min(last))
+            .filter_map(|o| full(o).map(|s| (s, o)))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    }?;
+    Some((f64::from(best.0.max(0.0)), best.1 + template.len()))
 }
 
 /// How well `template` matches somewhere inside `heard`, from 0 (not at all)
 /// to 1 (identical). Silence never matches.
 pub fn similarity(template: &Fingerprint, heard: &Fingerprint) -> f64 {
-    let wanted: Vec<usize> = (0..template.len()).filter(|&i| !template.silent[i]).collect();
-    if wanted.is_empty() || heard.len() < template.len() {
-        return 0.0;
+    best_match(template, &heard.frames, &heard.silent).map_or(0.0, |(score, _)| score)
+}
+
+/// Sound arriving as a stream, analysed as it arrives: every call to
+/// [`Listening::feed`] only analyses what is new, however long the sounds
+/// being listened for are, and any number of them can be compared with the
+/// same analysis.
+#[derive(Debug, Default)]
+pub struct Listening {
+    rate: u32,
+    /// Source samples per analysis sample.
+    step: f64,
+    /// How many source samples have been fed since the stream (re)started.
+    fed: u64,
+    /// Where in the stream the source samples received come from: absolute
+    /// index of the first one fed after a restart.
+    origin: u64,
+    previous: f32,
+    /// The time (in source samples since the restart) of the next analysis sample.
+    next: f64,
+    /// Analysis samples not yet covered by a complete frame.
+    pending: Vec<f32>,
+    frames: std::collections::VecDeque<Bands>,
+    silent: std::collections::VecDeque<bool>,
+    /// Stream index of `frames[0]`.
+    first_frame: u64,
+}
+
+/// Frames kept: a little more than the longest sound that can be listened for.
+const KEEP_FRAMES: usize = ((MAX_SECONDS as usize + 2) * ANALYSIS_RATE as usize) / HOP;
+
+impl Listening {
+    pub fn new() -> Self {
+        Self::default()
     }
-    let mut best = 0.0f32;
-    for offset in 0..=heard.len() - template.len() {
-        let mut sum = 0.0;
-        let mut heard_silent = 0;
-        for &i in &wanted {
-            if heard.silent[offset + i] {
-                heard_silent += 1;
-            }
-            sum += cosine(&template.frames[i], &heard.frames[offset + i]);
-        }
-        // A match must be heard, not inferred from silence.
-        if heard_silent * 2 > wanted.len() {
-            continue;
-        }
-        best = best.max(sum / wanted.len() as f32);
+
+    fn restart(&mut self, rate: u32, origin: u64) {
+        // Frame numbers keep counting, so marks made before the restart stay valid.
+        let first_frame = self.end_frame();
+        *self = Self { rate, step: f64::from(rate) / f64::from(ANALYSIS_RATE), origin, first_frame, ..Self::default() };
     }
-    f64::from(best.max(0.0))
+
+    /// Adds the latest sound. `samples` are the most recent mono samples at
+    /// `rate`, and `end` counts every sample the source has produced, so
+    /// samples already seen are skipped. A gap, or another rate, starts over.
+    pub fn feed(&mut self, samples: &[f32], rate: u32, end: u64) {
+        let start = end.saturating_sub(samples.len() as u64);
+        let seen = self.origin + self.fed;
+        if rate != self.rate || seen < start || seen > end {
+            self.restart(rate, start);
+        }
+        let skip = (self.origin + self.fed - start) as usize;
+        for &sample in &samples[skip.min(samples.len())..] {
+            self.push(sample);
+        }
+    }
+
+    fn push(&mut self, sample: f32) {
+        // Linear resampling: analysis samples fall between the previous source
+        // sample and this one.
+        let index = self.fed as f64;
+        while self.next <= index {
+            let t = (self.next - (index - 1.0)).clamp(0.0, 1.0) as f32;
+            self.pending.push(self.previous + (sample - self.previous) * t);
+            self.next += self.step;
+        }
+        self.previous = sample;
+        self.fed += 1;
+        while self.pending.len() >= FRAME {
+            let (bands, silent) = analyze(&self.pending[..FRAME]);
+            self.frames.push_back(bands);
+            self.silent.push_back(silent);
+            self.pending.drain(..HOP);
+        }
+        while self.frames.len() > KEEP_FRAMES {
+            self.frames.pop_front();
+            self.silent.pop_front();
+            self.first_frame += 1;
+        }
+    }
+
+    /// Stream index just past the newest frame.
+    pub fn end_frame(&self) -> u64 {
+        self.first_frame + self.frames.len() as u64
+    }
+
+    /// The best match of `template` among the frames after `after` (a stream
+    /// frame index, so a sound already recognised is not recognised again):
+    /// its score, and the stream frame index where it ends.
+    pub fn best_match(&mut self, template: &Fingerprint, after: u64) -> Option<(f64, u64)> {
+        let from = after.saturating_sub(self.first_frame) as usize;
+        if from >= self.frames.len() {
+            return None;
+        }
+        let first = self.first_frame;
+        let frames = &self.frames.make_contiguous()[from..];
+        let silent = &self.silent.make_contiguous()[from..];
+        best_match(template, frames, silent).map(|(score, end)| (score, first + (from + end) as u64))
+    }
+
+    /// How many frames a sound of `ms` milliseconds covers.
+    pub fn frames_in(ms: f64) -> u64 {
+        ms_to_frames(ms) as u64
+    }
 }
 
 fn hann(i: usize, n: usize) -> f32 {
@@ -380,6 +561,73 @@ mod tests {
 
         let silence = Fingerprint::of(&audio(vec![0.0; ANALYSIS_RATE as usize * 2]));
         assert_eq!(similarity(&template, &silence), 0.0);
+    }
+
+    /// A melody of `notes` short tones, different every time `seed` differs.
+    fn melody(notes: usize, seed: u32, rate: u32) -> Vec<f32> {
+        let mut state = seed.max(1);
+        let mut out = Vec::new();
+        for _ in 0..notes {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            let hz = 300.0 + (state % 1500) as f32;
+            let n = (0.12 * rate as f32) as usize;
+            out.extend((0..n).map(|i| 0.4 * (2.0 * std::f32::consts::PI * hz * i as f32 / rate as f32).sin()));
+        }
+        out
+    }
+
+    #[test]
+    fn a_stream_fed_in_overlapping_pieces_recognises_a_long_sound_once() {
+        // A 6-second melody, played at 48 kHz in the middle of other sound.
+        let rate = 48_000;
+        let template = Fingerprint::of(&Audio { sample_rate: rate, samples: melody(50, 7, rate) });
+        assert!(template.len() > 300, "long enough to be compared coarsely first");
+        let mut stream: Vec<f32> = melody(10, 99, rate);
+        stream.extend(melody(50, 7, rate));
+        stream.extend(melody(10, 123, rate));
+
+        // The source hands out its latest second each time, overlapping what was seen.
+        let mut listening = Listening::new();
+        let mut found = None;
+        let mut end = 0usize;
+        while end < stream.len() {
+            end = (end + rate as usize / 10).min(stream.len());
+            let start = end.saturating_sub(rate as usize);
+            listening.feed(&stream[start..end], rate, end as u64);
+            if found.is_none()
+                && let Some((score, at)) = listening.best_match(&template, 0)
+                && score > 0.8
+            {
+                found = Some((score, at));
+            }
+        }
+        let (score, at) = found.expect("the melody was recognised");
+        assert!(score > 0.9, "{score}");
+        // Nothing after that occurrence matches again.
+        let again = listening.best_match(&template, at).map_or(0.0, |(score, _)| score);
+        assert!(again < 0.6, "{again}");
+        // Another melody of the same length is not mistaken for it.
+        let other = Fingerprint::of(&Audio { sample_rate: rate, samples: melody(50, 8, rate) });
+        let wrong = listening.best_match(&other, 0).map_or(0.0, |(score, _)| score);
+        assert!(wrong < 0.6, "{wrong}");
+    }
+
+    #[test]
+    fn the_beginning_of_a_long_sound_is_enough_to_recognise_it() {
+        let rate = ANALYSIS_RATE;
+        let whole = Fingerprint::of(&Audio { sample_rate: rate, samples: melody(40, 3, rate) });
+        let start = whole.prefix(1000.0);
+        assert!(start.len() < whole.len() / 3);
+        assert!((start.duration_ms() - 1000.0).abs() < 40.0, "{}", start.duration_ms());
+        // Only the first second has been played so far.
+        let heard = Fingerprint::of(&Audio {
+            sample_rate: rate,
+            samples: melody(40, 3, rate)[..rate as usize + 2000].to_vec(),
+        });
+        assert!(similarity(&start, &heard) > 0.9);
+        assert_eq!(similarity(&whole, &heard), 0.0, "the whole sound has not been heard yet");
     }
 
     #[test]

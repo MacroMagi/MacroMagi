@@ -1,9 +1,10 @@
 # File formats
 
-MacroMagi has two file types: **`.magi`** (a macro) and **`.mp`** (a preset). Both are designed to be readable, diffable and easy to produce with other tools.
+MacroMagi has three file types: **`.magi`** (a macro), **`.mp`** (a preset) and **`.magic`** (an AI model). All are designed to be readable, diffable and easy to produce with other tools.
 
 - [`.magi` – projects](#magi--projects)
 - [`.mp` – presets](#mp--presets)
+- [`.magic` – AI models](#magic--ai-models)
 - [Shared vocabulary](#shared-vocabulary)
 - [Versioning](#versioning)
 
@@ -16,6 +17,7 @@ project.json           required – the macro
 assets/<id>.png        images
 assets/<id>.json       recordings
 assets/<id>.wav        sounds (for Sound Recognition)
+assets/<id>.magic      AI models (for the AI blocks)
 presets/<nn>-<name>.mp bundled presets (optional)
 ```
 
@@ -27,7 +29,7 @@ presets/<nn>-<name>.mp bundled presets (optional)
 {
   "format": "macromagi.project",
   "version": 1,
-  "app": "0.1.1",
+  "app": "0.1.2",
   "meta": { "name": "Click when ready", "description": "", "author": "" },
   "engine": "auto",
   "graph": {
@@ -38,7 +40,7 @@ presets/<nn>-<name>.mp bundled presets (optional)
         "params": { "actions": [ { "kind": "mouse", "button": "Left", "mode": "tap", "clicks": 1 } ],
                     "hold_ms": { "$var": "hold" } } },
       { "id": 3, "type": "vision.find_image", "pos": [-260.0, 100.0],
-        "params": { "image": "img-9f2c61d0a4b7e113", "region": null, "threshold": 0.8 } }
+        "params": { "images": [ { "image": "img-9f2c61d0a4b7e113" } ], "region": null, "threshold": 0.8 } }
     ],
     "wires": [
       { "from": { "node": 1, "port": "out" },      "to": { "node": 2, "port": "in" } },
@@ -52,7 +54,7 @@ presets/<nn>-<name>.mp bundled presets (optional)
     { "id": "img-9f2c61d0a4b7e113", "name": "Ready button", "kind": "image", "file": "assets/img-9f2c61d0a4b7e113.png" }
   ],
   "presets": [],
-  "variables": [ { "name": "hold", "value": 30 } ],
+  "variables": [ { "name": "hold", "value": 30 }, { "name": "total", "value": null, "reset": false } ],
   "options": { "stop_on_task_switch": true, "stop_hotkeys": ["Escape"] }
 }
 ```
@@ -122,7 +124,9 @@ A node whose `type` is unknown to the reading app is kept untouched and written 
 "variables": [ { "name": "hold", "value": 30 }, { "name": "greeting", "value": "hello" } ]
 ```
 
-A variable has a `name` and a starting `value` (a number, text or true/false). Every run starts from these values; Set Variable, Counter and Python scripts change them while it runs.
+A variable has a `name` and a starting `value` (a number, text, true/false or `null` for none). Set Variable, Counter and Python scripts change them while a macro runs.
+
+`reset` says whether a run starts from `value`. It is `true` when omitted, which is how every variable behaved before 0.1.2. With `"reset": false` the variable keeps what the last run left in it, for as long as MacroMagi is open; `value` is then only where the first run starts. Variables made in 0.1.2 and later start this way, with no value.
 
 **Bound settings.** Any setting of a block can be bound to a variable instead of holding a value of its own. It is then stored as
 
@@ -164,8 +168,47 @@ Wires that refer to missing nodes are dropped on load.
 | `image` | `assets/<id>.png` | A PNG image. |
 | `recording` | `assets/<id>.json` | A [recording](#recordings). |
 | `audio` | `assets/<id>.wav` | A sound to listen for: a 16-bit mono WAV file, 16 kHz, at most 10 seconds. Uploaded MP3, OGG and FLAC files are converted to this. |
+| `model` | `assets/<id>.magic` | An AI model: a [`.magic` file](#magic--ai-models) without training pictures. |
 
-Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`, `"sound": "snd-…"`). Image and sound ids are derived from the content, so the same picture or sound is stored once.
+Blocks refer to assets by `id` in their parameters (`"image": "img-…"`, `"recording": "rec-1"`, `"sound": "snd-…"`, `"model": "mdl-…"`). Image, sound and model ids are derived from the content, so the same picture, sound or model is stored once.
+
+### Image and sound lists
+
+An Image Detection block looks for a list of images, and a Sound Recognition block listens for a list of sounds. Each may belong to a named group.
+
+```json
+"params": {
+  "images": [
+    { "image": "img-…", "group": "Buttons" },
+    { "image": "img-…", "group": "Buttons", "region": { "x": 0, "y": 900, "w": 600, "h": 180 } },
+    { "image": "img-…" }
+  ],
+  "groups": [ { "name": "Buttons", "region": { "x": 0, "y": 800, "w": 1920, "h": 280 } } ],
+  "region": null,
+  "mode": "any",
+  "detail": "half",
+  "threshold": 0.8
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `images[].region` | Optional. Where this image is looked for. Without it, its group's `region`, and without that, the block's. |
+| `groups` | The groups' names and optional search areas. |
+| `mode` | `any`: found when one of the images is there (the first in the list wins); `all`: only when every one is. |
+| `detail` | `full`, `half`, `third` or `quarter`: the screen and the images are shrunk by that much before comparing. |
+
+Sound Recognition has `sounds` (`{ "sound": "snd-…", "group": "…" }`), `groups` (`{ "name": "…", "accuracy": 0.8 }`, where `accuracy` is optional and overrides the block's), `mode` and `match_ms` (recognise a sound by its first milliseconds; `0` for the whole sound). Sound Detection and Sound Recognition have `device`: the name of the microphone, or `""` for the system's default.
+
+Blocks saved before 0.1.2 have a single `"image"` or `"sound"` instead. It is still read, as the first entry of the list.
+
+### AI blocks
+
+AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: values for the model's adjustable settings, by key, for this block only. A key that is missing takes the model's own value.
+
+```json
+"params": { "model": "mdl-3a…", "settings": { "thresh": 60 }, "display": 0, "press": true, "duration_ms": 0, "max_fps": 0 }
+```
 
 ### Recordings
 
@@ -221,7 +264,7 @@ A preset is a single JSON file.
 {
   "format": "macromagi.preset",
   "version": 1,
-  "app": "0.1.1",
+  "app": "0.1.2",
   "name": "Rapid fire",
   "description": "",
   "kind": "auto_clicker",
@@ -288,12 +331,65 @@ Missing fields take their defaults. Files from the first version, which had only
   "assets": [
     { "id": "img-…", "name": "Ready button", "kind": "image", "base64": "iVBORw0KGgo…" },
     { "id": "rec-1", "name": "Take 1", "kind": "recording", "recording": { "duration_ms": 0.0, "strokes": [] } },
-    { "id": "snd-…", "name": "Alarm", "kind": "audio", "wav_base64": "UklGRi…" }
+    { "id": "snd-…", "name": "Alarm", "kind": "audio", "wav_base64": "UklGRi…" },
+    { "id": "mdl-…", "name": "Ready check", "kind": "model", "magic_base64": "UEsDBB…" }
   ]
 }
 ```
 
-A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images and sounds are de-duplicated by content). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
+A nodes preset may also carry `groups` whose blocks are all in it. When it is inserted, its nodes get fresh ids and its assets are imported (images, sounds and models are de-duplicated by content). Variables are not part of a preset: settings bound to a variable the receiving macro does not have use their defaults until it is created. This is also the format MacroMagi puts on the clipboard when blocks are copied, prefixed with `macromagi-nodes:`.
+
+## `.magic` – AI models
+
+A `.magic` file is a ZIP archive holding a small vision model and everything needed to use it. The Magic tab reads and writes it; macros embed it as a `model` asset.
+
+```text
+magic.json                    required – the description below
+model/model.onnx              the model, in ONNX format (left out when include.model is false)
+data/train/<class>/<file>     training pictures, one folder per class (optional)
+data/tune/<class>/<file>      fine-tuning pictures, one folder per class (optional)
+```
+
+### `magic.json`
+
+```json
+{
+  "format": "macromagi.magic",
+  "version": 1,
+  "app": "0.1.2",
+  "name": "Ready check",
+  "description": "Presses Space when the ready prompt is on screen.",
+  "input": { "name": "input", "width": 224, "height": 224, "layout": "nchw", "color": "rgb",
+             "scale": 0.00392157, "mean": [0.485, 0.456, 0.406], "std": [0.229, 0.224, 0.225], "softmax": true },
+  "capture": { "area": { "kind": "center", "height_share": 0.2074 }, "display": 0 },
+  "classes": [
+    { "label": "Nothing", "act": false, "threshold": 0.5, "delay_ms": 0 },
+    { "label": "Ready", "act": true, "threshold": 0.6, "delay_ms": 0 }
+  ],
+  "action": { "key": "Space", "hold_ms": 5, "cooldown_ms": 500 },
+  "settings": [
+    { "key": "thresh", "label": "Confidence", "kind": "percent", "min": 1, "max": 100, "default": 60, "value": 60,
+      "targets": [ { "kind": "threshold", "class": 1 } ] }
+  ],
+  "include": { "model": true, "blocks": true, "training": true, "finetune": true },
+  "training": [ { "file": "data/train/1/0001-ready.png", "class": 1 } ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `format`, `version`, `app` | As for projects: `macromagi.magic`, the format version, the MacroMagi version that wrote it. |
+| `name`, `description`, `author`, `source`, `license` | About the model. `source` and `license` record where an imported model came from and its licence. |
+| `input` | How a picture becomes the model's input: resized to `width × height`, laid out `nchw` (channels first) or `nhwc`, in `rgb` or `bgr` order, each value `v` (0–255) becoming `(v × scale − mean) / std` per channel. `softmax: true` turns raw scores into probabilities. `name` is the model's input name. |
+| `capture` | The screen area shown to the model: `{ "kind": "center", "height_share": … }` – a square in the middle of display `display`, as tall as that share of the display's height – or `{ "kind": "region", "rect": { "x", "y", "w", "h", "display" } }`. |
+| `classes` | One per answer the model gives, in its output order. `act`: whether this answer calls for the action; `threshold` (0–1): how sure the model must be; `delay_ms`: how long to wait before acting. |
+| `action` | The [key](#shared-vocabulary) to press, how long to hold it, and how long to ignore answers after acting. |
+| `settings` | Adjustable settings, shown as sliders in the Magic tab and in each AI block. `kind` is `percent` or `milliseconds`. Each sets its `targets`: `{ "kind": "threshold", "class": n }`, `{ "kind": "delay", "class": n }`, `{ "kind": "cooldown" }` or `{ "kind": "hold" }`. A setting's `value` is applied over the values it targets. |
+| `blocks` | Optional. Blocks to use the model with – `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), without assets; added to a macro along with the model. |
+| `include` | What the archive holds besides `magic.json`: the model, the blocks, training pictures, fine-tuning pictures. |
+| `training`, `finetune` | The pictures under `data/`, each with the class it shows. |
+
+A model asset inside a `.magi` file is the same archive with `training`, `finetune` and their pictures left out.
 
 ## Shared vocabulary
 
@@ -313,8 +409,8 @@ A nodes preset may also carry `groups` whose blocks are all in it. When it is in
 
 ## Versioning
 
-`version` is a single integer per format, currently `1` for both.
+`version` is a single integer per format, currently `1` for all three.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1. Files from 0.1.0 load unchanged; 0.1.0 may refuse files that use these additions.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

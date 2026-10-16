@@ -31,7 +31,7 @@ use magi_core::nodes::flow::DecisionParams;
 use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
 use magi_core::nodes::notes::CommentParams;
 use magi_core::nodes::vision::FindImageParams;
-use magi_core::nodes::{Category, NodeDef, Port, PortKind, Registry, ids, ports};
+use magi_core::nodes::{Category, EngineSupport, NodeDef, Port, PortKind, Registry, ids, ports};
 use magi_core::preset::NodePreset;
 use magi_core::project::Project;
 use magi_core::text::{format_ms, parse_hex_color};
@@ -78,6 +78,8 @@ pub enum GraphEvent {
     Inspect(NodeId),
     /// Open a recording in the pop-out editor.
     EditRecording(String),
+    /// Show the engine settings (a block needs the Python engine).
+    OpenEngineSettings,
     Toast(String),
 }
 
@@ -93,6 +95,8 @@ pub struct GraphEnv<'a> {
     pub show_grid: bool,
     /// View → Block activity: blocks glow as they run.
     pub show_activity: bool,
+    /// The macro would run on the native engine, which skips Python-only blocks.
+    pub python_missing: bool,
 }
 
 /// A wire being dragged out of a port.
@@ -210,7 +214,8 @@ struct Layout {
     rows_top: f32,
     lines: Vec<String>,
     lines_top: f32,
-    thumbnail: Option<(Rect, String)>,
+    /// Pictures shown on the block (an Image Detection block's images), and where.
+    thumbnails: Vec<(Rect, String)>,
     button: Option<(Rect, &'static str)>,
     /// Set for comment blocks, which are drawn as notes.
     comment: Option<CommentParams>,
@@ -233,7 +238,7 @@ impl Layout {
                 rows_top: 0.0,
                 lines: Vec::new(),
                 lines_top: 0.0,
-                thumbnail: None,
+                thumbnails: Vec::new(),
                 button: None,
                 comment: Some(params),
             };
@@ -249,14 +254,24 @@ impl Layout {
         let lines_top = y + if lines.is_empty() { 0.0 } else { 6.0 };
         y = lines_top + lines.len() as f32 * LINE;
 
-        let mut thumbnail = None;
+        let mut thumbnails = Vec::new();
         if node.kind == ids::FIND_IMAGE {
-            let image = node.params_or_default::<FindImageParams>().image;
-            if project.assets.image(&image).is_some() {
-                thumbnail = Some((
-                    Rect::from_min_size(pos2(origin.x + PAD, y + 6.0), vec2(width - 2.0 * PAD, THUMBNAIL)),
-                    image,
-                ));
+            // Up to four of its images, side by side.
+            let images: Vec<String> = node
+                .params_or_default::<FindImageParams>()
+                .targets()
+                .into_iter()
+                .map(|t| t.image)
+                .filter(|id| project.assets.image(id).is_some())
+                .take(4)
+                .collect();
+            if !images.is_empty() {
+                let gap = 4.0;
+                let each = (width - 2.0 * PAD - gap * (images.len() - 1) as f32) / images.len() as f32;
+                for (i, image) in images.into_iter().enumerate() {
+                    let x = origin.x + PAD + i as f32 * (each + gap);
+                    thumbnails.push((Rect::from_min_size(pos2(x, y + 6.0), vec2(each, THUMBNAIL)), image));
+                }
                 y += THUMBNAIL + 6.0;
             }
         }
@@ -303,7 +318,7 @@ impl Layout {
             rows_top,
             lines,
             lines_top,
-            thumbnail,
+            thumbnails,
             button,
             comment: None,
         }
@@ -370,6 +385,8 @@ pub fn node_icon(kind: &str) -> &'static str {
         ids::COMMENT => icon::NOTE,
         ids::SOUND_LEVEL => icon::WAVEFORM,
         ids::SOUND_MATCH => icon::EAR,
+        ids::AI_WATCH => icon::EYE,
+        ids::AI_CLASSIFY => icon::BRAIN,
         _ => icon::SPARKLE,
     }
 }
@@ -745,7 +762,9 @@ impl GraphView {
             }
             body.context_menu(|ui| self.node_menu(ui, project, env.registry, &node, &mut events));
 
-            let active = project.graph.is_active(layout.id);
+            let skipped =
+                env.python_missing && layout.def.as_ref().is_some_and(|def| def.engines == EngineSupport::PythonOnly);
+            let active = project.graph.is_active(layout.id) && !skipped;
             if let Some(comment) = &layout.comment {
                 self.comment(&mut scene, &painter, project, layout, comment, body.hovered());
                 continue;
@@ -774,14 +793,38 @@ impl GraphView {
                     active,
                 },
             );
-            if let Some((rect, asset)) = &layout.thumbnail
-                && let Some(texture) = self.images.get(ui.ctx(), &project.assets, asset)
-            {
+            for (rect, asset) in &layout.thumbnails {
+                let Some(texture) = self.images.get(ui.ctx(), &project.assets, asset) else { continue };
                 painter.rect_filled(*rect, 5.0, theme::bg_input());
                 let size = fit_size(&texture, rect.size() - Vec2::splat(6.0), 4.0);
                 let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
                 let tint = if active { Color32::WHITE } else { Color32::from_white_alpha(90) };
                 painter.image(texture.id(), Rect::from_center_size(rect.center(), size), uv, tint);
+            }
+
+            // A block the native engine skips: a warning that explains, and leads to the setting.
+            if skipped {
+                let rect = layout.header_button();
+                let response = scene.interact(rect, id.with("python-missing"), Sense::click());
+                if response.hovered() {
+                    painter.rect_filled(rect, 5.0, theme::with_alpha(theme::warning(), 0.18));
+                }
+                painter.text(
+                    rect.center(),
+                    Align2::CENTER_CENTER,
+                    icon::WARNING,
+                    FontId::proportional(14.0),
+                    theme::warning(),
+                );
+                if response
+                    .on_hover_text(
+                        "Skipped: this block needs the Python engine, and the macro would run on the native one. \
+                         Click to choose Python in Settings → Engine.",
+                    )
+                    .clicked()
+                {
+                    events.push(GraphEvent::OpenEngineSettings);
+                }
             }
 
             // Header button: run/stop on Start blocks, the info card on recordings.
@@ -1086,7 +1129,8 @@ impl GraphView {
             FontId::proportional(16.0),
             dim(accent),
         );
-        let has_button = matches!(node.kind.as_str(), ids::START | ids::PLAY_RECORDING);
+        let has_button = matches!(node.kind.as_str(), ids::START | ids::PLAY_RECORDING)
+            || layout.def.as_ref().is_some_and(|def| def.engines == EngineSupport::PythonOnly);
         let title_width = rect.width() - 36.0 - if has_button { 34.0 } else { 10.0 };
         let title = fit_text(painter, &layout.title, FontId::proportional(13.5), dim(theme::text()), title_width);
         painter.galley(pos2(rect.left() + 34.0, header.center().y - title.size().y / 2.0), title, theme::text());
@@ -1952,6 +1996,20 @@ impl GraphView {
                 let summary = registry.summary(node, &project.assets).join(" ").to_lowercase();
                 if title.to_lowercase().contains(&query) || kind.contains(&query) || summary.contains(&query) {
                     results.push((Found::Node(node.id), format!("{}  {title}", node_icon(&node.kind))));
+                    continue;
+                }
+                // The images and sounds a block looks or listens for, with their groups.
+                for (asset, group, glyph) in member_names(node) {
+                    let name = project.assets.get(&asset).map(|a| a.name.clone()).unwrap_or_default();
+                    if name.to_lowercase().contains(&query) || group.to_lowercase().contains(&query) {
+                        let label = if group.is_empty() {
+                            format!("{glyph}  {name}  ·  {title}")
+                        } else {
+                            format!("{glyph}  {name}  ·  group “{group}”  ·  {title}")
+                        };
+                        results.push((Found::Node(node.id), label));
+                        break;
+                    }
                 }
             }
         }
@@ -2020,6 +2078,25 @@ impl GraphView {
         if close {
             self.find = None;
         }
+    }
+}
+
+/// The images or sounds a block looks or listens for: asset id, group, icon.
+fn member_names(node: &Node) -> Vec<(String, String, &'static str)> {
+    match node.kind.as_str() {
+        ids::FIND_IMAGE => node
+            .params_or_default::<FindImageParams>()
+            .targets()
+            .into_iter()
+            .map(|t| (t.image, t.group, icon::IMAGE))
+            .collect(),
+        ids::SOUND_MATCH => node
+            .params_or_default::<magi_core::nodes::sound::SoundMatchParams>()
+            .targets()
+            .into_iter()
+            .map(|t| (t.sound, t.group, icon::WAVEFORM))
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -2131,6 +2208,7 @@ mod tests {
                     error_node: None,
                     show_grid: true,
                     show_activity: true,
+                    python_missing: false,
                 };
                 let events = world.view.show(ui, &mut world.project, &env);
                 world.events.extend(events);

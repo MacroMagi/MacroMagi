@@ -9,23 +9,27 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+use magi_core::action::Action as InputAction;
 use magi_core::action::{Action, PressMode};
 use magi_core::autoclicker::{ClickLimit, ClickTarget, ClickerSettings, DualMode, MULTI_CLICK_GAP_MS};
 use magi_core::geom::{Displays, Point, Rect};
 use magi_core::graph::NodeId;
-use magi_core::host::{Host, Notification, WindowInfo, WindowQuery};
+use magi_core::host::{Host, Notification, SoundSource, WindowInfo, WindowQuery};
 use magi_core::input::{Button, InputEvent, Key};
+use magi_core::magic::Decision;
+use magi_core::nodes::ai::{AiParams, AiWatchParams};
 use magi_core::nodes::flow::RateParams;
 use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
 use magi_core::nodes::sound::{SoundLevelParams, SoundMatchParams};
 use magi_core::nodes::system::NotifyParams;
 use magi_core::nodes::variables::{CounterParams, SetVariableParams};
-use magi_core::nodes::vision::{FindColorParams, FindImageParams};
+use magi_core::nodes::vision::{FindColorParams, FindImageParams, FindMode};
 use magi_core::nodes::window::{FocusWindowParams, ScreenKind};
 use magi_core::options::{ProcessRules, RuleAction, Verdict};
 use magi_core::text::parse_hex_color;
 use magi_core::variables::{as_number, as_text};
 use magi_vision::ImageRef;
+use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::monitor::{LogLevel, Monitor};
@@ -48,6 +52,14 @@ const DISPLAYS_CACHE: Duration = Duration::from_secs(2);
 /// so a sound is not missed between two looks.
 const LISTEN_SLACK_MS: f64 = 1000.0;
 
+/// A sound source as a run listens to it.
+#[derive(Default)]
+struct Stream {
+    listening: magi_audio::Listening,
+    /// When sound was last taken from the source.
+    fed_at: Option<Instant>,
+}
+
 /// Shared, live-editable process rules. The app owns them; every run reads them.
 pub type SharedRules = Arc<RwLock<ProcessRules>>;
 
@@ -59,6 +71,33 @@ pub struct Sighting {
     pub position: Option<Point>,
     /// Similarity of the best candidate, found or not.
     pub score: f64,
+}
+
+/// Result of looking for several images at once (an Image Detection block).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImagesSighting {
+    pub found: bool,
+    /// Where the image reported is, in desktop coordinates.
+    pub position: Option<Point>,
+    pub score: f64,
+    /// The name of the image reported, and its group.
+    pub name: String,
+    pub group: String,
+    /// How many of the images are on screen.
+    pub count: usize,
+}
+
+impl ImagesSighting {
+    pub fn to_json(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("found".into(), serde_json::json!(self.found));
+        outputs.insert("position".into(), serde_json::json!(self.position));
+        outputs.insert("score".into(), serde_json::json!(self.score));
+        outputs.insert("name".into(), serde_json::json!(self.name));
+        outputs.insert("group".into(), serde_json::json!(self.group));
+        outputs.insert("count".into(), serde_json::json!(self.count));
+        outputs
+    }
 }
 
 impl Sighting {
@@ -95,9 +134,14 @@ pub struct RunCx {
     pub vars: Variables,
     /// The displays, and when they were read.
     displays: Option<(Instant, Displays)>,
-    /// When each Sound Recognition block last recognised its sound: what was
-    /// heard before then has been counted.
-    heard_at: HashMap<NodeId, Instant>,
+    /// The sound being listened to, analysed as it arrives, per source and microphone.
+    streams: HashMap<(SoundSource, String), Stream>,
+    /// For each Sound Recognition block and sound, the stream frame where it
+    /// was last recognised: what was heard before then has been counted.
+    heard_until: HashMap<(NodeId, String), u64>,
+    /// The sound each Sound Recognition block recognised last, and its group:
+    /// what its "Which sound" output says until it recognises another.
+    last_heard: HashMap<NodeId, (String, String)>,
 }
 
 impl RunCx {
@@ -115,7 +159,9 @@ impl RunCx {
             monitor,
             vars,
             displays: None,
-            heard_at: HashMap::new(),
+            streams: HashMap::new(),
+            heard_until: HashMap::new(),
+            last_heard: HashMap::new(),
             stop,
             stop_everything,
             held: Vec::new(),
@@ -582,21 +628,105 @@ impl RunCx {
         }
     }
 
-    /// Looks for an image on screen (an **Image Detection** node).
-    pub fn find_image(&mut self, params: &FindImageParams) -> OpResult<Sighting> {
-        let needle = self.program.image(&params.image)?;
-        let area = self.search_area(params.region, params.display);
-        let frame = self.host.capture(area).map_err(EngineError::from)?;
-        let haystack = ImageRef::new(frame.width, frame.height, &frame.rgba);
-        let Some(best) = magi_vision::find_template(haystack, needle.as_ref().as_ref()) else {
-            // The image is larger than the area searched: it cannot be there.
-            return Ok(Sighting { found: false, position: None, score: 0.0 });
+    /// Looks for one or more images on screen (an **Image Detection** node).
+    ///
+    /// Images that share a search area share one capture of it; each image is
+    /// matched at the block's level of detail, all of them in parallel.
+    pub fn find_image(&mut self, params: &FindImageParams) -> OpResult<ImagesSighting> {
+        let targets = params.targets();
+        if targets.is_empty() {
+            return Err(EngineError::new("no image has been chosen").into());
+        }
+        let factor = params.detail.factor();
+
+        // One capture per distinct search area.
+        let mut areas: Vec<Option<Rect>> = Vec::new();
+        let mut area_of = Vec::with_capacity(targets.len());
+        for target in &targets {
+            let area = self.search_area(params.region_of(target), params.display);
+            let index = areas.iter().position(|a| *a == area).unwrap_or_else(|| {
+                areas.push(area);
+                areas.len() - 1
+            });
+            area_of.push(index);
+        }
+        let mut frames = Vec::with_capacity(areas.len());
+        for area in &areas {
+            frames.push(self.host.capture(*area).map_err(EngineError::from)?);
+        }
+
+        // Each image at the detail it can take: a small image is never
+        // shrunk below a few pixels.
+        let mut jobs = Vec::with_capacity(targets.len());
+        for (target, &area) in targets.iter().zip(&area_of) {
+            let full = self.program.image(&target.image)?;
+            let fits = (full.width.min(full.height) / 6).max(1);
+            let f = factor.min(fits).max(1);
+            jobs.push((area, f, self.program.image_shrunk(&target.image, f)?));
+        }
+        let mut shrunk: HashMap<(usize, u32), magi_vision::Bitmap> = HashMap::new();
+        for &(area, f, _) in &jobs {
+            if f > 1 && !shrunk.contains_key(&(area, f)) {
+                let frame = &frames[area];
+                let small = magi_vision::shrink(ImageRef::new(frame.width, frame.height, &frame.rgba), f);
+                shrunk.insert((area, f), small);
+            }
+        }
+
+        let results: Vec<Option<(f64, Point)>> = jobs
+            .par_iter()
+            .map(|(area, f, needle)| {
+                let frame = &frames[*area];
+                let haystack = match shrunk.get(&(*area, *f)) {
+                    Some(small) => small.as_ref(),
+                    None => ImageRef::new(frame.width, frame.height, &frame.rgba),
+                };
+                let best = magi_vision::find_template(haystack, needle.as_ref().as_ref())?;
+                let (cx, cy) = best.center();
+                let (x, y) = (cx * f + f / 2, cy * f + f / 2);
+                Some((f64::from(best.score), Point::new(frame.origin.x + x as i32, frame.origin.y + y as i32)))
+            })
+            .collect();
+
+        let threshold = params.threshold.clamp(0.0, 1.0);
+        let is_found = |r: &Option<(f64, Point)>| r.is_some_and(|(score, _)| score >= threshold);
+        let count = results.iter().filter(|r| is_found(r)).count();
+        let found = match params.mode {
+            FindMode::Any => count > 0,
+            FindMode::All => count == targets.len(),
         };
-        let score = f64::from(best.score);
-        let found = score >= params.threshold.clamp(0.0, 1.0);
-        let (cx, cy) = best.center();
-        let position = Point::new(frame.origin.x + cx as i32, frame.origin.y + cy as i32);
-        Ok(Sighting { found, position: found.then_some(position), score })
+        // Reported: the first image found, in list order; otherwise the closest miss.
+        let reported = results.iter().position(is_found).or_else(|| {
+            results
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| r.map(|(score, _)| (i, score)))
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        });
+        let name_of = |i: usize| self.program.assets.get(&targets[i].image).map(|a| a.name.clone()).unwrap_or_default();
+        Ok(match reported {
+            Some(i) => {
+                let (score, position) = results[i].expect("reported results exist");
+                let hit = is_found(&results[i]);
+                ImagesSighting {
+                    found,
+                    position: hit.then_some(position),
+                    score,
+                    name: if hit { name_of(i) } else { String::new() },
+                    group: if hit { targets[i].group.clone() } else { String::new() },
+                    count,
+                }
+            }
+            None => ImagesSighting {
+                found: false,
+                position: None,
+                score: 0.0,
+                name: String::new(),
+                group: String::new(),
+                count: 0,
+            },
+        })
     }
 
     /// Looks for a colour on screen (a **Color Detection** node).
@@ -618,11 +748,104 @@ impl RunCx {
 }
 
 impl RunCx {
+    // ---- AI models ------------------------------------------------------------
+
+    /// Shows the model's part of the screen to the model once.
+    fn ai_look(
+        &mut self,
+        loaded: &crate::program::LoadedModel,
+        config: &magi_core::magic::MagicModel,
+        display: u8,
+    ) -> OpResult<Decision> {
+        let displays = self.displays();
+        let rect = config
+            .capture
+            .rect(&displays, Some(display))
+            .ok_or_else(|| EngineError::new("there is no display to look at"))?;
+        let frame = self.host.capture(Some(rect)).map_err(EngineError::from)?;
+        let probabilities = loaded
+            .model
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .classify(&frame.rgba, frame.width, frame.height)
+            .map_err(|e| EngineError::new(e.0))?;
+        Ok(config.decide(&probabilities))
+    }
+
+    /// Asks an AI model about the screen once (an **AI Model** block).
+    pub fn ai_classify(&mut self, params: &AiParams) -> OpResult<serde_json::Map<String, Value>> {
+        let loaded = self.program.model(&params.model)?;
+        let config = loaded.spec.configured(&params.settings);
+        let decision = self.ai_look(&loaded, &config, params.display)?;
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("act".into(), serde_json::json!(decision.act));
+        outputs.insert("label".into(), serde_json::json!(decision.label));
+        outputs.insert("class".into(), serde_json::json!(decision.class));
+        outputs.insert("confidence".into(), serde_json::json!((decision.confidence * 1000.0).round() / 1000.0));
+        outputs.insert("delay".into(), serde_json::json!(decision.delay_ms));
+        Ok(outputs)
+    }
+
+    /// Keeps showing the screen to an AI model and acts on its answers (an
+    /// **AI Watch** block). Returns how often it acted and its last answer.
+    pub fn ai_watch(&mut self, params: &AiWatchParams, node: NodeId) -> OpResult<(u64, String)> {
+        let loaded = self.program.model(&params.model)?;
+        let config = loaded.spec.configured(&params.settings);
+        let engine = loaded.model.lock().unwrap_or_else(|p| p.into_inner()).engine();
+        self.monitor.log(
+            LogLevel::Info,
+            Some(node),
+            format!("“{}” is watching, on the {}", config.name, engine.label()),
+        );
+        let started = Instant::now();
+        let frame_time = (params.max_fps > 0.0).then(|| Duration::from_secs_f64(1.0 / params.max_fps));
+        let (mut hits, mut last) = (0u64, String::new());
+        loop {
+            self.check_stop()?;
+            if params.duration_ms > 0.0 && started.elapsed() >= millis(params.duration_ms) {
+                return Ok((hits, last));
+            }
+            let look_started = Instant::now();
+            let decision = self.ai_look(&loaded, &config, params.display)?;
+            if decision.act {
+                if decision.delay_ms > 0.0 {
+                    self.sleep_ms(decision.delay_ms)?;
+                }
+                if params.press {
+                    let press = ActionParams {
+                        actions: vec![InputAction::tap(config.action.key)],
+                        hold_ms: config.action.hold_ms,
+                    };
+                    self.perform_actions(&press, None)?;
+                }
+                hits += 1;
+                last = decision.label;
+                self.monitor.log(
+                    LogLevel::Info,
+                    Some(node),
+                    format!("Acted on “{last}” ({:.0}% sure)", decision.confidence * 100.0),
+                );
+                self.sleep_ms(config.action.cooldown_ms.max(0.0))?;
+            } else if let Some(frame_time) = frame_time {
+                let spent = look_started.elapsed();
+                if spent < frame_time {
+                    self.sleep(frame_time - spent)?;
+                }
+            } else {
+                // As fast as possible, but never a busy loop in the interpreter's eyes.
+                self.waited = true;
+            }
+        }
+    }
+
     // ---- sound --------------------------------------------------------------
 
     /// Listens to the most recent sound (a **Sound Detection** block).
     pub fn sound_level(&mut self, params: &SoundLevelParams) -> OpResult<serde_json::Map<String, Value>> {
-        let clip = self.host.listen(params.source, params.window_ms.clamp(20.0, 5000.0)).map_err(EngineError::from)?;
+        let clip = self
+            .host
+            .listen(params.source, &params.device, params.window_ms.clamp(20.0, 5000.0))
+            .map_err(EngineError::from)?;
         let loudness = magi_audio::loudness_db(&clip.samples);
         let pitch = magi_audio::dominant_frequency(&clip.samples, clip.sample_rate);
         let mut outputs = serde_json::Map::new();
@@ -632,25 +855,73 @@ impl RunCx {
         Ok(outputs)
     }
 
-    /// Listens for a particular sound (a **Sound Recognition** block). Each
-    /// time the sound is played it is recognised once.
+    /// Listens for one or more sounds (a **Sound Recognition** block). Each
+    /// time a sound is played it is recognised once.
+    ///
+    /// The sound is analysed as a stream: each call analyses only what is new,
+    /// and every sound of the block is compared with the same analysis.
     pub fn sound_match(&mut self, params: &SoundMatchParams, node: NodeId) -> OpResult<serde_json::Map<String, Value>> {
-        let template = self.program.sound(&params.sound)?;
-        let mut window = template.duration_ms() + LISTEN_SLACK_MS;
-        if let Some(at) = self.heard_at.get(&node) {
-            window = window.min(at.elapsed().as_secs_f64() * 1000.0);
+        let targets = params.targets();
+        if targets.is_empty() {
+            return Err(EngineError::new("no sound has been chosen").into());
         }
-        let clip = self.host.listen(params.source, window.max(1.0)).map_err(EngineError::from)?;
-        let heard =
-            magi_audio::Fingerprint::of(&magi_audio::Audio { sample_rate: clip.sample_rate, samples: clip.samples });
-        let score = magi_audio::similarity(&template, &heard);
-        let found = score >= params.accuracy.clamp(0.0, 1.0);
-        if found {
-            self.heard_at.insert(node, Instant::now());
+        let templates = targets
+            .iter()
+            .map(|t| self.program.sound_start(&t.sound, params.match_ms))
+            .collect::<Result<Vec<_>, _>>()?;
+        let longest = templates.iter().map(|t| t.duration_ms()).fold(0.0, f64::max) + LISTEN_SLACK_MS;
+
+        let key = (params.source, params.device.trim().to_owned());
+        // Only what is new since the last look (with a margin), at most what the longest sound needs.
+        let wanted = match self.streams.get(&key).and_then(|s| s.fed_at) {
+            Some(at) => (at.elapsed().as_secs_f64() * 1000.0 + 250.0).min(longest),
+            None => longest,
+        };
+        let clip = self.host.listen(params.source, &params.device, wanted.max(50.0)).map_err(EngineError::from)?;
+        let stream = self.streams.entry(key).or_default();
+        stream.listening.feed(&clip.samples, clip.sample_rate, clip.end);
+        stream.fed_at = Some(Instant::now());
+
+        let mut results = Vec::with_capacity(targets.len());
+        for (target, template) in targets.iter().zip(&templates) {
+            let after = self.heard_until.get(&(node, target.sound.clone())).copied().unwrap_or(0);
+            let best = stream.listening.best_match(template, after);
+            let hit = best.is_some_and(|(score, _)| score >= params.accuracy_of(target));
+            results.push((best, hit));
         }
+        let count = results.iter().filter(|(_, hit)| *hit).count();
+        let found = match params.mode {
+            FindMode::Any => count > 0,
+            FindMode::All => count == targets.len(),
+        };
+        let reported = results.iter().position(|(_, hit)| *hit);
+        // Mark what was recognised, so the same playing is not counted again.
+        let counted: Vec<usize> = match (params.mode, found) {
+            (FindMode::Any, true) => reported.into_iter().collect(),
+            (FindMode::All, true) => (0..targets.len()).collect(),
+            _ => Vec::new(),
+        };
+        for i in counted {
+            if let Some((_, end)) = results[i].0 {
+                self.heard_until.insert((node, targets[i].sound.clone()), end);
+            }
+        }
+
+        let score = match reported {
+            Some(i) => results[i].0.map_or(0.0, |(s, _)| s),
+            None => results.iter().filter_map(|(r, _)| r.map(|(s, _)| s)).fold(0.0, f64::max),
+        };
+        if let Some(i) = reported.filter(|_| found) {
+            let name = self.program.assets.get(&targets[i].sound).map(|a| a.name.clone()).unwrap_or_default();
+            self.last_heard.insert(node, (name, targets[i].group.clone()));
+        }
+        let (name, group) = self.last_heard.get(&node).cloned().unwrap_or_default();
         let mut outputs = serde_json::Map::new();
         outputs.insert("found".into(), serde_json::json!(found));
         outputs.insert("score".into(), serde_json::json!((score * 1000.0).round() / 1000.0));
+        outputs.insert("name".into(), serde_json::json!(name));
+        outputs.insert("group".into(), serde_json::json!(group));
+        outputs.insert("count".into(), serde_json::json!(count));
         Ok(outputs)
     }
 

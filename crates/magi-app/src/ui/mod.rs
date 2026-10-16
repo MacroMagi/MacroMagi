@@ -10,7 +10,9 @@ pub mod clicker_form;
 pub mod graph;
 pub mod images;
 pub mod inspector;
+pub mod lists;
 pub mod macro_tab;
+pub mod magic_tab;
 pub mod options;
 pub mod overlay;
 pub mod recording_editor;
@@ -58,6 +60,14 @@ pub enum SnipTarget {
     ClickerPosition,
     /// The fixed click position of an Auto Click block.
     ClickerNode(NodeId),
+    /// A new image for an Image Detection block's list.
+    AddImage(NodeId),
+    /// The search area of one image of an Image Detection block.
+    ImageRegion(NodeId, usize),
+    /// The search area of one image group of an Image Detection block.
+    ImageGroupRegion(NodeId, usize),
+    /// The fixed screen area of the model open in the Magic tab.
+    MagicArea,
 }
 
 pub enum UiRequest {
@@ -74,4 +84,12 @@ pub enum UiRequest {
     LoadSound(NodeId, String),
     /// Open a Rate block in the Variable Rate Editor.
     EditRate(NodeId),
+    /// Load an image file into an Image Detection block's list.
+    AddImageFile(NodeId),
+    /// Load a sound file into a Sound Recognition block's list.
+    AddSoundFile(NodeId),
+    /// Load a `.magic` file into a block's model setting.
+    LoadModel(NodeId, String),
+    /// Open a model asset of the macro in the Magic tab.
+    OpenModel(String),
 }

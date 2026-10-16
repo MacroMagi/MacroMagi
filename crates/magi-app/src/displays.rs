@@ -1,5 +1,6 @@
-//! The displays, as the editor shows them: numbered the way macros store
-//! them (see [`Displays`]), read from the system now and then.
+//! The displays and the microphones, as the editor shows them: displays
+//! numbered the way macros store them (see [`Displays`]), both read from the
+//! system now and then rather than every frame.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -31,6 +32,16 @@ fn with_cache<R>(f: impl FnOnce(&Cache) -> R) -> R {
 /// The connected displays. Empty if they cannot be read.
 pub fn current() -> Displays {
     with_cache(|c| c.displays.clone())
+}
+
+/// The names of the microphones and other sound inputs.
+pub fn microphones() -> Vec<String> {
+    static CACHE: Mutex<Option<(Instant, Vec<String>)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if cache.as_ref().is_none_or(|(read, _)| read.elapsed() > REFRESH) {
+        *cache = Some((Instant::now(), magi_platform::audio::input_devices()));
+    }
+    cache.as_ref().map(|(_, names)| names.clone()).unwrap_or_default()
 }
 
 /// The number the windowing system gives a display, for opening a window full

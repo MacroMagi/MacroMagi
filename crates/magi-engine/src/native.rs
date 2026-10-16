@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use magi_core::autoclicker::AutoClickParams;
 use magi_core::geom::Point;
 use magi_core::graph::{Node, NodeId};
+use magi_core::nodes::ai::{AiParams, AiWatchParams};
 use magi_core::nodes::flow::{
     CallParams, DecisionParams, DefineParams, DelayParams, LogParams, RateParams, RepeatMode, RepeatParams, StopParams,
     StopScope, WaitUntilParams,
@@ -27,7 +28,7 @@ use magi_core::nodes::system::NotifyParams;
 use magi_core::nodes::variables::{CounterParams, REACHED, SetVariableParams, VariableParams};
 use magi_core::nodes::vision::{FindColorParams, FindImageParams};
 use magi_core::nodes::window::FocusWindowParams;
-use magi_core::nodes::{ids, ports};
+use magi_core::nodes::{EngineSupport, ids, ports};
 use magi_core::variables::{as_number, as_text, parse_literal};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
@@ -110,11 +111,14 @@ impl NativeNodes {
         nodes.flow(ids::SET_VARIABLE, set_variable);
         nodes.flow(ids::COUNTER, counter);
         nodes.flow(ids::NOTIFY, notify);
-        nodes.flow(ids::PYTHON, |_, _| {
-            Err(EngineError::new(
-                "Python Script blocks need the Python engine. Choose it in Settings (Python 3.8+ must be installed).",
-            )
-            .into())
+        nodes.flow(ids::AI_WATCH, |interp, node| {
+            let p: AiWatchParams = interp.params(node)?;
+            let (hits, label) = interp.cx.ai_watch(&p, node.id)?;
+            interp.outputs.insert(
+                node.id,
+                Map::from_iter([("hits".to_owned(), json!(hits)), ("label".to_owned(), json!(label))]),
+            );
+            Ok(Next::out())
         });
         nodes.value(ids::FIND_IMAGE, find_image);
         nodes.value(ids::FIND_COLOR, find_color);
@@ -125,6 +129,10 @@ impl NativeNodes {
         nodes.value(ids::COMPARE, compare);
         nodes.value(ids::TEXT, text);
         nodes.value(ids::CLIPBOARD, clipboard);
+        nodes.value(ids::AI_CLASSIFY, |interp, node| {
+            let p: AiParams = interp.params(node)?;
+            interp.cx.ai_classify(&p)
+        });
         nodes.value(ids::SOUND_LEVEL, |interp, node| {
             let p: SoundLevelParams = interp.params(node)?;
             interp.cx.sound_level(&p)
@@ -164,12 +172,22 @@ pub struct Interp<'a> {
     pub outputs: HashMap<NodeId, Map<String, Value>>,
     depth: u32,
     calls: u32,
+    /// Python-only blocks this run has already warned about.
+    warned_python: Vec<NodeId>,
 }
 
 /// Runs the flow that begins at `start` until it ends, fails, or is stopped.
 pub(crate) fn run(cx: &mut RunCx, nodes: &NativeNodes, start: NodeId) -> Result<(), EngineError> {
-    let mut interp =
-        Interp { cx, nodes, loops: Vec::new(), memo: HashMap::new(), outputs: HashMap::new(), depth: 0, calls: 0 };
+    let mut interp = Interp {
+        cx,
+        nodes,
+        loops: Vec::new(),
+        memo: HashMap::new(),
+        outputs: HashMap::new(),
+        depth: 0,
+        calls: 0,
+        warned_python: Vec::new(),
+    };
     match interp.run_from(start) {
         Ok(_) | Err(Halt::Stopped) => Ok(()),
         Err(Halt::Failed(error)) => Err(error),
@@ -203,7 +221,22 @@ impl Interp<'_> {
             }
 
             let node = program.node(id)?;
-            if !node.enabled {
+            // Blocks only the Python engine can run are passed over like
+            // disabled ones, with a warning, so the rest of the macro still runs.
+            let python_only =
+                program.registry.get(&node.kind).is_some_and(|def| def.engines == EngineSupport::PythonOnly);
+            if python_only && !self.warned_python.contains(&id) {
+                self.warned_python.push(id);
+                self.cx.monitor.log(
+                    LogLevel::Warning,
+                    Some(id),
+                    format!(
+                        "Skipped “{}”: it needs the Python engine. Choose Python in Settings → Engine.",
+                        program.registry.title(node)
+                    ),
+                );
+            }
+            if !node.enabled || python_only {
                 current = pass_through(&program.registry.ports(node))
                     .and_then(|port| program.graph.flow_target(id, &port))
                     .map(|target| target.node);

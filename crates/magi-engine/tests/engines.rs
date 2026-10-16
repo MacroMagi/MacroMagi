@@ -818,20 +818,25 @@ fn problems_are_reported_against_the_block() {
 // ---- engine-specific -------------------------------------------------------
 
 #[test]
-fn python_scripts_need_the_python_engine() {
+fn python_scripts_are_skipped_with_a_warning_on_the_native_engine() {
     let mut b = Builder::new();
     let start = b.node(ids::START, json!({}));
     let script = b.node(ids::PYTHON, json!({ "code": "result = 1" }));
-    b.chain(&[start, script]);
+    let after = b.tap(Key::KeyY);
+    b.chain(&[start, script, after]);
     let program = Program::from_project(&b.project, registry());
     assert!(program.needs_python());
 
+    let host = Arc::new(SimHost::new());
     let monitor = Arc::new(Monitor::new());
-    let session = session(EngineKind::Native, &b.project, Arc::new(SimHost::new()), Arc::clone(&monitor));
+    let session = session(EngineKind::Native, &b.project, Arc::clone(&host), Arc::clone(&monitor));
     session.start(start).unwrap();
     assert!(session.wait_idle(Some(TIMEOUT)));
-    let logs = monitor.logs();
-    assert!(logs.iter().any(|e| e.level == LogLevel::Error && e.message.contains("Python engine")));
+    let outcome = collect(&host, &monitor);
+    assert_eq!(outcome.taps(), [Key::KeyY], "the rest of the macro still runs");
+    assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
+    let warning = monitor.logs().into_iter().find(|e| e.level == LogLevel::Warning).expect("a warning");
+    assert!(warning.message.contains("Python engine") && warning.node == Some(script));
 }
 
 #[test]
@@ -1195,7 +1200,7 @@ fn tone(hz: f32, seconds: f32, amplitude: f32) -> Vec<f32> {
 
 fn hearing(samples: Vec<f32>) -> SimHost {
     let host = SimHost::new();
-    host.set_sound(SoundClip { sample_rate: RATE, samples });
+    host.set_sound(SoundClip { sample_rate: RATE, end: samples.len() as u64, samples });
     host
 }
 
@@ -1263,5 +1268,282 @@ fn sound_recognition_hears_an_uploaded_sound_once_each_time_it_plays() {
     let other = || hearing([300.0, 900.0, 1200.0].iter().flat_map(|&hz| tone(hz, 0.25, 0.5)).collect());
     on_all(&b.project, start, other, |kind, outcome| {
         assert_eq!(outcome.taps(), [Key::KeyN; 3], "{kind:?}: a different sound");
+    });
+}
+
+// ---- several images and sounds in one block ---------------------------------
+
+/// A second picture, unlike the first: green and yellow stripes.
+fn other_image() -> (Vec<u8>, u32, u32) {
+    let (w, h) = (24u32, 16u32);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for _y in 0..h {
+        for x in 0..w {
+            rgba.extend_from_slice(if (x / 3) % 2 == 0 { &[40, 200, 60, 255] } else { &[240, 220, 30, 255] });
+        }
+    }
+    (rgba, w, h)
+}
+
+fn add_image(project: &mut Project, name: &str, (rgba, w, h): (Vec<u8>, u32, u32)) -> String {
+    let png = magi_vision::encode_png(ImageRef::new(w, h, &rgba)).unwrap();
+    project.assets.add_image(name, png)
+}
+
+/// A screen with the first picture at (30, 30) and, optionally, the second at (200, 120).
+fn two_pictures(second: bool) -> SimHost {
+    let mut frame = Frame::solid(Point::new(0, 0), 320, 200, [90, 90, 90]);
+    let (rgba, w, h) = target_image();
+    frame.blit(&Frame::new(Point::new(0, 0), w, h, rgba), Point::new(30, 30));
+    if second {
+        let (rgba, w, h) = other_image();
+        frame.blit(&Frame::new(Point::new(0, 0), w, h, rgba), Point::new(200, 120));
+    }
+    SimHost::with_screen(frame)
+}
+
+/// `Start → Decision`, fed by an Image Detection block with `params`; logs which image was found.
+fn images_project(params: impl FnOnce(&str, &str) -> serde_json::Value) -> (Project, NodeId) {
+    let mut b = Builder::new();
+    let first = add_image(&mut b.project, "checkers", target_image());
+    let second = add_image(&mut b.project, "stripes", other_image());
+    let start = b.node(ids::START, json!({}));
+    let find = b.node(ids::FIND_IMAGE, params(&first, &second));
+    let decision = b.node(ids::DECISION, json!({}));
+    let seen = b.node(ids::LOG, json!({ "message": "seen" }));
+    let unseen = b.tap(Key::KeyN);
+    b.flow(start, ports::OUT, decision).wire(find, "found", decision, "cond:1").flow(decision, "case:1", seen).flow(
+        decision,
+        ports::ELSE,
+        unseen,
+    );
+    b.wire(find, "name", seen, "value");
+    (b.project, start)
+}
+
+#[test]
+fn image_detection_looks_for_several_images_in_order_of_priority() {
+    // Any: the stripes come first in the list, but only the checkers are on screen.
+    let (project, start) =
+        images_project(|first, second| json!({ "images": [{ "image": second }, { "image": first }], "mode": "any" }));
+    on_all(
+        &project,
+        start,
+        || two_pictures(false),
+        |kind, outcome| {
+            assert!(outcome.taps().is_empty(), "{kind:?}");
+            assert!(outcome.logs.iter().any(|l| l.contains("checkers")), "{kind:?}: {:?}", outcome.logs);
+        },
+    );
+    // Both on screen: the first in the list is the one reported.
+    on_all(
+        &project,
+        start,
+        || two_pictures(true),
+        |kind, outcome| {
+            assert!(outcome.logs.iter().any(|l| l.contains("stripes")), "{kind:?}: {:?}", outcome.logs);
+        },
+    );
+
+    // All: only found once both are there.
+    let (project, start) =
+        images_project(|first, second| json!({ "images": [{ "image": first }, { "image": second }], "mode": "all" }));
+    on_all(
+        &project,
+        start,
+        || two_pictures(false),
+        |kind, outcome| {
+            assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}");
+        },
+    );
+    on_all(
+        &project,
+        start,
+        || two_pictures(true),
+        |kind, outcome| {
+            assert!(outcome.taps().is_empty(), "{kind:?}");
+        },
+    );
+}
+
+#[test]
+fn groups_and_images_can_have_search_areas_of_their_own() {
+    // The block searches the top-left only; the stripes' group searches the bottom-right.
+    let (project, start) = images_project(|_, second| {
+        json!({
+            "images": [{ "image": second, "group": "corner" }],
+            "groups": [{ "name": "corner", "region": Rect::new(160, 100, 160, 100) }],
+            "region": Rect::new(0, 0, 100, 100),
+        })
+    });
+    on_all(
+        &project,
+        start,
+        || two_pictures(true),
+        |kind, outcome| {
+            assert!(outcome.logs.iter().any(|l| l.contains("stripes")), "{kind:?}: {:?}", outcome.logs);
+        },
+    );
+    // The same image with its own area, where it is not.
+    let (project, start) = images_project(|_, second| {
+        json!({
+            "images": [{ "image": second, "group": "corner", "region": Rect::new(0, 0, 100, 100) }],
+            "groups": [{ "name": "corner", "region": Rect::new(160, 100, 160, 100) }],
+        })
+    });
+    on_all(
+        &project,
+        start,
+        || two_pictures(true),
+        |kind, outcome| {
+            assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}: its own area wins over its group's");
+        },
+    );
+}
+
+#[test]
+fn less_detail_still_finds_a_clear_image_and_reports_where() {
+    let mut b = Builder::new();
+    let image = add_target_asset(&mut b.project);
+    let start = b.node(ids::START, json!({}));
+    let find = b.node(ids::FIND_IMAGE, json!({ "image": image, "detail": "half", "threshold": 0.7 }));
+    let click = b.click();
+    b.chain(&[start, click]);
+    b.wire(find, "position", click, "position");
+    on_all(
+        &b.project,
+        start,
+        || screen(Some(Point::new(100, 60))),
+        |kind, outcome| {
+            let moved = outcome.sent.iter().find_map(|e| match e {
+                InputEvent::MoveTo { x, y } => Some((*x, *y)),
+                _ => None,
+            });
+            let (x, y) = moved.expect("it clicked where the image is");
+            assert!((x - 112).abs() <= 2 && (y - 68).abs() <= 2, "{kind:?}: ({x}, {y})");
+        },
+    );
+}
+
+#[test]
+fn sound_recognition_listens_for_several_sounds_and_says_which() {
+    let tune = |notes: [f32; 3]| -> Vec<f32> { notes.iter().flat_map(|&hz| tone(hz, 0.25, 0.5)).collect() };
+    let first = tune([440.0, 660.0, 550.0]);
+    let second = tune([300.0, 900.0, 1200.0]);
+    let mut b = Builder::new();
+    let a = b
+        .project
+        .assets
+        .add_audio("doorbell", magi_audio::prepare_upload(&magi_audio::encode_wav(&first, RATE)).unwrap());
+    let c = b
+        .project
+        .assets
+        .add_audio("alarm", magi_audio::prepare_upload(&magi_audio::encode_wav(&second, RATE)).unwrap());
+    let start = b.node(ids::START, json!({}));
+    let listen = b.node(ids::SOUND_MATCH, json!({ "sounds": [{ "sound": a }, { "sound": c, "group": "loud" }] }));
+    let decision = b.node(ids::DECISION, json!({}));
+    let heard = b.node(ids::LOG, json!({ "message": "heard" }));
+    let not_heard = b.tap(Key::KeyN);
+    b.flow(start, ports::OUT, decision).wire(listen, "found", decision, "cond:1").flow(decision, "case:1", heard).flow(
+        decision,
+        ports::ELSE,
+        not_heard,
+    );
+    b.wire(listen, "name", heard, "value");
+    let playing = move || {
+        let mut samples = vec![0.0; RATE as usize / 2];
+        samples.extend(second.iter().map(|s| s * 0.4));
+        samples.extend(vec![0.0; RATE as usize / 10]);
+        hearing(samples)
+    };
+    on_all(&b.project, start, playing, |kind, outcome| {
+        assert!(outcome.logs.iter().any(|l| l.contains("alarm")), "{kind:?}: {:?}", outcome.logs);
+    });
+}
+
+// ---- AI models -----------------------------------------------------------------
+
+/// A model that averages each colour of the middle of the screen: its
+/// "classes" are red, green and blue. Acting on red presses R.
+fn colour_model(project: &mut Project) -> String {
+    use magi_core::magic::*;
+    let model = MagicModel {
+        name: "Colours".into(),
+        input: InputSpec { width: 4, height: 4, mean: [0.0; 3], std: [1.0; 3], ..InputSpec::default() },
+        capture: CaptureSpec { area: CaptureArea::Center { height_share: 0.5 }, display: 0 },
+        classes: vec![
+            ClassSpec { label: "red".into(), act: true, threshold: 0.4, delay_ms: 0.0 },
+            ClassSpec { label: "green".into(), ..ClassSpec::default() },
+            ClassSpec { label: "blue".into(), ..ClassSpec::default() },
+        ],
+        action: ActionSpec { key: Key::KeyR, hold_ms: 1.0, cooldown_ms: 200.0 },
+        settings: vec![ModelSetting {
+            key: "thresh".into(),
+            label: "Confidence".into(),
+            kind: SettingKind::Percent,
+            min: 0.0,
+            max: 100.0,
+            default: 40.0,
+            value: 40.0,
+            targets: vec![SettingTarget::Threshold { class: 0 }],
+            ..ModelSetting::default()
+        }],
+        ..MagicModel::default()
+    };
+    let file = MagicFile { model, onnx: include_bytes!("data/channel_means.onnx").to_vec(), ..MagicFile::default() };
+    project.assets.add_model("Colours", file.for_macro().unwrap())
+}
+
+fn coloured(rgb: [u8; 3]) -> impl Fn() -> SimHost {
+    move || SimHost::with_screen(Frame::solid(Point::new(0, 0), 320, 200, rgb))
+}
+
+#[test]
+fn an_ai_model_answers_about_the_middle_of_the_screen() {
+    let mut b = Builder::new();
+    let model = colour_model(&mut b.project);
+    let start = b.node(ids::START, json!({}));
+    let ask = b.node(ids::AI_CLASSIFY, json!({ "model": model }));
+    let decision = b.node(ids::DECISION, json!({}));
+    let yes = b.node(ids::LOG, json!({ "message": "saw" }));
+    let no = b.tap(Key::KeyN);
+    b.flow(start, ports::OUT, decision).wire(ask, "act", decision, "cond:1").flow(decision, "case:1", yes).flow(
+        decision,
+        ports::ELSE,
+        no,
+    );
+    b.wire(ask, "label", yes, "value");
+    on_all(&b.project, start, coloured([250, 10, 10]), |kind, outcome| {
+        assert!(outcome.logs.iter().any(|l| l.contains("saw red")), "{kind:?}: {:?}", outcome.logs);
+    });
+    on_all(&b.project, start, coloured([10, 250, 10]), |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}: green is not acted on");
+    });
+
+    // The block's own settings: demanding 90% certainty, red is no longer enough.
+    let mut strict = b.project.clone();
+    strict.graph.node_mut(ask).unwrap().set_param("settings", json!({ "thresh": 90 }));
+    on_all(&strict, start, coloured([250, 10, 10]), |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}");
+    });
+}
+
+#[test]
+fn ai_watch_presses_the_model_key_once_per_event() {
+    let mut b = Builder::new();
+    let model = colour_model(&mut b.project);
+    let start = b.node(ids::START, json!({}));
+    let watch = b.node(ids::AI_WATCH, json!({ "model": model, "duration_ms": 60.0 }));
+    let report = b.log("hits");
+    b.chain(&[start, watch, report]);
+    b.wire(watch, "hits", report, "value");
+    on_all(&b.project, start, coloured([250, 10, 10]), |kind, outcome| {
+        assert_eq!(outcome.taps(), [Key::KeyR], "{kind:?}: once, then the cooldown");
+        assert!(outcome.logs.iter().any(|l| l == "hits 1"), "{kind:?}: {:?}", outcome.logs);
+    });
+    let mut quiet = b.project.clone();
+    quiet.graph.node_mut(watch).unwrap().set_param("press", false);
+    on_all(&quiet, start, coloured([250, 10, 10]), |kind, outcome| {
+        assert!(outcome.taps().is_empty(), "{kind:?}: watching only");
     });
 }

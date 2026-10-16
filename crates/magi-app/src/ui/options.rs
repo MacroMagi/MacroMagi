@@ -68,6 +68,7 @@ pub fn program_picker(ui: &mut Ui, id: &str) -> Option<String> {
 pub enum OptionsEvent {
     OpenStopHotkeys,
     OpenProcessRules,
+    OpenDownloads,
     CreateShortcut,
 }
 
@@ -81,20 +82,6 @@ pub fn menu(
     let mut events = Vec::new();
     // Rows with a switch at the right end fill the width they are given.
     ui.set_width(250.0);
-    widgets::toggle_row(
-        ui,
-        "Strict hotkey modifiers",
-        "On: a hotkey works only when exactly its modifier keys are held (Ctrl+F6 never triggers F6).\n\
-         Off: extra held modifiers are ignored, so F6 still works while you hold Shift in a game.",
-        &mut options.strict_modifiers,
-    );
-    widgets::toggle_row(
-        ui,
-        "Stop on task switch",
-        "Stop the auto clicker and every macro when you press Alt+Tab or Win+Tab.",
-        &mut options.stop_on_task_switch,
-    );
-    ui.separator();
     let count = options.stop_hotkeys.len();
     let label = if count == 0 {
         format!("{}  Auto-stop hotkeys…", icon::STOP_CIRCLE)
@@ -118,6 +105,19 @@ pub fn menu(
         ui.set_width(290.0);
         widgets::toggle_row(
             ui,
+            "Strict hotkey modifiers",
+            "On: a hotkey works only when exactly its modifier keys are held (Ctrl+F6 never triggers F6).\n\
+             Off: extra held modifiers are ignored, so F6 still works while you hold Shift in a game.",
+            &mut options.strict_modifiers,
+        );
+        widgets::toggle_row(
+            ui,
+            "Stop on task switch",
+            "Stop the auto clicker and every macro when you press Alt+Tab or Win+Tab.",
+            &mut options.stop_on_task_switch,
+        );
+        widgets::toggle_row(
+            ui,
             "Stop the auto clicker when editing a hotkey",
             "Clicking into a hotkey field stops the auto clicker, so you can press the new hotkey.",
             &mut options.stop_when_editing_hotkey,
@@ -138,6 +138,14 @@ pub fn menu(
         notify_on_finish,
     );
     ui.separator();
+    if ui
+        .button(format!("{}  Downloads…", icon::DOWNLOAD_SIMPLE))
+        .on_hover_text("Install or remove optional parts: ONNX Runtime, graphics card support, Python, PyTorch")
+        .clicked()
+    {
+        events.push(OptionsEvent::OpenDownloads);
+        ui.close();
+    }
     if ui.button(format!("{}  Create desktop shortcut", icon::DESKTOP)).clicked() {
         events.push(OptionsEvent::CreateShortcut);
         ui.close();

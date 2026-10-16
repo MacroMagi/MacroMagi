@@ -4,7 +4,53 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
-## 0.1.1 – Unreleased
+## 0.1.2 – Unreleased
+
+### Added
+
+- **Magic tab**, beside Auto Clicker and Macro, for small vision AI models that macros use.
+  - **Import** an ONNX model, or a project folder or ZIP that contains one. The importer reads the project's files – it never runs them – for the class names, which classes call for action, the colour normalisation, the screen area, the key and the adjustable settings, and lists what it found and what it guessed.
+  - **Configure** the name and description; the screen area (a square in the middle of a display that scales with it, or a fixed area picked on screen); each answer's name, whether it acts, how sure the model must be and how long to wait; the key, how long it is held and the cooldown; adjustable settings that move several values at once; how pictures are prepared; and the pictures to keep for training and fine-tuning.
+  - **Try it**: watch the screen live and see what the model sees and how sure it is of each answer, with or without pressing the key, or try it on a picture file.
+  - **Save** `.magic` files: the model, its setup, ready-made blocks and its pictures, each optional.
+  - **Use in Macro** adds the model to the open macro with blocks that run it. Using it again updates the model and the blocks that use it.
+- **Models made for the DBD Auto Skill Check project** run as they do there: importing its repository or its packaged app (folder or ZIP) finds its ten answers, the five that act, the 51% confidence, the 5 ms frontier delay and its screen area, with sliders for the three settings it offers.
+- **AI blocks**: **AI Watch** keeps looking and presses the model's key when it should (or only watches), for a time or until stopped, as often as allowed; **AI Model** looks once and gives the answer, how sure the model is, and whether to act. Each block can change the model's adjustable settings for itself, load a `.magic` file, or open its model in the Magic tab.
+- **Settings → AI**: run models **automatically** (each way is measured on the model and the fastest kept; the CPU when a graphics card is not faster), on the **CPU**, or on a chosen **graphics card**.
+- **Downloads** on the AI settings page (also *Options → Downloads…*): ONNX Runtime (faster on the CPU), ONNX Runtime for graphics cards (DirectX 12, Windows), Python and PyTorch, each with its size, Install and Remove. Copies already on the computer are detected.
+- **Python**: the Windows package now comes with Python. *Settings → Engine* lists every Python found, with its version, in a drop-down, and offers *Download Python* when there is none.
+- **Image Detection** looks for several images in one block, in order of priority. Images can be put in groups; an image or a group can have its own search area, otherwise the block's is used. *Found when* any or every image is there; **Detail** (Full, Half, A third, A quarter) trades accuracy for speed. New outputs: *Which image*, *Its group*, *How many*. The block shows up to four of its images, and Find (Ctrl+F) finds blocks by the names of their images and groups.
+- **Sound Recognition** listens for several sounds in one block, in groups that can have their own accuracy; *Found when* any or every sound has been heard; *Recognise from the first* recognises long sounds while they are still playing. New outputs: *Which sound*, *Its group*, *How many*.
+- **Microphone choice** for Sound Detection and Sound Recognition; the system's default when none is chosen.
+- **Clear** button in the console.
+- Variables can keep their value from one run to the next: *Reset at the start of each run* in the Variables panel. New variables keep their value and start empty; a kept value can be emptied from the panel.
+- Blocks that need the Python engine show a warning sign when it is not available; it explains why and opens *Settings → Engine*. The native engine skips them, with a warning in the console, instead of stopping.
+- A `.magic` file opened with MacroMagi, or named on the command line, opens in the Magic tab.
+
+### Changed
+
+- The screen picker's display bar can be dragged, opens under the pointer, and stays inside the display.
+- *Strict hotkey modifiers* and *Stop on task switch* are under *Behaviours* in the Options menu.
+- The Log block's message is empty by default, so it logs the value wired into it.
+- The banner logo takes the theme colour, like the buttons.
+- Sound recognition is cheaper on long sounds: what has been heard is analysed once, not on every look.
+
+### Fixed
+
+- The Presets menu became very wide once it held a preset.
+
+### File format
+
+All additions are optional; files from 0.1.0 and 0.1.1 load unchanged. New `.magic` format for AI models. In `.magi` files: `model` assets; Image Detection has `images`, `groups`, `mode` and `detail` (the single `image` of older files is still read); Sound Recognition has `sounds`, `groups`, `mode` and `match_ms` (likewise for `sound`); sound blocks have `device`; variables have `reset` (`true` when missing). Presets may embed models. See [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
+
+### Known limitations
+
+- Training and fine-tuning are not in the Magic tab yet. Pictures can already be collected into `.magic` files by class, and PyTorch can be downloaded for it.
+- Graphics cards are used on Windows only; elsewhere models run on the CPU.
+- Image Detection runs on the CPU, where its search is fastest.
+- A model keeps the licence of the project it came from; the Magic tab shows the licence an import found. Models imported from DBD Auto Skill Check are GPL-3.0, so `.magic` files and macros that contain one carry those terms when shared.
+
+## 0.1.1
 
 ### Added
 

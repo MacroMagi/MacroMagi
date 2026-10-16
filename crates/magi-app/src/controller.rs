@@ -355,6 +355,19 @@ impl Controller {
         self.inner.stop_node(node);
     }
 
+    /// The machine, for things outside macros that look at the screen or
+    /// press keys (the Magic tab's live test). Dry-run aware.
+    pub fn machine(&self, dry_run: bool) -> Arc<dyn Host> {
+        self.inner.host(dry_run, &self.inner.monitor)
+    }
+
+    /// Empties a variable of the macro, as if it had never been set.
+    pub fn clear_variable(&self, name: &str) {
+        if let Some((_, session)) = &self.inner.state().session {
+            session.variables().set(name, serde_json::Value::Null);
+        }
+    }
+
     pub fn stop_macro(&self) {
         self.inner.stop_macro();
     }
@@ -490,7 +503,8 @@ impl State {
                 let clicker = &self.config.clicker;
                 bindings.push((clicker.hotkey.clone(), Binding::Clicker(clicker.activation)));
             }
-            Tab::Macro => {
+            // The Magic tab feeds macros, so their hotkeys stay on.
+            Tab::Macro | Tab::Magic => {
                 bindings.push((self.config.run_hotkey.clone(), Binding::RunMacro));
                 if let Some(published) = &self.published {
                     bindings.extend(
@@ -682,6 +696,10 @@ impl Inner {
 
         let mut state = self.state();
         state.warned_no_python |= warned_now;
+        // Variables that keep their value keep it through edits of the macro too.
+        if let Some((_, previous)) = &state.session {
+            session.variables().carry_over(&previous.variables().snapshot());
+        }
         self.launch(&session, node);
         // Replacing the previous session stops whatever an older revision was still running.
         state.session = Some((published.revision, session));

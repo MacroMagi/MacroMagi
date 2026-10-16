@@ -25,7 +25,7 @@ MacroMagi is source available under the [MacroMagi Terms](TERMS.md). By contribu
 ## Getting set up
 
 1. Install [Rust](https://rustup.rs). The repository pins its toolchain in `rust-toolchain.toml`; `rustup` fetches the right version, with `rustfmt` and `clippy`, the first time you build.
-2. Optional: install Python 3.8 or newer. It is needed only for the Python engine and the tests that exercise it; those tests skip themselves without it.
+2. Optional: install Python 3.8 or newer (on Windows, *Settings → AI → Downloads* in the app can fetch one). It is needed only for the Python engine and the tests that exercise it; those tests skip themselves without it.
 3. On Linux, install the system packages listed in the [README](README.md#building-from-source).
 
 ```bash
@@ -73,7 +73,7 @@ echo '{"show_variables": true}' > "$MACROMAGI_DATA_DIR/settings.json"
 cargo run --release -p magi-app -- --screenshot docs/images/functions.png --tab macro --example 3 --size 1280x820 --select flow.delay
 ```
 
-`--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`). `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
+`--tab magic` opens the Magic tab, and a `.magic` file named on the command line opens in it. `--settings <page>` opens the settings window on a page (`general`, `appearance`, `hotkeys`, `recording`, `engine`, `ai`). `--targets` opens *View → Screen targets* at start; it covers the screen, so it is for checking the overlay by hand rather than for `--screenshot`.
 
 ## Where things live
 
@@ -81,9 +81,10 @@ cargo run --release -p magi-app -- --screenshot docs/images/functions.png --tab 
 crates/magi-core/      data model, block definitions, file formats    (no OS, no UI)
 crates/magi-vision/    image matching, colour search                  (pure functions on pixels)
 crates/magi-audio/     loudness, pitch, sound recognition, sound files (pure functions on samples)
+crates/magi-ml/        preparing pictures for AI models, running them  (CPU or graphics card)
 crates/magi-platform/  input, listening, gamepads, capture, sound     (the only OS code)
 crates/magi-engine/    native interpreter, Python bridge, device operations
-crates/magi-app/       the application: UI, controller, command line
+crates/magi-app/       the application: UI, controller, command line, the Magic tab, downloads
 runtime/python/        the Python engine (standard library only)
 docs/                  architecture, formats, guides
 tools/                 scripts that generate documentation
@@ -91,7 +92,7 @@ tools/                 scripts that generate documentation
 
 Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) before a change that crosses crates. The short version of its rules:
 
-- Dependencies point downwards: app → engine/platform → core.
+- Dependencies point downwards: app → engine/platform → core; the engine and the app also use the pure-computation crates (vision, audio, ml).
 - Only `magi-platform` talks to the operating system. Engines reach the machine through the `Host` trait.
 - Blocks are described by data in `magi-core`. Code that is not about one specific block must not mention one.
 - Both engines must behave the same. Behaviour that touches devices is written once, in `magi-engine/src/ops.rs`.
@@ -127,7 +128,8 @@ Tests sit next to the code they test (`#[cfg(test)] mod tests`), plus:
 
 - `crates/magi-engine/tests/engines.rs` – macros run end to end on both engines against a simulated machine. Any new block or change to execution belongs here.
 - the tests at the bottom of `crates/magi-app/src/ui/graph.rs` – the node editor driven headlessly with a simulated pointer and keyboard (dragging wires, moving and selecting blocks, shortcuts, zooming).
-- the tests at the bottom of `crates/magi-app/src/app.rs` – the whole app driven headlessly, with key presses fed to the controller exactly as the system listener would (assigning hotkeys and using them at once, opening the block list).
+- the tests at the bottom of `crates/magi-app/src/app.rs` – the whole app driven headlessly, with key presses fed to the controller exactly as the system listener would (assigning hotkeys and using them at once, opening the block list, taking a model from the Magic tab into a macro).
+- `real_projects_import` in `crates/magi-app/src/magic/import.rs` – ignored by default; imports the projects named in `MAGI_IMPORT` (separated by `;`) and prints what was found, to check the importer against real models: `MAGI_IMPORT=path/to/project cargo test -p magi-app real_projects_import -- --ignored --nocapture`. With `MAGI_IMPORT_OUT` set to a folder, each import is also saved there as a `.magic` file.
 - `crates/magi-platform/tests/system.rs` – ignored by default; checks against the real machine.
 
 Guidelines:
@@ -155,7 +157,7 @@ Security problems – for example a file that makes MacroMagi do something on op
 
 Releases are built and published by [`.github/workflows/release.yml`](.github/workflows/release.yml):
 
-1. Move the *Unreleased* entries in [CHANGELOG.md](CHANGELOG.md) under a new version heading, and set `version` in the workspace `Cargo.toml`.
+1. Move the *Unreleased* entries in [CHANGELOG.md](CHANGELOG.md) under a new version heading, and set the version in the workspace `Cargo.toml` and in `runtime/python/magi/__init__.py`.
 2. Tag the commit and push the tag:
 
    ```bash
@@ -164,4 +166,4 @@ Releases are built and published by [`.github/workflows/release.yml`](.github/wo
    ```
 
    or run the workflow from *Actions → Release → Run workflow* with the tag name.
-3. The workflow builds Windows, Linux and macOS (Apple silicon and Intel) packages. If – and only if – all of them build, it publishes a GitHub release with the packages and a `SHA256SUMS.txt`. A failed build publishes nothing; fix it and run the workflow again for the same tag.
+3. The workflow builds Windows, Linux and macOS (Apple silicon and Intel) packages. The Windows package also gets Python's embeddable distribution in a `python` folder; its version is `PYTHON_VERSION` in the workflow, kept the same as in `crates/magi-app/src/components.rs`. If – and only if – all of them build, it publishes a GitHub release with the packages and a `SHA256SUMS.txt`. A failed build publishes nothing; fix it and run the workflow again for the same tag.

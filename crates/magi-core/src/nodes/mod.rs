@@ -12,6 +12,7 @@
 //! To add a built-in node: describe it in one of the submodules here, then
 //! implement it in both engines. See `docs/ADDING_A_NODE.md`.
 
+pub mod ai;
 pub mod flow;
 pub mod input;
 pub mod logic;
@@ -64,6 +65,8 @@ pub mod ids {
     pub const COMMENT: &str = "note.comment";
     pub const SOUND_LEVEL: &str = "sound.level";
     pub const SOUND_MATCH: &str = "sound.match";
+    pub const AI_WATCH: &str = "ai.watch";
+    pub const AI_CLASSIFY: &str = "ai.classify";
 }
 
 /// Ids of ports that engines and the editor refer to by name.
@@ -95,6 +98,7 @@ pub enum Category {
     Input,
     Vision,
     Sound,
+    Ai,
     Window,
     Variables,
     Logic,
@@ -105,11 +109,12 @@ pub enum Category {
 }
 
 impl Category {
-    pub const ALL: [Category; 11] = [
+    pub const ALL: [Category; 12] = [
         Category::Flow,
         Category::Input,
         Category::Vision,
         Category::Sound,
+        Category::Ai,
         Category::Window,
         Category::Variables,
         Category::Logic,
@@ -125,6 +130,7 @@ impl Category {
             Category::Input => "Input",
             Category::Vision => "Vision",
             Category::Sound => "Sound",
+            Category::Ai => "AI",
             Category::Window => "Window",
             Category::Variables => "Variables",
             Category::Logic => "Logic",
@@ -286,6 +292,18 @@ pub enum ParamKind {
     Display,
     /// Id of a sound asset.
     Audio,
+    /// A list of images, each optionally in a named group with its own search
+    /// area ([`vision::ImageTarget`]). The groups are the node's `groups` setting.
+    Images,
+    /// A list of sounds, each optionally in a named group
+    /// ([`sound::SoundTarget`]). The groups are the node's `groups` setting.
+    Sounds,
+    /// The name of a sound input device; empty for the system's default.
+    AudioDevice,
+    /// Id of an AI model asset (a `.magic` file).
+    Model,
+    /// Values for the adjustable settings an AI model declares, by key.
+    ModelSettings,
 }
 
 impl ParamKind {
@@ -346,11 +364,32 @@ pub struct ParamDef {
     pub help: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_if: Option<ShowIf>,
+    /// Kept for files and scripts, but not shown in the settings panel.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl ParamDef {
     pub fn new(key: &str, label: &str, kind: ParamKind) -> Self {
-        Self { key: key.into(), label: label.into(), kind, default: Value::Null, help: String::new(), show_if: None }
+        Self {
+            key: key.into(),
+            label: label.into(),
+            kind,
+            default: Value::Null,
+            help: String::new(),
+            show_if: None,
+            hidden: false,
+        }
+    }
+
+    /// Keeps the setting out of the settings panel.
+    pub fn hidden(mut self) -> Self {
+        self.hidden = true;
+        self
     }
 
     pub fn help(mut self, text: &str) -> Self {
@@ -364,7 +403,52 @@ impl ParamDef {
     }
 
     pub fn is_visible(&self, params: &Map<String, Value>) -> bool {
-        self.show_if.as_ref().is_none_or(|rule| params.get(&rule.key) == Some(&rule.equals))
+        !self.hidden && self.show_if.as_ref().is_none_or(|rule| params.get(&rule.key) == Some(&rule.equals))
+    }
+}
+
+/// The asset ids a setting's value refers to.
+fn asset_ids_in(kind: &ParamKind, value: &Value) -> Vec<String> {
+    let listed = |field: &str| -> Vec<String> {
+        value
+            .as_array()
+            .map(|items| items.iter().filter_map(|item| item.get(field)?.as_str()).map(str::to_owned).collect())
+            .unwrap_or_default()
+    };
+    match kind {
+        ParamKind::Image | ParamKind::Recording | ParamKind::Audio | ParamKind::Model => {
+            value.as_str().filter(|id| !id.is_empty()).map(|id| vec![id.to_owned()]).unwrap_or_default()
+        }
+        ParamKind::Images => listed("image"),
+        ParamKind::Sounds => listed("sound"),
+        _ => Vec::new(),
+    }
+}
+
+/// Replaces asset ids inside a setting's value.
+fn rename_assets_in(kind: &ParamKind, value: &mut Value, rename: &dyn Fn(&str) -> Option<String>) {
+    let mut in_list = |field: &str| {
+        if let Some(items) = value.as_array_mut() {
+            for item in items {
+                if let Some(Value::String(id)) = item.get_mut(field)
+                    && let Some(new) = rename(id)
+                {
+                    *id = new;
+                }
+            }
+        }
+    };
+    match kind {
+        ParamKind::Image | ParamKind::Recording | ParamKind::Audio | ParamKind::Model => {
+            if let Value::String(id) = value
+                && let Some(new) = rename(id)
+            {
+                *id = new;
+            }
+        }
+        ParamKind::Images => in_list("image"),
+        ParamKind::Sounds => in_list("sound"),
+        _ => {}
     }
 }
 
@@ -499,6 +583,24 @@ impl NodeDef {
         self.params.iter().map(|p| (p.key.clone(), p.default.clone())).collect()
     }
 
+    /// Every asset (image, recording, sound, model) a node of this type refers to.
+    pub fn asset_ids(&self, node: &Node) -> Vec<String> {
+        self.params
+            .iter()
+            .filter_map(|param| Some(asset_ids_in(&param.kind, node.params.get(&param.key)?)))
+            .flatten()
+            .collect()
+    }
+
+    /// Points a node at other assets: `rename` gives the new id for an old one.
+    pub fn rename_assets(&self, node: &mut Node, rename: &dyn Fn(&str) -> Option<String>) {
+        for param in &self.params {
+            if let Some(value) = node.params.get_mut(&param.key) {
+                rename_assets_in(&param.kind, value, rename);
+            }
+        }
+    }
+
     /// Resolves the ports of a concrete node, including parameter-driven ones.
     pub fn ports(&self, node: &Node) -> NodePorts {
         let flow = |def: &PortDef| Port { id: def.id.clone(), label: def.label.clone(), kind: PortKind::Flow };
@@ -542,6 +644,7 @@ impl Registry {
         input::register(&mut registry);
         vision::register(&mut registry);
         sound::register(&mut registry);
+        ai::register(&mut registry);
         logic::register(&mut registry);
         script::register(&mut registry);
         window::register(&mut registry);

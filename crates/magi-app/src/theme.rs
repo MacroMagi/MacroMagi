@@ -65,7 +65,7 @@ pub struct Palette {
     pub warning: Color32,
     pub flow: Color32,
     /// One per [`Category`], in [`Category::ALL`] order.
-    categories: [Color32; 11],
+    categories: [Color32; 12],
     data: [Color32; 5],
 }
 
@@ -161,6 +161,7 @@ impl Palette {
                     gray(0xBC),
                     gray(0xA4),
                     gray(0x9C),
+                    gray(0xF0),
                     gray(0xE4),
                     gray(0xC4),
                     gray(0x94),
@@ -200,6 +201,7 @@ impl Palette {
                     gray(0x48),
                     gray(0x60),
                     gray(0x5A),
+                    gray(0x10),
                     gray(0x1E),
                     gray(0x40),
                     gray(0x72),
@@ -222,12 +224,13 @@ impl Palette {
             palette.accent_bright =
                 if dark { mix(accent, Color32::WHITE, 0.3) } else { mix(accent, Color32::BLACK, 0.25) };
             palette.on_accent = if luminance(accent) > 0.55 { gray(0x0B) } else { Color32::WHITE };
-            // Flow, Input, Vision, Sound, Window, Variables, Logic, System, Script, Notes, Add-ons.
+            // Flow, Input, Vision, Sound, AI, Window, Variables, Logic, System, Script, Notes, Add-ons.
             palette.categories = [
                 around(0.0),
                 around(0.58),
                 around(0.42),
                 around(0.32),
+                around(0.66),
                 around(0.72),
                 around(0.19),
                 around(0.11),

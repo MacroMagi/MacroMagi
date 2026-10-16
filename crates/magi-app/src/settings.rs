@@ -21,6 +21,7 @@ pub enum Tab {
     #[default]
     AutoClicker,
     Macro,
+    Magic,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,15 +33,17 @@ pub enum SettingsPage {
     Hotkeys,
     Recording,
     Engine,
+    Ai,
 }
 
 impl SettingsPage {
-    pub const ALL: [SettingsPage; 5] = [
+    pub const ALL: [SettingsPage; 6] = [
         SettingsPage::General,
         SettingsPage::Appearance,
         SettingsPage::Hotkeys,
         SettingsPage::Recording,
         SettingsPage::Engine,
+        SettingsPage::Ai,
     ];
 
     pub fn label(self) -> &'static str {
@@ -50,6 +53,7 @@ impl SettingsPage {
             SettingsPage::Hotkeys => "Hotkeys",
             SettingsPage::Recording => "Recording",
             SettingsPage::Engine => "Engine",
+            SettingsPage::Ai => "AI",
         }
     }
 }
@@ -154,6 +158,8 @@ pub struct Settings {
     pub recording_window_size: Option<[f32; 2]>,
     /// Size of the Variable Rate Editor.
     pub rate_window_size: Option<[f32; 2]>,
+    /// Where AI models run.
+    pub ai_device: magi_ml::Device,
     pub recent_files: Vec<PathBuf>,
 }
 
@@ -187,6 +193,7 @@ impl Default for Settings {
             palette_size: [280.0, 420.0],
             recording_window_size: None,
             rate_window_size: None,
+            ai_device: magi_ml::Device::Auto,
             recent_files: Vec::new(),
         }
     }

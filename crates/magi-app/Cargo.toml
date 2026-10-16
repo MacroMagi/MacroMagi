@@ -16,6 +16,8 @@ path = "src/main.rs"
 magi-core.workspace = true
 magi-vision.workspace = true
 magi-audio.workspace = true
+magi-ml.workspace = true
+zip.workspace = true
 magi-platform.workspace = true
 magi-engine.workspace = true
 eframe.workspace = true
@@ -27,6 +29,11 @@ ureq.workspace = true
 image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# Unpacking ONNX Runtime downloads (.tgz) on Linux and macOS.
+[target.'cfg(not(windows))'.dependencies]
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(windows)'.build-dependencies]
 # Embeds the icon and version information in the Windows executable.

@@ -77,7 +77,7 @@ Writes a line to the console. Handy for checking which path a macro took.
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Message | text | Reached this step |  |
+| Message | text | empty |  |
 
 ### Rate
 
@@ -225,14 +225,16 @@ Looks for a colour on screen. “Found” is true when at least one pixel in the
 
 Looks for an image on screen. “Found” is true when a match at least as similar as the accuracy setting exists; “Position” is the centre of the best match. Wire “Found” into a Decision or Wait Until, and “Position” into an Input to click it.
 
-- Value outputs: **Found** (true/false), **Position** (screen position), **Similarity** (number)
+- Value outputs: **Found** (true/false), **Position** (screen position), **Similarity** (number), **Which image** (text), **Its group** (text), **How many** (number)
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Image | image | none |  |
-| Search area | screen area | whole screen | A smaller area is faster and avoids false matches elsewhere on screen. |
+| Images | list of images | none yet | Several images can be looked for at once, in order of priority: the first one found is the one reported. Put images in a group to give them a search area of their own. |
+| Found when | choice | Any image is there | Options: Any image is there; Every image is there. |
+| Search area | screen area | whole screen | For every image without an area of its own or of its group. A smaller area is faster and avoids false matches elsewhere on screen. |
 | Display | display | 1 (primary) | The display searched when there is no search area. |
 | Accuracy | percentage | 80% | How closely the screen must match the image. 100% demands a pixel-perfect match. |
+| Detail | choice | Full | Shrinks the screen and the images before comparing them. Less detail is much faster but can miss small or fine images. Options: Full – most accurate; Half – about 4× faster; A third – about 9× faster; A quarter – fastest. |
 
 ## Sound
 
@@ -249,6 +251,7 @@ Listens for sound that is loud enough – and, optionally, within a pitch range.
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Listen to | choice | What the computer plays | Options: What the computer plays; Microphone. |
+| Microphone | microphone | the default | Which microphone to listen to; the system's default when none is chosen. |
 | Loud enough at | number | -30 dB | 0 dB is the loudest sound possible. Normal sound is around -30 dB, quiet sound -60 dB. |
 | Only within a pitch range | on/off | off |  |
 | Lowest pitch | number | 200 Hz |  |
@@ -259,15 +262,55 @@ Listens for sound that is loud enough – and, optionally, within a pitch range.
 
 `sound.match`
 
-Listens for a particular sound – a notification, an alarm, a voice line – that you upload as a sound file. “Found” is true once it is heard at least as closely as the accuracy setting, however loud it is played. Each time the sound is heard counts once.
+Listens for particular sounds – a notification, an alarm, a voice line – that you upload as sound files. “Found” is true once one is heard at least as closely as the accuracy setting, however loud it is played; “Which sound” says which one was recognised last. Each time a sound is heard counts once.
 
-- Value outputs: **Found** (true/false), **Similarity** (number)
+- Value outputs: **Found** (true/false), **Similarity** (number), **Which sound** (text), **Its group** (text), **How many** (number)
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Listen to | choice | What the computer plays | Options: What the computer plays; Microphone. |
-| Sound | sound | none | A WAV, MP3, OGG or FLAC file. Short and distinctive works best; the first 10 seconds are used. |
+| Microphone | microphone | the default | Which microphone to listen to; the system's default when none is chosen. |
+| Sounds | list of sounds | none yet | WAV, MP3, OGG or FLAC files; the first 10 seconds of each are used. Short and distinctive works best. Put sounds in a group to give them an accuracy of their own. |
+| Found when | choice | Any sound is heard | Options: Any sound is heard; Every sound has been heard. |
 | Accuracy | percentage | 75% | How closely what is heard must match. Lower it if the sound is missed, raise it if other sounds set it off. |
+| Recognise from the first | duration | 0 ms | 0 waits for the whole sound. A second or two is enough for most sounds, and long sounds are then recognised while they are still playing. |
+
+## AI
+
+Small vision models prepared in the Magic tab, run on what is on screen.
+
+### AI Model
+
+`ai.classify`
+
+Shows part of the screen to an AI model once and gives its answer: the likeliest class, how sure the model is, and whether the model's setup says to act on it.
+
+- Value outputs: **Act** (true/false), **Answer** (text), **Class number** (number), **Confidence** (number), **Delay (ms)** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Model | AI model | none | A model prepared in the Magic tab. Use “Use in Macro” there, or load a .magic file. |
+| Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
+| Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
+
+### AI Watch
+
+`ai.watch`
+
+Keeps showing part of the screen to an AI model and does what the model is set up to do – for example press a key the moment it sees the right thing. Runs until the macro stops, or for as long as set.
+
+- Flow in: yes
+- Flow out: yes
+- Value outputs: **Times acted** (number), **Last answer** (text)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Model | AI model | none | A model prepared in the Magic tab. Use “Use in Macro” there, or load a .magic file. |
+| Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
+| Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
+| Press the model's key | on/off | on | Off: the model only watches – try it safely, and wire “Times acted” or “Last answer” into other blocks. |
+| Stop after | duration | 0 ms | 0 keeps watching until the macro is stopped. |
+| Looks per second | number | 0 | 0 looks as often as the computer can. A limit saves power. |
 
 ## Window
 
@@ -307,8 +350,8 @@ Counts passes: adds the step to a variable each time it runs. When a limit is se
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Variable | variable | none |  |
-| Step | number | 1.0 |  |
-| Limit | number | 0.0 | Zero: count for ever, never take “Reached”. |
+| Step | number | 1 |  |
+| Limit | number | 0 | Zero: count for ever, never take “Reached”. |
 
 ### Variable
 
@@ -393,8 +436,8 @@ Calculates with numbers: add, subtract, multiply, divide, round, random… A and
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Operation | choice | A + B | Options: A + B; A − B; A × B; A ÷ B; Remainder of A ÷ B; A to the power of B; The smaller of A, B; The larger of A, B; A rounded; A rounded down; A rounded up; A without its sign; Random number from A to B. |
-| A | number | 0.0 |  |
-| B | number | 0.0 |  |
+| A | number | 0 |  |
+| B | number | 0 |  |
 
 ### Text
 
@@ -476,7 +519,7 @@ A note on the canvas. It does nothing when the macro runs. Resize it by its corn
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
 | Text | text | A note about this part of the macro. |  |
-| Width | number | 240.0 |  |
-| Height | number | 120.0 |  |
+| Width | number | 240 |  |
+| Height | number | 120 |  |
 | Folded | on/off | off |  |
 | Colour | text | empty | #RRGGBB, or empty |

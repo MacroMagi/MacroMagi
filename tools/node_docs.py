@@ -18,6 +18,7 @@ CATEGORIES = [
      "order of execution and are evaluated whenever another block reads them."),
     ("sound", "Sound", "Listening to what the computer plays, or to the microphone. Value blocks, like "
      "the vision blocks."),
+    ("ai", "AI", "Small vision models prepared in the Magic tab, run on what is on screen."),
     ("window", "Window", "Working with program windows."),
     ("variables", "Variables", "Named values a macro reads and changes while it runs. Any setting of any "
      "block can also follow a variable (the link button next to it)."),
@@ -37,7 +38,8 @@ KIND_NAMES = {
     "region": "screen area", "color": "colour", "image": "image", "recording": "recording",
     "actions": "list of inputs", "cases": "list of cases", "clicker": "Auto Clicker settings",
     "variable": "variable", "definition": "definition", "block": "block", "display": "display",
-    "audio": "sound",
+    "audio": "sound", "images": "list of images", "sounds": "list of sounds",
+    "audio_device": "microphone", "model": "AI model", "model_settings": "model settings",
 }
 
 
@@ -54,8 +56,14 @@ def default_text(param):
         return "on" if value else "off"
     if kind == "region":
         return "whole screen"
-    if kind in ("point", "image", "recording", "audio", "block"):
+    if kind in ("point", "image", "recording", "audio", "block", "model"):
         return "none"
+    if kind in ("images", "sounds"):
+        return "none yet"
+    if kind == "audio_device":
+        return "the default"
+    if kind == "model_settings":
+        return "the model's own"
     if kind in ("variable", "definition"):
         return value or "none"
     if kind == "display":
@@ -74,6 +82,8 @@ def default_text(param):
         return "a commented starter script"
     if kind in ("int", "float") and param.get("unit"):
         return "%g %s" % (value, param["unit"])
+    if kind in ("int", "float"):
+        return "%g" % value
     return str(value)
 
 
@@ -132,7 +142,8 @@ def main():
             ) if line]
             out.write("\n".join(lines) + "\n")
 
-            params = definition.get("params", [])
+            # Hidden settings are kept for old files, not offered.
+            params = [param for param in definition.get("params", []) if not param.get("hidden")]
             if params:
                 out.write("\n| Setting | Kind | Default | Notes |\n| --- | --- | --- | --- |\n")
                 for param in params:

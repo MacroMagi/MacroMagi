@@ -463,17 +463,10 @@ impl Graph {
 
     /// Ids of every asset referenced by a node parameter.
     pub fn referenced_assets(&self, registry: &Registry) -> BTreeSet<String> {
-        use crate::nodes::ParamKind;
         let mut out = BTreeSet::new();
         for node in self.nodes() {
-            let Some(def) = registry.get(&node.kind) else { continue };
-            for param in &def.params {
-                if matches!(param.kind, ParamKind::Image | ParamKind::Recording | ParamKind::Audio)
-                    && let Some(Value::String(id)) = node.params.get(&param.key)
-                    && !id.is_empty()
-                {
-                    out.insert(id.clone());
-                }
+            if let Some(def) = registry.get(&node.kind) {
+                out.extend(def.asset_ids(node));
             }
         }
         out

@@ -1,0 +1,26 @@
+[package]
+name = "magi-ml"
+description = "MacroMagi AI models: running small vision models on screen pictures, on the CPU or a graphics card."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+magi-core.workspace = true
+serde.workspace = true
+# Built-in CPU inference for ONNX models. Pure Rust, nothing to install.
+tract-onnx = { version = "0.23", default-features = false }
+# ONNX Runtime, loaded at run time when downloaded: faster on the CPU, and
+# runs on graphics cards (DirectML on Windows, CoreML on macOS).
+ort = { version = "=2.0.0-rc.14", default-features = false, features = ["std", "load-dynamic", "api-20", "directml", "coreml"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+# Builds a tiny ONNX model for the tests.
+prost = "0.14"
+
+[lints]
+workspace = true

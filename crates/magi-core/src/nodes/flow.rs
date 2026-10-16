@@ -203,16 +203,10 @@ pub struct CallParams {
     pub definition: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LogParams {
     pub message: String,
-}
-
-impl Default for LogParams {
-    fn default() -> Self {
-        Self { message: "Reached this step".into() }
-    }
 }
 
 pub(super) fn register(registry: &mut Registry) {
@@ -403,7 +397,10 @@ pub(super) fn register(registry: &mut Registry) {
         .flow_out(ports::OUT, "")
         .param(ParamDef::new("message", "Message", ParamKind::Text { multiline: false }))
         .defaults(&LogParams::default())
-        .summarize(|node, _| vec![format!("“{}”", node.params_or_default::<LogParams>().message)]),
+        .summarize(|node, _| {
+            let message = node.params_or_default::<LogParams>().message;
+            vec![if message.is_empty() { "Logs the value wired in".into() } else { format!("“{message}”") }]
+        }),
     );
 }
 

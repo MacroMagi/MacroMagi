@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use egui::{ColorImage, Context, TextureHandle, TextureOptions};
+use egui::{Color32, ColorImage, Context, TextureHandle, TextureOptions};
 
 const PNG_256: &[u8] = include_bytes!("../../../assets/icon/magi-256.png");
 const PNG_128: &[u8] = include_bytes!("../../../assets/icon/magi-128.png");
@@ -21,19 +21,30 @@ pub fn window_icon() -> egui::IconData {
     egui::IconData { rgba: image.into_raw(), width, height }
 }
 
-/// The logo for the banner. The drawing is black with white details; in
-/// dark mode it is inverted so it stands out against the dark background.
-pub fn logo(ctx: &Context, dark: bool) -> TextureHandle {
-    let mut image = decode(PNG_128);
-    if dark {
-        for pixel in image.pixels_mut() {
-            let [r, g, b, a] = pixel.0;
-            pixel.0 = [255 - r, 255 - g, 255 - b, a];
-        }
-    }
+/// The logo for the banner, in `color`: the theme colour the buttons use. The
+/// drawing is dark with white details; the drawing takes the colour and the
+/// details are cut out, so whatever is behind the banner shows through them.
+pub fn logo(ctx: &Context, color: Color32) -> TextureHandle {
+    let image = tint(decode(PNG_128), color);
     let size = [image.width() as usize, image.height() as usize];
-    let color = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-    ctx.load_texture(if dark { "logo-dark" } else { "logo-light" }, color, TextureOptions::LINEAR)
+    let picture = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    let [r, g, b, _] = color.to_array();
+    ctx.load_texture(format!("logo-{r:02x}{g:02x}{b:02x}"), picture, TextureOptions::LINEAR)
+}
+
+/// Recolours the drawing by brightness: its dark ink becomes `color` and its
+/// white parts become see-through, with the soft edges in between kept soft.
+fn tint(mut image: image::RgbaImage, color: Color32) -> image::RgbaImage {
+    // The drawing's ink, #18181b.
+    const INK: f32 = 0x18 as f32 / 255.0;
+    let [r, g, b, _] = color.to_array();
+    for pixel in image.pixels_mut() {
+        let [pr, pg, pb, a] = pixel.0;
+        let brightness = (0.2126 * f32::from(pr) + 0.7152 * f32::from(pg) + 0.0722 * f32::from(pb)) / 255.0;
+        let white = ((brightness - INK) / (1.0 - INK)).clamp(0.0, 1.0);
+        pixel.0 = [r, g, b, (f32::from(a) * (1.0 - white)).round() as u8];
+    }
+    image
 }
 
 /// Writes the icon files a desktop shortcut points at into `dir`.
@@ -56,5 +67,21 @@ mod tests {
         assert_eq!((icon.width, icon.height), (256, 256));
         assert_eq!(decode(PNG_128).dimensions(), (128, 128));
         assert_eq!(&ICO[..4], &[0, 0, 1, 0], "an ICO header");
+    }
+
+    #[test]
+    fn the_logo_takes_the_theme_colour_and_cuts_out_the_white() {
+        let mut image = image::RgbaImage::new(3, 1);
+        image.put_pixel(0, 0, image::Rgba([0x18, 0x18, 0x1b, 255]));
+        image.put_pixel(1, 0, image::Rgba([255, 255, 255, 255]));
+        image.put_pixel(2, 0, image::Rgba([0x18, 0x18, 0x1b, 0]));
+        let purple = Color32::from_rgb(140, 80, 220);
+        let tinted = tint(image, purple);
+        assert_eq!(tinted.get_pixel(0, 0).0, [140, 80, 220, 255], "the ink takes the colour");
+        assert_eq!(tinted.get_pixel(1, 0).0[3], 0, "the white is cut out");
+        assert_eq!(tinted.get_pixel(2, 0).0[3], 0, "the transparent stays transparent");
+        // The real logo has both.
+        let logo = tint(decode(PNG_128), purple);
+        assert!(logo.pixels().any(|p| p.0[3] == 255) && logo.pixels().any(|p| p.0[3] == 0));
     }
 }

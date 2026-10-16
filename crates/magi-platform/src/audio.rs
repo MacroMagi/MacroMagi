@@ -1,6 +1,6 @@
 //! Listening to sound, for the Sound Detection and Sound Recognition blocks.
 //!
-//! A source – what the computer is playing, or the microphone – is only
+//! A source – what the computer is playing, or a microphone – is only
 //! opened while a macro is listening. A thread owns the audio stream (they
 //! cannot move between threads on every system) and keeps the last few
 //! seconds in a ring buffer; when nobody has asked for sound for a while, it
@@ -10,7 +10,7 @@
 //! offers for every output device. Elsewhere it needs a monitor or loopback
 //! device to be set up; without one, an error explains that.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -27,26 +27,31 @@ const IDLE: Duration = Duration::from_secs(15);
 struct Buffer {
     sample_rate: u32,
     samples: VecDeque<f32>,
+    /// Every sample received since the source was opened.
+    total: u64,
     /// Why the source could not be opened, if it could not.
     error: Option<String>,
     last_request: Option<Instant>,
     running: bool,
 }
 
-/// One source being listened to.
-#[derive(Default)]
-struct Source {
-    buffer: Arc<Mutex<Buffer>>,
-}
-
 fn lock(buffer: &Mutex<Buffer>) -> MutexGuard<'_, Buffer> {
     buffer.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// The microphones and other sound inputs, by name.
+pub fn input_devices() -> Vec<String> {
+    let host = cpal::default_host();
+    host.input_devices().map(|devices| devices.filter_map(|device| device.name().ok()).collect()).unwrap_or_default()
+}
+
+/// A sound source to listen to: its kind and device name (empty: the default).
+type SourceKey = (SoundSource, String);
+
 #[derive(Default)]
 pub struct Listener {
-    output: Source,
-    input: Source,
+    /// The sources opened so far.
+    sources: Mutex<HashMap<SourceKey, Arc<Mutex<Buffer>>>>,
 }
 
 impl Listener {
@@ -54,14 +59,15 @@ impl Listener {
         Self::default()
     }
 
-    /// The last `ms` milliseconds from `source`, opening it if needed.
-    pub fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
-        let src = match source {
-            SoundSource::Output => &self.output,
-            SoundSource::Input => &self.input,
-        };
+    /// The last `ms` milliseconds from `source` (`device` names a particular
+    /// microphone), opening it if needed.
+    pub fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError> {
+        let device = if source == SoundSource::Input { device.trim().to_owned() } else { String::new() };
+        let buffer = Arc::clone(
+            self.sources.lock().unwrap_or_else(|p| p.into_inner()).entry((source, device.clone())).or_default(),
+        );
         let start = {
-            let mut buffer = lock(&src.buffer);
+            let mut buffer = lock(&buffer);
             buffer.last_request = Some(Instant::now());
             if let Some(error) = buffer.error.take() {
                 return Err(HostError::new(error));
@@ -71,27 +77,31 @@ impl Listener {
             start
         };
         if start {
-            let buffer = Arc::clone(&src.buffer);
+            let for_thread = Arc::clone(&buffer);
             std::thread::Builder::new()
                 .name("magi-audio".into())
-                .spawn(move || capture(source, &buffer))
+                .spawn(move || capture(source, &device, &for_thread))
                 .map_err(|e| HostError::new(format!("could not start listening: {e}")))?;
             // Give the stream a moment, so the first answer is not empty.
             std::thread::sleep(Duration::from_millis(ms.clamp(50.0, 300.0) as u64));
         }
-        let buffer = lock(&src.buffer);
+        let buffer = lock(&buffer);
         if let Some(error) = &buffer.error {
             return Err(HostError::new(error.clone()));
         }
         let wanted = ((ms / 1000.0) * f64::from(buffer.sample_rate)) as usize;
         let skip = buffer.samples.len().saturating_sub(wanted);
-        Ok(SoundClip { sample_rate: buffer.sample_rate, samples: buffer.samples.iter().skip(skip).copied().collect() })
+        Ok(SoundClip {
+            sample_rate: buffer.sample_rate,
+            samples: buffer.samples.iter().skip(skip).copied().collect(),
+            end: buffer.total,
+        })
     }
 }
 
 /// Runs on its own thread: opens the stream and keeps it open while wanted.
-fn capture(source: SoundSource, buffer: &Arc<Mutex<Buffer>>) {
-    let result = open(source, buffer);
+fn capture(source: SoundSource, device: &str, buffer: &Arc<Mutex<Buffer>>) {
+    let result = open(source, device, buffer);
     match result {
         Ok(stream) => {
             loop {
@@ -104,6 +114,7 @@ fn capture(source: SoundSource, buffer: &Arc<Mutex<Buffer>>) {
             drop(stream);
             let mut state = lock(buffer);
             state.samples = VecDeque::new();
+            state.total = 0;
             state.running = false;
         }
         Err(error) => {
@@ -114,7 +125,7 @@ fn capture(source: SoundSource, buffer: &Arc<Mutex<Buffer>>) {
     }
 }
 
-fn open(source: SoundSource, buffer: &Arc<Mutex<Buffer>>) -> Result<cpal::Stream, String> {
+fn open(source: SoundSource, name: &str, buffer: &Arc<Mutex<Buffer>>) -> Result<cpal::Stream, String> {
     let host = cpal::default_host();
     let (device, config) = match source {
         SoundSource::Output => {
@@ -123,7 +134,20 @@ fn open(source: SoundSource, buffer: &Arc<Mutex<Buffer>>) -> Result<cpal::Stream
             (device, config)
         }
         SoundSource::Input => {
-            let device = host.default_input_device().ok_or("there is no microphone")?;
+            let chosen = if name.is_empty() {
+                None
+            } else {
+                let mut devices = host.input_devices().map_err(|e| e.to_string())?;
+                Some(
+                    devices
+                        .find(|d| d.name().is_ok_and(|n| n == name))
+                        .ok_or_else(|| format!("the microphone “{name}” is not connected"))?,
+                )
+            };
+            let device = match chosen {
+                Some(device) => device,
+                None => host.default_input_device().ok_or("there is no microphone")?,
+            };
             let config = device.default_input_config().map_err(|e| e.to_string())?;
             (device, config)
         }
@@ -172,6 +196,7 @@ where
                 // Mono: the average of the channels.
                 let sum: f32 = frame.iter().map(|s| s.to_sample::<f32>()).sum();
                 state.samples.push_back(sum / frame.len() as f32);
+                state.total += 1;
             }
             let excess = state.samples.len().saturating_sub(capacity);
             state.samples.drain(..excess);

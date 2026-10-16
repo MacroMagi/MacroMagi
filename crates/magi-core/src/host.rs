@@ -110,7 +110,7 @@ pub struct Notification {
 }
 
 /// Where sound is listened to.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SoundSource {
     /// What the computer is playing (speakers or headphones).
@@ -125,6 +125,9 @@ pub enum SoundSource {
 pub struct SoundClip {
     pub sample_rate: u32,
     pub samples: Vec<f32>,
+    /// How many samples the source has produced in all, up to the last one
+    /// here. Lets a listener skip what it has already seen.
+    pub end: u64,
 }
 
 pub trait Host: Send + Sync {
@@ -168,8 +171,8 @@ pub trait Host: Send + Sync {
 
     /// The last `ms` milliseconds of sound from `source`. The first call may
     /// return less while listening starts.
-    fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
-        let _ = (source, ms);
+    fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError> {
+        let _ = (source, device, ms);
         Err(HostError::new("listening to sound is not available here"))
     }
 }
@@ -314,12 +317,16 @@ impl Host for SimHost {
         Ok(())
     }
 
-    fn listen(&self, _source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
+    fn listen(&self, _source: SoundSource, _device: &str, ms: f64) -> Result<SoundClip, HostError> {
         let state = self.lock();
         let clip = &state.sound;
         let wanted = ((ms / 1000.0) * f64::from(clip.sample_rate)) as usize;
         let start = clip.samples.len().saturating_sub(wanted);
-        Ok(SoundClip { sample_rate: clip.sample_rate, samples: clip.samples[start..].to_vec() })
+        Ok(SoundClip {
+            sample_rate: clip.sample_rate,
+            samples: clip.samples[start..].to_vec(),
+            end: clip.samples.len() as u64,
+        })
     }
 }
 

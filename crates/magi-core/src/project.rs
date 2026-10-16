@@ -137,7 +137,7 @@ impl Project {
             let kind = asset.kind();
             let file = format!("assets/{}.{}", asset.id, kind.extension());
             match &asset.data {
-                AssetData::Image(bytes) | AssetData::Audio(bytes) => {
+                AssetData::Image(bytes) | AssetData::Audio(bytes) | AssetData::Model(bytes) => {
                     zip.start_file(file.as_str(), stored)?;
                     zip.write_all(bytes)?;
                 }
@@ -203,6 +203,7 @@ impl Project {
                 AssetKind::Image => AssetData::Image(Arc::new(bytes)),
                 AssetKind::Recording => AssetData::Recording(Arc::new(serde_json::from_slice(&bytes)?)),
                 AssetKind::Audio => AssetData::Audio(Arc::new(bytes)),
+                AssetKind::Model => AssetData::Model(Arc::new(bytes)),
             };
             assets.insert(Asset { id: entry.id, name: entry.name, data });
         }

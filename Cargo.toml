@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.95"
 authors = ["MacroMagi contributors"]
@@ -17,6 +17,7 @@ publish = false
 magi-core = { path = "crates/magi-core" }
 magi-vision = { path = "crates/magi-vision" }
 magi-audio = { path = "crates/magi-audio" }
+magi-ml = { path = "crates/magi-ml" }
 magi-platform = { path = "crates/magi-platform" }
 magi-engine = { path = "crates/magi-engine" }
 

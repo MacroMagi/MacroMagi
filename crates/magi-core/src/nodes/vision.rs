@@ -6,22 +6,114 @@ use serde::{Deserialize, Serialize};
 use super::{Category, DataType, NodeDef, ParamDef, ParamKind, Registry, ids};
 use crate::geom::Rect;
 
+/// One of the images an Image Detection block looks for.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageTarget {
+    /// Id of the image asset.
+    pub image: String,
+    /// The group it belongs to (empty: none).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub group: String,
+    /// Its own search area, instead of its group's or the block's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<Rect>,
+}
+
+/// Images of one block that share a search area.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ImageGroup {
+    pub name: String,
+    /// The group's search area; `None` uses the block's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<Rect>,
+}
+
+/// When a block that looks for several things counts them as found.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindMode {
+    /// As soon as one of them is there.
+    #[default]
+    Any,
+    /// Only when every one of them is there.
+    All,
+}
+
+/// How much detail image matching uses. Less detail is faster.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Detail {
+    #[default]
+    Full,
+    Half,
+    Third,
+    Quarter,
+}
+
+impl Detail {
+    /// The screen and the images are shrunk by this factor before matching.
+    pub fn factor(self) -> u32 {
+        match self {
+            Detail::Full => 1,
+            Detail::Half => 2,
+            Detail::Third => 3,
+            Detail::Quarter => 4,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FindImageParams {
-    /// Id of the image asset to look for.
+    /// The images to look for, in order of priority.
+    pub images: Vec<ImageTarget>,
+    pub groups: Vec<ImageGroup>,
+    /// The one image of blocks made before a block could look for several.
     pub image: String,
     /// Where to look. `None` searches the whole of `display`.
     pub region: Option<Rect>,
     /// The display searched when there is no region (0 = primary).
     pub display: u8,
-    /// Minimum similarity, `0.0..=1.0`, for the image to count as found.
+    /// Minimum similarity, `0.0..=1.0`, for an image to count as found.
     pub threshold: f64,
+    pub mode: FindMode,
+    pub detail: Detail,
 }
 
 impl Default for FindImageParams {
     fn default() -> Self {
-        Self { image: String::new(), region: None, display: 0, threshold: 0.8 }
+        Self {
+            images: Vec::new(),
+            groups: Vec::new(),
+            image: String::new(),
+            region: None,
+            display: 0,
+            threshold: 0.8,
+            mode: FindMode::Any,
+            detail: Detail::Full,
+        }
+    }
+}
+
+impl FindImageParams {
+    /// Every image to look for, the one of an older block included.
+    pub fn targets(&self) -> Vec<ImageTarget> {
+        let mut targets = self.images.clone();
+        if !self.image.is_empty() && !targets.iter().any(|t| t.image == self.image) {
+            targets.insert(0, ImageTarget { image: self.image.clone(), ..ImageTarget::default() });
+        }
+        targets.retain(|t| !t.image.is_empty());
+        targets
+    }
+
+    /// Where an image is looked for: its own area, else its group's, else the block's.
+    pub fn region_of(&self, target: &ImageTarget) -> Option<Rect> {
+        target
+            .region
+            .or_else(|| self.groups.iter().find(|g| !target.group.is_empty() && g.name == target.group)?.region)
+            .or(self.region)
     }
 }
 
@@ -62,14 +154,26 @@ pub(super) fn register(registry: &mut Registry) {
              the accuracy setting exists; “Position” is the centre of the best match. Wire \
              “Found” into a Decision or Wait Until, and “Position” into an Input to click it.",
         )
-        .keywords(&["find", "see", "template", "match", "screenshot", "picture", "detect", "look"])
+        .keywords(&["find", "see", "template", "match", "screenshot", "picture", "detect", "look", "images", "group"])
         .data_out("found", "Found", DataType::Bool)
         .data_out("position", "Position", DataType::Point)
         .data_out("score", "Similarity", DataType::Number)
-        .param(ParamDef::new("image", "Image", ParamKind::Image))
+        .data_out("name", "Which image", DataType::Text)
+        .data_out("group", "Its group", DataType::Text)
+        .data_out("count", "How many", DataType::Number)
+        .param(
+            ParamDef::new("images", "Images", ParamKind::Images).help(
+                "Several images can be looked for at once, in order of priority: the first one found is the one \
+                 reported. Put images in a group to give them a search area of their own.",
+            ),
+        )
+        .param(ParamDef::new("image", "Image", ParamKind::Image).hidden())
+        .param(
+            ParamDef::new("mode", "Found when", ParamKind::choice(&[("any", "Any image is there"), ("all", "Every image is there")])),
+        )
         .param(
             ParamDef::new("region", "Search area", ParamKind::Region)
-                .help("A smaller area is faster and avoids false matches elsewhere on screen."),
+                .help("For every image without an area of its own or of its group. A smaller area is faster and avoids false matches elsewhere on screen."),
         )
         .param(
             ParamDef::new("display", "Display", ParamKind::Display)
@@ -79,14 +183,41 @@ pub(super) fn register(registry: &mut Registry) {
             ParamDef::new("threshold", "Accuracy", ParamKind::Percent)
                 .help("How closely the screen must match the image. 100% demands a pixel-perfect match."),
         )
+        .param(
+            ParamDef::new(
+                "detail",
+                "Detail",
+                ParamKind::choice(&[
+                    ("full", "Full – most accurate"),
+                    ("half", "Half – about 4× faster"),
+                    ("third", "A third – about 9× faster"),
+                    ("quarter", "A quarter – fastest"),
+                ]),
+            )
+            .help("Shrinks the screen and the images before comparing them. Less detail is much faster but can miss small or fine images."),
+        )
         .defaults(&FindImageParams::default())
         .summarize(|node, assets| {
             let p: FindImageParams = node.params_or_default();
-            let name = match assets.get(&p.image) {
-                Some(asset) => asset.name.clone(),
-                None => "No image selected".into(),
+            let targets = p.targets();
+            let headline = match targets.as_slice() {
+                [] => "No image selected".to_owned(),
+                [one] => assets.get(&one.image).map_or_else(|| "A missing image".to_owned(), |a| a.name.clone()),
+                many => {
+                    let groups = p.groups.iter().filter(|g| many.iter().any(|t| t.group == g.name)).count();
+                    match (p.mode, groups) {
+                        (FindMode::Any, 0) => format!("Any of {} images", many.len()),
+                        (FindMode::All, 0) => format!("All of {} images", many.len()),
+                        (FindMode::Any, g) => format!("Any of {} images in {g} groups", many.len()),
+                        (FindMode::All, g) => format!("All of {} images in {g} groups", many.len()),
+                    }
+                }
             };
-            vec![name, format!("Accuracy ≥ {:.0}%", p.threshold * 100.0), region_line(p.region, p.display)]
+            let mut lines = vec![headline, format!("Accuracy ≥ {:.0}%", p.threshold * 100.0), region_line(p.region, p.display)];
+            if p.detail != Detail::Full {
+                lines.push(format!("Detail 1/{}", p.detail.factor()));
+            }
+            lines
         }),
     );
 

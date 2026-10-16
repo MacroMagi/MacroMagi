@@ -2,17 +2,17 @@
 
 **An auto clicker when you want one click repeated, a visual macro editor when you want a bot.**
 
-MacroMagi is a small, portable desktop tool for automating keyboard, mouse and controller input. Use the one-screen **Auto Clicker**, or switch to the **Macro** tab and wire up blocks that click, type, wait, loop, switch windows, replay recordings, keep variables and react to what is on screen – or to what it hears.
+MacroMagi is a small, portable desktop tool for automating keyboard, mouse and controller input. Use the one-screen **Auto Clicker**, or switch to the **Macro** tab and wire up blocks that click, type, wait, loop, switch windows, replay recordings, keep variables and react to what is on screen – or to what it hears. The **Magic** tab prepares small AI models that recognise what is on screen, for macros to act on.
 
 <p>
-  <img src="docs/images/macro-editor.png" alt="The Macro tab: a node graph that watches for two buttons and reacts to each, with the settings of an Image Detection block open on the right" width="100%">
+  <img src="docs/images/macro-editor.png" alt="The Macro tab: a node graph that watches for two buttons and reacts to each, with the settings of an Image Detection block open on the right" width="500">
 </p>
 <p>
-  <img src="docs/images/auto-clicker.png" alt="The Auto Clicker tab" width="31%">
-  <img src="docs/images/recording.png" alt="A Play Recording block with its information card, and its timeline, Trim and Cut in the block settings" width="67%">
+  <img src="docs/images/auto-clicker.png" alt="The Auto Clicker tab" width="200">
+  <img src="docs/images/recording.png" alt="A Play Recording block with its information card, and its timeline, Trim and Cut in the block settings" width="500">
 </p>
 
-> **Status: early development (0.1.1, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
+> **Status: early development (0.1.2, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
 
 ## Contents
 
@@ -26,6 +26,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   - [Recording](#recording)
   - [Reacting to the screen](#reacting-to-the-screen)
   - [Reacting to sound](#reacting-to-sound)
+  - [Magic: AI models](#magic-ai-models)
   - [Several displays](#several-displays)
   - [Games and windows](#games-and-windows)
   - [Hotkeys](#hotkeys)
@@ -33,7 +34,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   - [Appearance](#appearance)
   - [Engines: Python and native](#engines-python-and-native)
   - [Command line](#command-line)
-- [Files: `.magi` and `.mp`](#files-magi-and-mp)
+- [Files: `.magi`, `.mp` and `.magic`](#files-magi-mp-and-magic)
 - [Where MacroMagi keeps its data](#where-macromagi-keeps-its-data)
 - [Platform support](#platform-support)
 - [Building from source](#building-from-source)
@@ -61,14 +62,14 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 **Macro editor**
 
 - A node graph that reads like a flowchart: *flow goes down, values go across*.
-- 30 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Play Recording), the screen (Image and Color Detection), sound (Sound Detection and Recognition), windows, variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), Python Script and Comment. See the [block reference](docs/NODES.md).
-- **Variables** that any block setting can follow, a Variables panel with their live values, and Python scripts that read and change them.
+- 32 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Play Recording), the screen (Image and Color Detection), sound (Sound Detection and Recognition), AI (AI Watch, AI Model), windows, variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), Python Script and Comment. See the [block reference](docs/NODES.md).
+- **Variables** that any block setting can follow, a Variables panel with their live values, and Python scripts that read and change them. A variable can start fresh every run or keep its value from the last one.
 - **Functions**: build a piece of a macro once under a Definition block and run it from anywhere.
 - Any number of **Start** blocks, each with its own hotkey, running side by side.
 - **Comments** that fold and resize, and **groups** – named, coloured boxes that move together and can be turned off as a whole.
-- **Find** (`Ctrl+F`) searches block names, settings and groups. Every setting has a **reset button** once it differs from its default.
+- **Find** (`Ctrl+F`) searches block names, settings, groups, and the names of images and their groups. Every setting has a **reset button** once it differs from its default.
 - Blocks light up as they run; errors point at the block that caused them.
-- Multi-select, copy and paste (images, recordings and sounds travel along), duplicate, disable, undo and redo, "run from here", block presets.
+- Multi-select, copy and paste (images, recordings, sounds and AI models travel along), duplicate, disable, undo and redo, "run from here", block presets.
 - **View → Screen targets** shows every click position and search area on the real screen, numbered in run order, and lets you drag them into place.
 
 **Recording**
@@ -80,9 +81,15 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Seeing and hearing**
 
-- **Image Detection** finds a picture on screen, with an accuracy from 0% to 100% (default 80%) and an optional search area. **Color Detection** finds a colour, with a tolerance.
-- **Sound Detection** reacts to sound that is loud enough, optionally within a pitch range. **Sound Recognition** reacts when it hears a sound you uploaded – a notification, an alarm, a voice line – at any volume.
-- All give true/false results for Decisions; the screen blocks also give a position you can wire straight into a click.
+- **Image Detection** finds pictures on screen – one or many per block, in groups with search areas of their own – with an accuracy from 0% to 100% (default 80%), and less detail when speed matters more. **Color Detection** finds a colour, with a tolerance.
+- **Sound Detection** reacts to sound that is loud enough, optionally within a pitch range. **Sound Recognition** reacts when it hears one of the sounds you uploaded – a notification, an alarm, a voice line – at any volume, and recognises long sounds while they play. Both listen to what the computer plays or to a microphone you choose.
+- All give true/false results for Decisions; the screen blocks also give a position you can wire straight into a click, and say which image or sound it was.
+
+**Magic: AI models**
+
+- A **Magic** tab for small vision models: import an ONNX model or the project it comes in, configure what it looks at, what its answers mean and what to press, try it live on your screen, and save it as a `.magic` file.
+- **AI Watch** and **AI Model** blocks run a model inside any macro, with its adjustable settings (confidence, delays) changeable per block.
+- Models run on the CPU or a graphics card – automatically on whichever is faster for that model. Optional parts (ONNX Runtime, Python, PyTorch) are installed and removed from the settings.
 
 **Control and safety**
 
@@ -99,13 +106,13 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Under the hood**
 
-- Two interchangeable engines: **Python** (so macros can contain your own Python code) and **native Rust** (nothing to install). One test suite holds both to the same behaviour.
+- Two interchangeable engines: **Python** (so macros can contain your own Python code; included in the Windows package) and **native Rust** (nothing to install). One test suite holds both to the same behaviour.
 - Light on memory: an idle Python process is shut down, sound is only listened to while a macro needs it, and memory is handed back to the system while the window is minimised.
 - Portable: one executable and a `data` folder next to it.
 
 ## Getting MacroMagi
 
-Download the package for your system from the [Releases](https://github.com/MacroMagi/MacroMagi/releases) page, unzip it anywhere and run `macromagi`. There is no installer. *Options → Create desktop shortcut* adds a shortcut if you want one.
+Download the package for your system from the [Releases](https://github.com/MacroMagi/MacroMagi/releases) page, unzip it anywhere and run `macromagi`. There is no installer. *Options → Create desktop shortcut* adds a shortcut if you want one. The Windows package has Python in a `python` folder beside the executable, for the Python engine; keep the two together.
 
 | System | Package |
 | --- | --- |
@@ -120,7 +127,7 @@ Until the first version is tagged there are no packages yet – [build it from s
 
 ## Using it
 
-The banner at the top holds everything for the open tab: **File**, **Options**, **Presets**, then **Open as macro** (Auto Clicker) or **Add** and **View** (Macro), and undo/redo. On the right are Settings, *keep on top*, and *hide from screen captures*.
+The banner at the top holds everything for the open tab: **File**, **Options**, **Presets**, then **Open as macro** (Auto Clicker) or **Add** and **View** (Macro), and undo/redo. The Magic tab has its own toolbar under the banner. On the right are Settings, *keep on top*, and *hide from screen captures*.
 
 ### Auto Clicker
 
@@ -177,13 +184,13 @@ The **View** menu shows or hides the console, the block settings, the variables,
 
 Variables are named values a macro keeps while it runs – a count, a delay, a piece of text.
 
-- Open the **Variables** panel (the `{ }` button, or *View → Variables*) to add them and set the value each starts with. While a macro runs, the panel shows their current values.
+- Open the **Variables** panel (the `{ }` button, or *View → Variables*) to add them. While a macro runs, the panel shows their current values.
 - **Any setting of any block can follow a variable.** Click the link button beside the setting and pick a variable, or choose *New variable from this setting*. The setting then shows which variable it follows, and every block that follows the same variable changes with it.
 - **Set Variable** changes a variable: set it, add to it, subtract, multiply, divide or append text – from its own setting or from whatever is wired into it (a Clipboard block, Math, a Python script…). **Variable** reads one into a value wire. **Counter** counts passes and can take a branch when it reaches a limit.
 - **Math**, **Compare** (including *contains*, *starts with*, *ends with*) and **Text** work with the values.
 - Python scripts read and change them as `magi.vars["name"]`, and a Python Script block can store its result in one.
 
-Every run starts with the variables' starting values, unless another part of the macro is already running.
+A variable keeps its value from one run to the next – a running total, the last thing seen – for as long as MacroMagi is open; its ✕ empties it. Tick *Reset at the start of each run* to have every run start it at a value you set instead (unless another part of the macro is already running).
 
 ### Functions, rates and loops
 
@@ -213,12 +220,14 @@ The record and stop hotkeys are never part of a recording. If the record hotkey 
 
 ### Reacting to the screen
 
-Add an **Image Detection** block, press *Capture from screen* and drag a box around the thing to look for. Then:
+Add an **Image Detection** block, press *Capture from screen* and drag a box around the thing to look for – or add image files. Then:
 
 - wire **Found** into a **Decision** case (or a **Wait Until**) to branch on whether it is there;
 - wire **Position** into an **Input** block to click it, wherever it shows up.
 
 *Accuracy* sets how closely the screen must match: 100% means pixel-identical, 80% tolerates small rendering differences. Limiting the *search area* is faster and avoids matches elsewhere. Small, featureless images can match by accident – capture something distinctive.
+
+One block can look for **several images**. They are tried in list order and the first one found is reported – *Which image* and *Its group* say which. *Found when* can instead require every image to be there. Put images in **groups** to give several of them one search area, or give a single image its own; anything without an area uses the block's. **Detail** shrinks the screen and the images before comparing: *Half* is about four times faster, at some risk of missing small or fine images.
 
 **View → Screen targets** shows every position the macro clicks and every area it searches over a picture of your screen, numbered in the order a run reaches them. Drag a point or an area to move it, or an area's corner to resize it. Double-click a target – on the screen or in the list – to show its block in the editor.
 
@@ -226,12 +235,29 @@ MacroMagi keeps its own window out of screen captures by default, so it can neit
 
 ### Reacting to sound
 
-Both sound blocks listen to *what the computer plays* or to the *microphone*, only while a macro is using them.
+Both sound blocks listen to *what the computer plays* or to a *microphone* – the system's default, or one you choose – only while a macro is using them.
 
 - **Sound Detection** is true while the sound is louder than a level you set (in dB: 0 is the loudest possible, ordinary sound is around −30, quiet sound around −60) – and, if you want, while its pitch is within a range. It also gives the loudness and the pitch as numbers.
-- **Sound Recognition** listens for a particular sound. *Load sound file…* takes a WAV, MP3, OGG or FLAC file (the first 10 seconds); it is stored inside the macro. *Found* becomes true when what is heard matches at least as closely as the *accuracy* (75% by default), however loud it is played. Each time the sound plays counts once. Short, distinctive sounds work best; lower the accuracy if it is missed, raise it if other sounds set it off.
+- **Sound Recognition** listens for particular sounds. *Load sound file…* takes WAV, MP3, OGG or FLAC files (the first 10 seconds of each); they are stored inside the macro. *Found* becomes true when what is heard matches one at least as closely as the *accuracy* (75% by default), however loud it is played; *Which sound* says which. Each time a sound plays counts once. Sounds can be grouped, with an accuracy per group. For long sounds, *Recognise from the first* a second or two catches them while they are still playing. Short, distinctive sounds work best; lower the accuracy if one is missed, raise it if other sounds set it off.
 
 Wire *Detected* or *Found* into a **Wait Until** to wait for a sound, or into a **Decision**.
+
+### Magic: AI models
+
+Some things on screen are too varied for Image Detection – a gauge that is never drawn the same way twice, an indicator over a moving picture. A small **vision model**, trained to tell such pictures apart, recognises them. The **Magic** tab prepares such models for macros; training them is planned for a later version.
+
+1. **Import** an ONNX model (`.onnx`), or the folder or ZIP of the project it comes from. MacroMagi reads the project's files – it never runs them – for what the answers mean, which ones call for action, how pictures are prepared, the screen area and the key, and lists what it found and what it guessed.
+2. **Check and adjust**: the screen area (a square in the middle of a display, which scales with the display, or a fixed area you pick), each answer's name, whether it acts, how sure the model must be and how long to wait, the key with its hold time and cooldown, and *adjustable settings* – sliders that move several values at once, offered again in every block that uses the model.
+3. **Try it**: *Watch the screen* shows what the model sees and how sure it is of each answer, live. The key is only pressed when *Press the key when it acts* is on. *Picture…* tries a picture file.
+4. **Save** a `.magic` file, and/or press **Use in Macro**: the model goes into the open macro with a Start and an **AI Watch** block ready to run. Using it again after a change updates the model in the macro.
+
+**AI Watch** keeps looking and presses the model's key when one of the acting answers is sure enough – or only watches, so its *Times acted* and *Last answer* can feed other blocks. **AI Model** looks once and gives the answer, how sure the model is and whether to act. Each block's *Model settings* sliders change the model's adjustable settings for that block only; *Open in Magic* opens its model in the tab.
+
+Projects made for **DBD Auto Skill Check** – its repository or its packaged app, as a folder or ZIP – import with their ten answers, the five that press Space, their 51% confidence, the 5 ms delay of the frontier answer, and the three sliders that project offers, and run as they do there.
+
+**Where models run** (*Settings → AI*): *Automatic* measures the CPU and each graphics card on the model and keeps the fastest – for tiny models that is often the CPU – or choose one. MacroMagi runs models with a built-in engine; the optional downloads on the same page add **ONNX Runtime** (faster on the CPU) and **ONNX Runtime for graphics cards** (any DirectX 12 card, Windows). The page also downloads **Python** (Windows) and **PyTorch** (for training, later), detects copies already on your computer, and removes what it installed (also from *Options → Downloads…*).
+
+> A model keeps the licence of the project it came from; the Magic tab shows the licence an import found. Check it before you share a `.magic` file or a macro that contains a model.
 
 ### Several displays
 
@@ -267,23 +293,22 @@ The **Options** menu holds rules shared by the Auto Clicker and macros:
 
 | Option | Does |
 | --- | --- |
-| Strict hotkey modifiers | On: a hotkey works only when exactly its modifier keys are held (`Ctrl+F6` never triggers `F6`). Off (default): extra held modifiers are ignored, so `F6` still works while you hold `Shift` in a game. |
-| Stop on task switch | Stop everything on `Alt+Tab` or `Win+Tab`. |
 | Auto-stop hotkeys | More key combinations that stop everything. |
 | Program rules | A whitelist (input only reaches these programs) or blacklist (never reaches them), with search over the running programs. Each program can *stop* the clicker or macro, or *pause* it until an allowed program is in front again. Off by default. |
-| Behaviours | *Stop the auto clicker when editing a hotkey* (on by default), so you can press the new hotkey. |
+| Behaviours | *Strict hotkey modifiers* – on: a hotkey works only when exactly its modifier keys are held (`Ctrl+F6` never triggers `F6`); off (default): extra held modifiers are ignored, so `F6` still works while you hold `Shift` in a game. *Stop on task switch* – stop everything on `Alt+Tab` or `Win+Tab`. *Stop the auto clicker when editing a hotkey* (on by default), so you can press the new hotkey. |
 | Dry run | Run without sending any input; the console lists what would have been sent. |
 | Notify when a macro finishes | A sound and a desktop notification when a macro ends by itself (not when you stop it). For a notification in the middle of a macro, use a **Notification** block. |
 | Create desktop shortcut | Puts a shortcut to MacroMagi, with its icon, on the desktop. |
+| Downloads… | Opens the optional downloads in *Settings → AI*. |
 
-Options can travel inside a `.magi` file (see [Files](#files-magi-and-mp)).
+Options can travel inside a `.magi` file (see [Files](#files-magi-mp-and-magic)).
 
 ### Appearance
 
 *Settings → Appearance*:
 
 - **Theme**: System (default), Light or Dark.
-- **Theme colour**: monochrome by default; a swatch or any colour recolours the whole interface, including icons, block categories and wires.
+- **Theme colour**: monochrome by default; a swatch or any colour recolours the whole interface, including icons, block categories, wires and the logo.
 - **Background**: a PNG, JPEG, BMP, GIF or WebP – animated GIFs and WebPs play – chosen from a file or downloaded from a web address. Adjust how strongly it shows, its blur and darkness, and how opaque the panels over it are.
 - **Interface size** (in *General*): drag the slider or type a percentage; the size changes once you let go.
 
@@ -295,14 +320,14 @@ Macros can run on either of two engines. They do the same thing – the same tes
 
 | | Python engine | Native engine |
 | --- | --- | --- |
-| Needs | Python 3.8 or newer | Nothing |
-| Python Script blocks | Yes | No |
+| Needs | Python 3.8 or newer (included in the Windows package) | Nothing |
+| Python Script blocks | Yes | Skipped, with a warning |
 | Used when | Python is found (the *Automatic* setting) or chosen explicitly | Python is not found, or chosen explicitly |
 | Auto Clicker | – | Always |
 
 The Python engine needs **no packages** – only the standard library. It decides what runs next and runs your scripts; the actual clicking, typing, listening and screen reading is done by MacroMagi itself, and variables are kept in one place, so both engines behave identically. An unused Python process is stopped after a few minutes and started again on the next run.
 
-MacroMagi looks for Python in this order: the interpreter chosen in Settings, a `python` folder next to the executable, then `py -3` / `python` / `python3` on the system.
+MacroMagi looks for Python in this order: the interpreter chosen in Settings, a `python` folder next to the executable, one downloaded from *Settings → AI*, then `py -3` / `python` / `python3` on the system. *Settings → Engine* lists every Python it finds to choose from, and offers *Download Python* when there is none. Blocks that need Python show a warning sign while it is not available; click it to go to those settings.
 
 Inside a **Python Script** block you get a `magi` object:
 
@@ -322,7 +347,7 @@ The full API is in [docs/PYTHON_ENGINE.md](docs/PYTHON_ENGINE.md).
 ### Command line
 
 ```text
-macromagi [FILE.magi]              Open the editor, optionally with a macro
+macromagi [FILE.magi | FILE.magic] Open the editor, optionally with a macro or a model
 macromagi run FILE.magi [OPTIONS]  Run a macro without opening the window
 macromagi nodes                    Print every node definition as JSON
 macromagi example N FILE.magi      Save built-in example number N as a file
@@ -332,7 +357,7 @@ Options for run:
     --dry-run                      Send nothing; print what would be sent
 ```
 
-## Files: `.magi` and `.mp`
+## Files: `.magi`, `.mp` and `.magic`
 
 A **`.magi`** file is a macro. It is an ordinary ZIP archive – rename it to `.zip` to look inside:
 
@@ -341,20 +366,23 @@ project.json        the macro: a readable text file with the blocks, wires, grou
 assets/….png        images linked from blocks
 assets/….json       recordings linked from blocks
 assets/….wav        sounds linked from Sound Recognition blocks
+assets/….magic      AI models linked from AI blocks
 presets/….mp        presets bundled with the macro (optional)
 ```
 
 **File → Export** saves a `.magi` and asks what else to put in it: your **presets**, your **Options** (stop hotkeys, program rules…) and your **Auto Clicker settings**. The defaults for that dialog are in *Settings → General*. When you open a file that carries Options or Auto Clicker settings, MacroMagi asks whether to use them.
 
-A **`.mp`** file is a preset: a small JSON file holding either Auto Clicker settings or a group of configured blocks (with the images, recordings and sounds they use embedded). Presets live in `data/presets`.
+A **`.mp`** file is a preset: a small JSON file holding either Auto Clicker settings or a group of configured blocks (with the images, recordings, sounds and models they use embedded). Presets live in `data/presets`.
 
-Both formats are specified in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md). Files from 0.1.0 open unchanged.
+A **`.magic`** file is an AI model: a ZIP archive with the model (ONNX), a readable `magic.json` describing how to use it, the blocks that go with it, and – if you keep them – pictures for training and fine-tuning. What it includes is chosen in the Magic tab.
+
+All three formats are specified in [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md). Files from 0.1.0 and 0.1.1 open unchanged.
 
 ## Where MacroMagi keeps its data
 
-Everything MacroMagi saves goes into a `data` folder next to the executable: `settings.json`, your `presets`, `backgrounds`, and the unpacked Python runtime. Set the `MACROMAGI_DATA_DIR` environment variable to use another folder. If the folder cannot be written to, MacroMagi still runs and says that settings will not be saved.
+Everything MacroMagi saves goes into a `data` folder next to the executable: `settings.json`, your `presets`, `backgrounds`, the unpacked Python runtime, and the optional downloads in `components`. Set the `MACROMAGI_DATA_DIR` environment variable to use another folder. If the folder cannot be written to, MacroMagi still runs and says that settings will not be saved.
 
-MacroMagi connects to the network only to download a background picture from an address you enter.
+MacroMagi connects to the network only to download a background picture from an address you enter, and an optional part when you press its *Install* button – from its publisher: python.org, Microsoft, or PyTorch's package index.
 
 ## Platform support
 
@@ -366,7 +394,7 @@ MacroMagi connects to the network only to download a background picture from an 
 
 "Implemented, not yet tested" means the code paths exist and use cross-platform libraries, but nobody has run them yet – expect rough edges, and please [report what you find](https://github.com/MacroMagi/MacroMagi/issues).
 
-Windows only, for now: **Switch to Window**, **program rules** (elsewhere the program in front cannot be determined, so input is always allowed), and **smart recording** (elsewhere movement is recorded as screen positions). Listening to *what the computer plays* works out of the box on Windows; on Linux and macOS it needs a loopback or monitor input device (the microphone works everywhere).
+Windows only, for now: **Switch to Window**, **program rules** (elsewhere the program in front cannot be determined, so input is always allowed), **smart recording** (elsewhere movement is recorded as screen positions), **AI models on a graphics card** (elsewhere they run on the CPU) and the bundled or downloadable **Python** (elsewhere the system's Python is used). Listening to *what the computer plays* works out of the box on Windows; on Linux and macOS it needs a loopback or monitor input device (the microphone works everywhere).
 
 Known limitations everywhere:
 
@@ -416,11 +444,11 @@ More in [CONTRIBUTING.md](CONTRIBUTING.md).
 Releases are built by GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)) when a version tag is pushed, or from *Actions → Release → Run workflow*:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
-The workflow builds the packages for Windows, Linux and macOS (Apple silicon and Intel). Only when **every** build succeeds does it publish a GitHub release with the packages and their SHA-256 checksums; if one fails, nothing is published.
+The workflow builds the packages for Windows, Linux and macOS (Apple silicon and Intel), and puts Python in the Windows package. Only when **every** build succeeds does it publish a GitHub release with the packages and their SHA-256 checksums; if one fails, nothing is published.
 
 ## Project layout
 
@@ -429,9 +457,10 @@ crates/
   magi-core/      The data model: graphs, block definitions, variables, recordings, options, file formats. No OS or UI code.
   magi-vision/    Image matching and colour search on raw pixels.
   magi-audio/     Loudness, pitch and sound recognition on raw samples; reading sound files.
+  magi-ml/        AI models: preparing pictures for them and running them, on the CPU or a graphics card.
   magi-platform/  Everything that touches the OS: sending input, listening, gamepads, screen capture, sound, notifications, windows.
   magi-engine/    Runs macros: the native interpreter and the bridge to Python.
-  magi-app/       The desktop application (egui).
+  magi-app/       The desktop application (egui), including the Magic tab and optional downloads.
 runtime/python/   The Python engine's source. Compiled into the app; unpacked on first use.
 assets/icon/      The application icon (SVG source, PNGs and the Windows .ico).
 docs/             Architecture, file formats, block reference, guides.
@@ -445,7 +474,7 @@ Each layer only depends on the ones below it, and everything a block *is* (its p
 Not promises, but the direction:
 
 - **Add-ons.** User-made blocks, written in Python, described by the same definition format the built-in blocks use.
-- **A local vision model** block: answer "is there a … on screen?" from a screenshot, a reference image or a text prompt, without sending anything to a server.
+- **Training in the Magic tab**: label pictures, then train or fine-tune a model on your own computer, without sending anything to a server.
 - **Sending gamepad input.** This needs a virtual controller device, which on Windows means a driver – at odds with being portable. The plan is to use one if it is already installed.
 - **Editor**: a minimap, aligning and tidying, highlighting the path a run took.
 - **Recording**: window-relative coordinates, rescaling to another screen size, merging and splitting recordings.
@@ -461,7 +490,7 @@ Contributions are welcome – bug reports, platform testing (especially Linux an
 MacroMagi sends real input to your computer.
 
 - Know your stop hotkey (`F8`) before you run a macro that loops. Try unfamiliar macros with **Dry run** first.
-- A `.magi` file from someone else can contain a Python Script block, which is code that runs with your permissions. Read it before you run it, exactly as you would any script.
+- A `.magi` file from someone else can contain a Python Script block, which is code that runs with your permissions. Read it before you run it, exactly as you would any script. A `.magic` file contains no code, but an AI Watch block presses keys on its own – try a new model with *Press the key* off first.
 - Sound blocks can listen to your microphone while a macro runs them. Nothing heard is stored or sent anywhere.
 - Automation is against the rules of many online games and services. Whether you may use it is between you and them.
 

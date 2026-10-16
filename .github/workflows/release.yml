@@ -30,6 +30,9 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  # The Python bundled with the Windows package. Keep it the same as
+  # PYTHON_VERSION in crates/magi-app/src/components.rs.
+  PYTHON_VERSION: "3.13.14"
 
 jobs:
   build:
@@ -70,12 +73,25 @@ jobs:
 
       # A package is the executable plus the documents a user should have.
       # MacroMagi creates its own `data` folder next to the executable on first run.
+      # The Windows package also carries Python in a `python` folder, so the Python
+      # engine works without installing anything; the app prefers it automatically.
       - name: Package
         shell: bash
         run: |
           package="MacroMagi-${TAG}-${{ matrix.name }}"
           mkdir -p "dist/$package"
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" README.md CHANGELOG.md TERMS.md "dist/$package/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            curl -fsSL -o python.zip "https://www.python.org/ftp/python/${PYTHON_VERSION}/python-${PYTHON_VERSION}-embed-amd64.zip"
+            7z x python.zip -o"dist/$package/python" > /dev/null
+            rm python.zip
+            # Let it find packages installed into it later (such as PyTorch).
+            for pth in "dist/$package/python/"*._pth; do
+              sed -i 's/^#import site/import site/' "$pth"
+              grep -qF 'Lib\site-packages' "$pth" || printf 'Lib\\site-packages\n' >> "$pth"
+            done
+            test -f "dist/$package/python/python.exe"
+          fi
           cd dist
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "$package.zip" "$package" > /dev/null

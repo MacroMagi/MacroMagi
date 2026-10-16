@@ -11,6 +11,7 @@ use magi_engine::PythonStatus;
 
 use super::widgets::{self, HotkeyAction};
 use super::{HotkeyTarget, UiRequest};
+use crate::components::{Component, Status as ComponentStatus};
 use crate::settings::{Settings, SettingsPage, UI_SCALE_RANGE};
 use crate::theme::{self, ThemeMode};
 
@@ -43,6 +44,13 @@ pub struct SettingsEnv<'a> {
     pub backgrounds: &'a [String],
     /// A background is being downloaded.
     pub downloading: bool,
+    /// Python interpreters found on the system; `None` while not looked for yet.
+    pub pythons: Option<&'a [(std::path::PathBuf, String)]>,
+    pub gpus: &'a [magi_platform::gpu::Gpu],
+    /// The optional downloads and where each stands (empty until worked out).
+    pub components: &'a [(Component, ComponentStatus)],
+    /// The part being installed or removed, and how far along it is.
+    pub installing: Option<(Component, String)>,
 }
 
 pub enum SettingsEvent {
@@ -56,6 +64,12 @@ pub enum SettingsEvent {
     ResetAll,
     /// A Start block's hotkey was changed or cleared here.
     SetStartHotkey(NodeId, Hotkey),
+    /// Look for Python interpreters (again).
+    FindPythons,
+    /// Work out the optional downloads' statuses.
+    CheckComponents,
+    Install(Component),
+    Remove(Component),
 }
 
 #[derive(Default)]
@@ -146,6 +160,7 @@ impl SettingsWindow {
                     SettingsPage::Hotkeys => hotkeys(ui, settings, env, events),
                     SettingsPage::Recording => recording(ui, settings),
                     SettingsPage::Engine => engine(ui, settings, env, events),
+                    SettingsPage::Ai => ai(ui, settings, env, events),
                 }
                 ui.add_space(8.0);
             });
@@ -172,6 +187,7 @@ impl SettingsWindow {
                             SettingsPage::Hotkeys => icon::KEYBOARD,
                             SettingsPage::Recording => icon::RECORD,
                             SettingsPage::Engine => icon::LIGHTNING,
+                            SettingsPage::Ai => icon::BRAIN,
                         };
                         let selected = settings.settings_page == page;
                         let text = RichText::new(format!("{glyph}  {}", page.label())).color(if selected {
@@ -644,24 +660,182 @@ fn engine(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &
         }
         ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).wrap());
     });
+    // Which Python: found automatically, one of those found, or any file.
+    if env.pythons.is_none() {
+        events.push(SettingsEvent::FindPythons);
+    }
+    let found = env.pythons.unwrap_or_default();
+    let describe = |path: &std::path::Path| match found.iter().find(|(p, _)| p == path) {
+        Some((_, version)) => format!("Python {version} – {}", path.display()),
+        None => path.display().to_string(),
+    };
     ui.horizontal(|ui| {
-        let mut path = settings.python_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        let field = egui::TextEdit::singleline(&mut path)
-            .hint_text("Python interpreter (found automatically)")
-            .desired_width(ui.available_width() - 34.0);
-        if ui.add(field).changed() {
-            settings.python_path = (!path.trim().is_empty()).then(|| path.trim().into());
-        }
-        if ui.button(icon::FOLDER_OPEN).on_hover_text("Choose a Python interpreter").clicked()
-            && let Some(file) = rfd::FileDialog::new().set_title("Choose the Python interpreter").pick_file()
-        {
-            settings.python_path = Some(file);
+        let shown = settings.python_path.as_deref().map_or_else(|| "Found automatically".to_owned(), describe);
+        egui::ComboBox::from_id_salt("python-choice")
+            .width(ui.available_width() - 70.0)
+            .truncate()
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(settings.python_path.is_none(), "Found automatically").clicked() {
+                    settings.python_path = None;
+                }
+                for (path, version) in found {
+                    let chosen = settings.python_path.as_deref() == Some(path.as_path());
+                    if ui.selectable_label(chosen, format!("Python {version} – {}", path.display())).clicked() {
+                        settings.python_path = Some(path.clone());
+                    }
+                }
+                if ui.button(format!("{}  Another file…", icon::FOLDER_OPEN)).clicked()
+                    && let Some(file) = rfd::FileDialog::new().set_title("Choose the Python interpreter").pick_file()
+                {
+                    settings.python_path = Some(file);
+                }
+            });
+        if ui.button(icon::ARROWS_CLOCKWISE).on_hover_text("Look for Python again").clicked() {
+            events.push(SettingsEvent::FindPythons);
         }
     });
+    match env.pythons {
+        None => widgets::note(ui, "Looking for Python…"),
+        Some([]) => {
+            widgets::notice(ui, icon::WARNING, "No Python was found on this computer.", theme::warning());
+            if Component::Python.unavailable().is_none() {
+                let busy = env.installing.as_ref().is_some_and(|(c, _)| *c == Component::Python);
+                if busy {
+                    widgets::note(ui, env.installing.as_ref().map(|(_, m)| m.clone()).unwrap_or_default());
+                } else if ui
+                    .button(format!("{}  Download Python ({})", icon::DOWNLOAD_SIMPLE, Component::Python.size()))
+                    .on_hover_text("Python for the Python engine and Python Script blocks")
+                    .clicked()
+                {
+                    events.push(SettingsEvent::Install(Component::Python));
+                }
+            } else if ui.button(format!("{}  Get Python from python.org", icon::ARROW_SQUARE_OUT)).clicked() {
+                ui.ctx().open_url(egui::OpenUrl::new_tab("https://www.python.org/downloads/"));
+            }
+        }
+        Some(found) => widgets::note(ui, format!("{} Python installations found.", found.len())),
+    }
     widgets::note(
         ui,
         "An unused Python process is stopped after a few minutes to save memory; it starts again on the next run.",
     );
+}
+
+fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
+    if env.components.is_empty() {
+        events.push(SettingsEvent::CheckComponents);
+    }
+    section(ui, "Where AI models run");
+    let runtime = magi_ml::onnxruntime();
+    let gpu_ready = runtime.as_ref().is_some_and(|(_, gpu)| *gpu);
+    let label = |device: magi_ml::Device| match device {
+        magi_ml::Device::Auto => "Automatic – whatever is fastest".to_owned(),
+        magi_ml::Device::Cpu => "The CPU".to_owned(),
+        magi_ml::Device::Gpu { index } => env
+            .gpus
+            .iter()
+            .find(|g| g.index == index)
+            .map_or_else(|| format!("Graphics card {}", index + 1), |g| format!("{} ({} MB)", g.name, g.memory_mb)),
+    };
+    egui::ComboBox::from_id_salt("ai-device")
+        .width(ui.available_width() - 8.0)
+        .truncate()
+        .selected_text(label(settings.ai_device))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut settings.ai_device, magi_ml::Device::Auto, label(magi_ml::Device::Auto));
+            ui.selectable_value(&mut settings.ai_device, magi_ml::Device::Cpu, label(magi_ml::Device::Cpu));
+            for gpu in env.gpus {
+                let device = magi_ml::Device::Gpu { index: gpu.index };
+                ui.add_enabled_ui(gpu_ready, |ui| {
+                    ui.selectable_value(&mut settings.ai_device, device, label(device))
+                        .on_disabled_hover_text("Needs ONNX Runtime for graphics cards (below)");
+                });
+            }
+        });
+    widgets::note(
+        ui,
+        "Automatic measures each way on every model and keeps the fastest – for tiny models that is often the \
+         CPU. Image Detection always runs on the CPU, where its coarse-to-fine search is fastest.",
+    );
+    widgets::note(
+        ui,
+        match &runtime {
+            Some((path, true)) => format!("Using ONNX Runtime with graphics card support ({}).", path.display()),
+            Some((path, false)) => format!("Using ONNX Runtime on the CPU ({}).", path.display()),
+            None => "Using the built-in engine (CPU). ONNX Runtime makes models faster, and can use a graphics card."
+                .to_owned(),
+        },
+    );
+
+    section(ui, "Downloads");
+    widgets::note(
+        ui,
+        "Parts that some features need. Install them when you want those features; remove them any time.",
+    );
+    for component in Component::ALL {
+        let status = env.components.iter().find(|(c, _)| *c == component).map(|(_, s)| s);
+        egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(component.name()).strong());
+                let (text, color) = match status {
+                    Some(ComponentStatus::Installed { bytes, detail }) if *bytes > 0 => {
+                        (format!("Installed · {detail} · {} MB", bytes / (1024 * 1024)), theme::success())
+                    }
+                    Some(ComponentStatus::Installed { detail, .. }) => {
+                        (format!("Installed · {detail}"), theme::success())
+                    }
+                    Some(ComponentStatus::OnSystem(detail)) => (format!("Found · {detail}"), theme::success()),
+                    Some(ComponentStatus::Missing) => ("Not installed".to_owned(), theme::text_faint()),
+                    Some(ComponentStatus::RemovedAfterRestart) => {
+                        ("Removed when MacroMagi restarts".to_owned(), theme::warning())
+                    }
+                    None => ("…".to_owned(), theme::text_faint()),
+                };
+                ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).truncate());
+            });
+            widgets::note(ui, component.description());
+            match (&env.installing, component.unavailable(), status) {
+                (Some((busy, progress)), ..) if *busy == component => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(progress).size(11.5).color(theme::text_dim()));
+                    });
+                }
+                (_, Some(reason), _) => widgets::note(ui, reason),
+                (installing, None, status) => {
+                    let idle = installing.is_none();
+                    ui.horizontal(|ui| {
+                        let installed = matches!(status, Some(ComponentStatus::Installed { .. }));
+                        if !installed
+                            && ui
+                                .add_enabled(
+                                    idle,
+                                    egui::Button::new(format!(
+                                        "{}  Install ({})",
+                                        icon::DOWNLOAD_SIMPLE,
+                                        component.size()
+                                    )),
+                                )
+                                .clicked()
+                        {
+                            events.push(SettingsEvent::Install(component));
+                        }
+                        if installed
+                            && ui.add_enabled(idle, egui::Button::new(format!("{}  Remove", icon::TRASH))).clicked()
+                        {
+                            events.push(SettingsEvent::Remove(component));
+                        }
+                    });
+                }
+            }
+        });
+        ui.add_space(4.0);
+    }
+    if ui.button(format!("{}  Check again", icon::ARROWS_CLOCKWISE)).clicked() {
+        events.push(SettingsEvent::CheckComponents);
+    }
 }
 
 #[cfg(test)]

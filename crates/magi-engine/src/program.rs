@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use magi_audio::Fingerprint;
 use magi_core::assets::AssetStore;
 use magi_core::graph::{Graph, Node, NodeId};
+use magi_core::magic::{MagicFile, MagicModel};
 use magi_core::nodes::flow::DefineParams;
 use magi_core::nodes::{EngineSupport, NodePorts, Registry, ids};
 use magi_core::project::Project;
@@ -26,10 +27,13 @@ pub struct Program {
     pub registry: Arc<Registry>,
     /// The variables and their starting values.
     pub variables: Vec<Variable>,
-    /// Decoded template images, filled in on first use.
-    images: Mutex<HashMap<String, Arc<Bitmap>>>,
-    /// Fingerprints of the sounds listened for, filled in on first use.
-    sounds: Mutex<HashMap<String, Arc<Fingerprint>>>,
+    /// Decoded template images by id and shrink factor, filled in on first use.
+    images: Mutex<HashMap<(String, u32), Arc<Bitmap>>>,
+    /// AI models, loaded on first use.
+    models: Mutex<HashMap<String, Arc<LoadedModel>>>,
+    /// Fingerprints of the sounds listened for, by id and how much of the
+    /// sound is used (whole milliseconds; 0 for all of it), filled in on first use.
+    sounds: Mutex<HashMap<(String, u64), Arc<Fingerprint>>>,
 }
 
 impl Program {
@@ -41,6 +45,7 @@ impl Program {
             variables: Vec::new(),
             images: Mutex::new(HashMap::new()),
             sounds: Mutex::new(HashMap::new()),
+            models: Mutex::new(HashMap::new()),
         }
     }
 
@@ -73,36 +78,76 @@ impl Program {
 
     /// The decoded pixels of an image asset.
     pub fn image(&self, id: &str) -> Result<Arc<Bitmap>, EngineError> {
+        self.image_shrunk(id, 1)
+    }
+
+    /// The decoded pixels of an image asset, shrunk by `factor`.
+    pub fn image_shrunk(&self, id: &str, factor: u32) -> Result<Arc<Bitmap>, EngineError> {
         if id.is_empty() {
             return Err(EngineError::new("no image has been chosen"));
         }
-        let mut cache = self.images.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(bitmap) = cache.get(id) {
+        let key = (id.to_owned(), factor.max(1));
+        if let Some(bitmap) = self.images.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             return Ok(Arc::clone(bitmap));
         }
-        let bytes = self.assets.image(id).ok_or_else(|| EngineError::new(format!("image `{id}` is missing")))?;
-        let bitmap = Arc::new(magi_vision::decode(bytes).map_err(|e| EngineError::new(e.to_string()))?);
-        cache.insert(id.to_owned(), Arc::clone(&bitmap));
+        let bitmap = if factor <= 1 {
+            let bytes = self.assets.image(id).ok_or_else(|| EngineError::new(format!("image `{id}` is missing")))?;
+            Arc::new(magi_vision::decode(bytes).map_err(|e| EngineError::new(e.to_string()))?)
+        } else {
+            let full = self.image_shrunk(id, 1)?;
+            Arc::new(magi_vision::shrink(full.as_ref().as_ref(), factor))
+        };
+        self.images.lock().unwrap_or_else(|p| p.into_inner()).insert(key, Arc::clone(&bitmap));
         Ok(bitmap)
     }
 
     /// The fingerprint of a sound asset.
     pub fn sound(&self, id: &str) -> Result<Arc<Fingerprint>, EngineError> {
+        self.sound_start(id, 0.0)
+    }
+
+    /// The fingerprint of the first `ms` milliseconds of a sound asset (all of
+    /// it for zero).
+    pub fn sound_start(&self, id: &str, ms: f64) -> Result<Arc<Fingerprint>, EngineError> {
         if id.is_empty() {
             return Err(EngineError::new("no sound has been chosen"));
         }
-        let mut cache = self.sounds.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(fingerprint) = cache.get(id) {
+        let key = (id.to_owned(), ms.max(0.0).round() as u64);
+        if let Some(fingerprint) = self.sounds.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
             return Ok(Arc::clone(fingerprint));
         }
-        let bytes = self.assets.audio(id).ok_or_else(|| EngineError::new(format!("sound `{id}` is missing")))?;
-        let audio = magi_audio::decode(bytes).map_err(|e| EngineError::new(e.to_string()))?;
-        let fingerprint = Arc::new(Fingerprint::of(&audio));
-        if fingerprint.is_empty() {
-            return Err(EngineError::new("the sound to listen for is too short"));
-        }
-        cache.insert(id.to_owned(), Arc::clone(&fingerprint));
+        let fingerprint = if key.1 == 0 {
+            let bytes = self.assets.audio(id).ok_or_else(|| EngineError::new(format!("sound `{id}` is missing")))?;
+            let audio = magi_audio::decode(bytes).map_err(|e| EngineError::new(e.to_string()))?;
+            let fingerprint = Fingerprint::of(&audio);
+            if fingerprint.is_empty() {
+                return Err(EngineError::new("the sound to listen for is too short"));
+            }
+            Arc::new(fingerprint)
+        } else {
+            Arc::new(self.sound_start(id, 0.0)?.prefix(ms))
+        };
+        self.sounds.lock().unwrap_or_else(|p| p.into_inner()).insert(key, Arc::clone(&fingerprint));
         Ok(fingerprint)
+    }
+
+    /// An AI model asset, ready to run.
+    pub fn model(&self, id: &str) -> Result<Arc<LoadedModel>, EngineError> {
+        if id.is_empty() {
+            return Err(EngineError::new("no AI model has been chosen"));
+        }
+        if let Some(model) = self.models.lock().unwrap_or_else(|p| p.into_inner()).get(id) {
+            return Ok(Arc::clone(model));
+        }
+        let bytes = self.assets.model(id).ok_or_else(|| EngineError::new(format!("model `{id}` is missing")))?;
+        let file = MagicFile::from_bytes(bytes).map_err(|e| EngineError::new(e.to_string()))?;
+        if file.onnx.is_empty() {
+            return Err(EngineError::new("this .magic file does not include the model itself"));
+        }
+        let model = magi_ml::Model::load(&file.onnx, &file.model.input).map_err(|e| EngineError::new(e.0))?;
+        let loaded = Arc::new(LoadedModel { spec: file.model, model: Mutex::new(model) });
+        self.models.lock().unwrap_or_else(|p| p.into_inner()).insert(id.to_owned(), Arc::clone(&loaded));
+        Ok(loaded)
     }
 
     /// Whether any enabled node can only be run by the Python engine.
@@ -144,6 +189,13 @@ impl Program {
             .collect();
         serde_json::json!({ "graph": { "nodes": nodes, "wires": self.graph.wires() }, "assets": assets })
     }
+}
+
+/// An AI model of the macro, loaded.
+pub struct LoadedModel {
+    /// Its configuration, as saved (before a block's own settings).
+    pub spec: MagicModel,
+    pub model: Mutex<magi_ml::Model>,
 }
 
 /// The flow output a disabled block passes execution to: `out` if it has

@@ -10,6 +10,7 @@ use crate::action::Action;
 use crate::autoclicker::{AutoClickParams, ClickPosition};
 use crate::geom::{Point, Rect};
 use crate::graph::{Graph, NodeId};
+use crate::nodes::vision::FindImageParams;
 use crate::nodes::{ParamKind, Registry, ids};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -28,6 +29,10 @@ pub enum TargetSource {
     Action { node: NodeId, key: String, index: usize },
     /// The fixed position of an Auto Click block.
     Clicker { node: NodeId },
+    /// The search area of one image of an Image Detection block.
+    Image { node: NodeId, index: usize },
+    /// The search area of one image group of an Image Detection block.
+    ImageGroup { node: NodeId, index: usize },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +68,28 @@ pub fn screen_targets(graph: &Graph, registry: &Registry) -> Vec<ScreenTarget> {
                 let params: AutoClickParams = node.params_or_default();
                 if let Some(point) = params.clicker.position.point() {
                     push(title.clone(), TargetShape::Point(point), TargetSource::Clicker { node: id });
+                }
+            }
+            ids::FIND_IMAGE => {
+                let params: FindImageParams = node.params_or_default();
+                if let Some(region) = params.region {
+                    push(
+                        title.clone(),
+                        TargetShape::Region(region),
+                        TargetSource::Param { node: id, key: "region".into() },
+                    );
+                }
+                for (index, group) in params.groups.iter().enumerate() {
+                    if let Some(region) = group.region {
+                        let label = format!("{title} – group “{}”", group.name);
+                        push(label, TargetShape::Region(region), TargetSource::ImageGroup { node: id, index });
+                    }
+                }
+                for (index, target) in params.targets().iter().enumerate() {
+                    if let Some(region) = target.region {
+                        let label = format!("{title} – image {}", index + 1);
+                        push(label, TargetShape::Region(region), TargetSource::Image { node: id, index });
+                    }
                 }
             }
             _ => {
@@ -157,6 +184,24 @@ pub fn apply(graph: &mut Graph, source: &TargetSource, shape: TargetShape) {
                 _ => return,
             }
             node.set_param(key, actions);
+        }
+        TargetSource::Image { node, index } => {
+            let (Some(node), TargetShape::Region(r)) = (graph.node_mut(*node), shape) else { return };
+            let params: FindImageParams = node.params_or_default();
+            let mut images = params.targets();
+            if let Some(target) = images.get_mut(*index) {
+                target.region = Some(r);
+                node.set_param("images", images);
+                node.set_param("image", "");
+            }
+        }
+        TargetSource::ImageGroup { node, index } => {
+            let (Some(node), TargetShape::Region(r)) = (graph.node_mut(*node), shape) else { return };
+            let mut params: FindImageParams = node.params_or_default();
+            if let Some(group) = params.groups.get_mut(*index) {
+                group.region = Some(r);
+                node.set_param("groups", params.groups);
+            }
         }
         TargetSource::Clicker { node } => {
             let (Some(node), TargetShape::Point(p)) = (graph.node_mut(*node), shape) else { return };

@@ -19,7 +19,7 @@ use crate::assets::{AssetData, AssetStore};
 use crate::autoclicker::AutoClickerConfig;
 use crate::error::{Error, Result};
 use crate::graph::{Fragment, Graph, NodeId};
-use crate::nodes::{ParamKind, Registry};
+use crate::nodes::Registry;
 use crate::recording::Recording;
 
 pub const FORMAT: &str = "macromagi.preset";
@@ -82,16 +82,10 @@ pub enum EmbeddedData {
     Audio {
         wav_base64: String,
     },
-}
-
-/// Parameter keys of a node that hold asset ids.
-fn asset_params<'a>(registry: &'a Registry, kind: &str) -> impl Iterator<Item = &'a str> {
-    registry
-        .get(kind)
-        .into_iter()
-        .flat_map(|def| def.params.iter())
-        .filter(|p| matches!(p.kind, ParamKind::Image | ParamKind::Recording | ParamKind::Audio))
-        .map(|p| p.key.as_str())
+    /// Base64 of a `.magic` file.
+    Model {
+        magic_base64: String,
+    },
 }
 
 impl NodePreset {
@@ -100,10 +94,8 @@ impl NodePreset {
         let fragment = graph.fragment(ids);
         let mut used = BTreeSet::new();
         for node in &fragment.nodes {
-            for key in asset_params(registry, &node.kind) {
-                if let Some(Value::String(id)) = node.params.get(key) {
-                    used.insert(id.clone());
-                }
+            if let Some(def) = registry.get(&node.kind) {
+                used.extend(def.asset_ids(node));
             }
         }
         let assets = used
@@ -116,6 +108,7 @@ impl NodePreset {
                     AssetData::Image(bytes) => EmbeddedData::Image { base64: BASE64.encode(bytes.as_slice()) },
                     AssetData::Recording(recording) => EmbeddedData::Recording { recording: (**recording).clone() },
                     AssetData::Audio(bytes) => EmbeddedData::Audio { wav_base64: BASE64.encode(bytes.as_slice()) },
+                    AssetData::Model(bytes) => EmbeddedData::Model { magic_base64: BASE64.encode(bytes.as_slice()) },
                 },
             })
             .collect();
@@ -149,18 +142,20 @@ impl NodePreset {
                         .map_err(|e| Error::format(format!("preset sound `{}` is corrupt: {e}", embedded.name)))?;
                     assets.add_audio(embedded.name.clone(), bytes)
                 }
+                EmbeddedData::Model { magic_base64 } => {
+                    let bytes = BASE64
+                        .decode(magic_base64)
+                        .map_err(|e| Error::format(format!("preset model `{}` is corrupt: {e}", embedded.name)))?;
+                    assets.add_model(embedded.name.clone(), bytes)
+                }
             };
             renamed.insert(&embedded.id, id);
         }
 
         let mut fragment = self.fragment.clone();
         for node in &mut fragment.nodes {
-            for key in asset_params(registry, &node.kind.clone()) {
-                if let Some(Value::String(id)) = node.params.get_mut(key)
-                    && let Some(new_id) = renamed.get(id.as_str())
-                {
-                    *id = new_id.clone();
-                }
+            if let Some(def) = registry.get(&node.kind) {
+                def.rename_assets(node, &|id| renamed.get(id).cloned());
             }
         }
         Ok(graph.insert_fragment(&fragment, at))

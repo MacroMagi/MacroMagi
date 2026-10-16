@@ -72,10 +72,10 @@ What the builder calls mean:
 | `.flow_in()` | Gives the block a flow input (top edge). Leave it out for value blocks. |
 | `.flow_out(id, label)` | A flow output (bottom edge). Use `ports::OUT` with an empty label for the usual single output. |
 | `.data_in` / `.data_out` | Value ports (left / right edge) with a type. |
-| `.param(ParamDef::new(key, label, kind))` | A setting. `kind` chooses its editor – see `ParamKind`. Add `.help("…")` and `.show_if(key, value)` as needed. |
+| `.param(ParamDef::new(key, label, kind))` | A setting. `kind` chooses its editor – see `ParamKind`. Add `.help("…")` and `.show_if(key, value)` as needed, or `.hidden()` for a setting kept only so older files still load. |
 | `.defaults(&Params::default())` | Takes every setting's default from the typed struct. Panics at start-up if a setting is missing from it, so they cannot drift apart. |
 | `.summarize(…)` | The lines of text on the block's face. The first is the headline. |
-| `.python_only()` | Marks a block the native engine cannot run. |
+| `.python_only()` | Marks a block the native engine cannot run. The native engine skips it with a warning, and the editor marks it while Python is not available. |
 
 Run the app. The block is already in the "add block" list, can be wired up, edited, saved and loaded. It just does nothing yet.
 
@@ -204,6 +204,8 @@ cargo test -p magi-engine --test engines
 **Ports that depend on settings.** See how Decision does it: `DynamicPorts::Cases` in the definition, resolved in `NodeDef::ports`.
 
 **Something drawn on the block itself**, like the thumbnail on Image Detection or the card on Play Recording. That is the one case with UI code: see `Layout::compute` and `GraphView::show` in `ui/graph.rs`.
+
+**Settings that hold assets** – of the kinds `Image`, `Images`, `Recording`, `Audio`, `Sounds` and `Model` – need nothing extra either: `NodeDef::asset_ids` finds the assets they use, so copied blocks and presets carry them along, and `NodeDef::rename_assets` points them at the right ones when they are pasted into another macro.
 
 **Settings that follow variables** need nothing extra: `interp.params` (native) resolves them, and the Python runtime hands each block its settings already resolved. Settings of the kinds `ParamKind::bindable` lists get a link button in the inspector automatically.
 

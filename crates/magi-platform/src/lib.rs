@@ -15,6 +15,7 @@
 pub mod audio;
 pub mod capture;
 mod gamepad;
+pub mod gpu;
 mod inject;
 pub mod keymap;
 mod listen;
@@ -109,8 +110,8 @@ impl Host for SystemHost {
         notify::notify(notification)
     }
 
-    fn listen(&self, source: SoundSource, ms: f64) -> Result<SoundClip, HostError> {
-        self.listener.listen(source, ms)
+    fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError> {
+        self.listener.listen(source, device, ms)
     }
 }
 

@@ -38,6 +38,10 @@ pub enum MacroEvent {
     ToggleRecording,
     Request(UiRequest),
     Toast(String),
+    ClearConsole,
+    /// Empty a variable's current value.
+    ClearVariable(String),
+    OpenEngineSettings,
 }
 
 pub struct MacroTab {
@@ -124,7 +128,7 @@ impl MacroTab {
                 .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        variables_panel(ui, &mut doc.project, env.registry, env.live);
+                        events.extend(variables_panel(ui, &mut doc.project, env.registry, env.live));
                     });
                 });
         }
@@ -135,7 +139,7 @@ impl MacroTab {
                 .default_size(130.0)
                 .size_range(70.0..=420.0)
                 .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::symmetric(10, 6)))
-                .show(ui, |ui| self.console(ui, env));
+                .show(ui, |ui| self.console(ui, env, &mut events));
         }
 
         let selected =
@@ -164,6 +168,7 @@ impl MacroTab {
                 error_node: env.error_node,
                 show_grid: env.show_grid,
                 show_activity: env.show_activity,
+                python_missing: python_missing(env),
             };
             for event in self.view.show(ui, &mut doc.project, &graph_env) {
                 match event {
@@ -178,6 +183,7 @@ impl MacroTab {
                         events.push(MacroEvent::Request(UiRequest::EditRecording(asset)))
                     }
                     GraphEvent::Toast(text) => events.push(MacroEvent::Toast(text)),
+                    GraphEvent::OpenEngineSettings => events.push(MacroEvent::OpenEngineSettings),
                 }
             }
         });
@@ -329,12 +335,18 @@ impl MacroTab {
         });
     }
 
-    fn console(&mut self, ui: &mut Ui, env: &mut MacroEnv<'_>) {
+    fn console(&mut self, ui: &mut Ui, env: &mut MacroEnv<'_>, events: &mut Vec<MacroEvent>) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("CONSOLE").size(10.5).color(theme::text_faint()));
             if env.dry_run {
                 ui.label(RichText::new("Dry run: no input is sent").size(11.0).color(theme::warning()));
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let clear = egui::Button::new(RichText::new(format!("{}  Clear", icon::BROOM)).size(11.0)).small();
+                if ui.add_enabled(!env.logs.is_empty(), clear).on_hover_text("Empty the console").clicked() {
+                    events.push(MacroEvent::ClearConsole);
+                }
+            });
         });
         egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show_rows(
             ui,
@@ -420,26 +432,32 @@ fn rename_variable(project: &mut Project, registry: &Registry, old: &str, new: &
 
 /// The variables: their names, the values they start with, and the values
 /// they had in the latest run.
-fn variables_panel(ui: &mut Ui, project: &mut Project, registry: &Registry, live: &Map<String, Value>) {
+fn variables_panel(
+    ui: &mut Ui,
+    project: &mut Project,
+    registry: &Registry,
+    live: &Map<String, Value>,
+) -> Vec<MacroEvent> {
+    let mut events = Vec::new();
     ui.horizontal(|ui| {
         ui.label(RichText::new("VARIABLES").size(10.5).color(theme::text_faint()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if widgets::icon_button(ui, icon::PLUS, "Add a variable").clicked() {
                 let taken = |name: &str| project.variables.iter().any(|v| v.name == name);
                 let name = (1..).map(|n| format!("variable {n}")).find(|n| !taken(n)).expect("unbounded");
-                project.variables.push(Variable::new(name, serde_json::json!(0)));
+                project.variables.push(Variable::kept(name));
             }
         });
     });
     widgets::note(
         ui,
-        "Blocks and Python scripts read and change these while a macro runs. Settings follow one through their \
-         link button.",
+        "Blocks and Python scripts read and change these while a macro runs, and they keep their value from one \
+         run to the next unless set to reset. Settings follow one through their link button.",
     );
     ui.add_space(4.0);
     if project.variables.is_empty() {
         ui.weak("No variables yet.");
-        return;
+        return events;
     }
     let mut remove = None;
     let mut rename = None;
@@ -460,20 +478,36 @@ fn variables_panel(ui: &mut Ui, project: &mut Project, registry: &Registry, live
                 if delete {
                     remove = Some(index);
                 }
-                ui.horizontal(|ui| {
-                    widgets::caption(ui, "Starts as");
-                    let mut text = variables::as_text(&variable.value);
-                    if ui.add(egui::TextEdit::singleline(&mut text).desired_width(ui.available_width())).changed() {
-                        variable.value = variables::parse_literal(&text);
-                    }
-                });
-                if let Some(value) = live.get(&variable.name) {
-                    ui.label(
-                        RichText::new(format!("{}  Now {}", icon::LIGHTNING, variables::as_text(value)))
-                            .size(11.5)
-                            .color(theme::accent_bright()),
-                    )
-                    .on_hover_text("Its value in the latest run");
+                ui.checkbox(&mut variable.reset, "Reset at the start of each run").on_hover_text(
+                    "On: every run starts it at the value below. Off: it keeps whatever the last run left in it.",
+                );
+                if variable.reset {
+                    ui.horizontal(|ui| {
+                        widgets::caption(ui, "to");
+                        let mut text = variables::as_text(&variable.value);
+                        let field = egui::TextEdit::singleline(&mut text).desired_width(ui.available_width());
+                        if ui.add(field).changed() {
+                            variable.value = variables::parse_literal(&text);
+                        }
+                    });
+                }
+                if let Some(value) = live.get(&variable.name).filter(|v| !v.is_null()) {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(format!("{}  Now {}", icon::LIGHTNING, variables::as_text(value)))
+                                .size(11.5)
+                                .color(theme::accent_bright()),
+                        )
+                        .on_hover_text("Its current value");
+                        if !variable.reset
+                            && ui
+                                .add(egui::Button::new(RichText::new(icon::X).size(11.0)).frame(false))
+                                .on_hover_text("Empty it, so the next run starts without a value")
+                                .clicked()
+                        {
+                            events.push(MacroEvent::ClearVariable(variable.name.clone()));
+                        }
+                    });
                 }
             });
         });
@@ -489,6 +523,18 @@ fn variables_panel(ui: &mut Ui, project: &mut Project, registry: &Registry, live
     }
     if let Some(index) = remove {
         project.variables.remove(index);
+    }
+    events
+}
+
+/// Whether the macro runs, or would run, on the native engine – which skips
+/// blocks only Python can run.
+fn python_missing(env: &MacroEnv<'_>) -> bool {
+    match (env.engine_running, env.engine_preference, env.python) {
+        (Some(engine), ..) => engine == EngineKind::Native,
+        (None, EnginePreference::Native, _) => true,
+        (None, _, PythonStatus::Unavailable(_)) => true,
+        _ => false,
     }
 }
 

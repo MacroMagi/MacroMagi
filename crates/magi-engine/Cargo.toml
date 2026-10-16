@@ -12,10 +12,12 @@ publish.workspace = true
 magi-core.workspace = true
 magi-vision.workspace = true
 magi-audio.workspace = true
+magi-ml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 fastrand.workspace = true
+rayon.workspace = true
 include_dir.workspace = true
 
 [lints]

@@ -1,5 +1,5 @@
-//! Assets: the data files a macro links to – template images, recordings
-//! and sounds.
+//! Assets: the data files a macro links to – template images, recordings,
+//! sounds and AI models.
 //!
 //! Nodes refer to assets by id, so the node graph itself stays a small,
 //! readable text document while the bulky data lives next to it.
@@ -16,6 +16,8 @@ pub enum AssetData {
     Recording(Arc<Recording>),
     /// A sound to listen for, as a WAV file (mono, 16-bit).
     Audio(Arc<Vec<u8>>),
+    /// An AI model: a `.magic` file without its training data.
+    Model(Arc<Vec<u8>>),
 }
 
 impl PartialEq for AssetData {
@@ -26,6 +28,7 @@ impl PartialEq for AssetData {
             (AssetData::Image(a), AssetData::Image(b)) => Arc::ptr_eq(a, b) || a == b,
             (AssetData::Recording(a), AssetData::Recording(b)) => Arc::ptr_eq(a, b) || a == b,
             (AssetData::Audio(a), AssetData::Audio(b)) => Arc::ptr_eq(a, b) || a == b,
+            (AssetData::Model(a), AssetData::Model(b)) => Arc::ptr_eq(a, b) || a == b,
             _ => false,
         }
     }
@@ -36,6 +39,7 @@ pub enum AssetKind {
     Image,
     Recording,
     Audio,
+    Model,
 }
 
 impl AssetKind {
@@ -44,6 +48,7 @@ impl AssetKind {
             AssetKind::Image => "image",
             AssetKind::Recording => "recording",
             AssetKind::Audio => "audio",
+            AssetKind::Model => "model",
         }
     }
 
@@ -52,6 +57,7 @@ impl AssetKind {
             "image" => Some(AssetKind::Image),
             "recording" => Some(AssetKind::Recording),
             "audio" => Some(AssetKind::Audio),
+            "model" => Some(AssetKind::Model),
             _ => None,
         }
     }
@@ -62,6 +68,7 @@ impl AssetKind {
             AssetKind::Image => "png",
             AssetKind::Recording => "json",
             AssetKind::Audio => "wav",
+            AssetKind::Model => crate::magic::EXTENSION,
         }
     }
 }
@@ -80,6 +87,7 @@ impl Asset {
             AssetData::Image(_) => AssetKind::Image,
             AssetData::Recording(_) => AssetKind::Recording,
             AssetData::Audio(_) => AssetKind::Audio,
+            AssetData::Model(_) => AssetKind::Model,
         }
     }
 }
@@ -143,6 +151,25 @@ impl AssetStore {
             id: id.clone(),
             name: name.into(),
             data: AssetData::Audio(Arc::new(wav)),
+        });
+        id
+    }
+
+    /// An AI model (`.magic` bytes).
+    pub fn model(&self, id: &str) -> Option<&Arc<Vec<u8>>> {
+        match &self.get(id)?.data {
+            AssetData::Model(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
+    /// Adds an AI model (`.magic` bytes). Identical models share one asset.
+    pub fn add_model(&mut self, name: impl Into<String>, magic: Vec<u8>) -> String {
+        let id = format!("mdl-{:016x}", fnv1a(&magic));
+        self.assets.entry(id.clone()).or_insert_with(|| Asset {
+            id: id.clone(),
+            name: name.into(),
+            data: AssetData::Model(Arc::new(magic)),
         });
         id
     }

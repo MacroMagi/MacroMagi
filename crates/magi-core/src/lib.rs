@@ -20,6 +20,7 @@ pub mod graph;
 pub mod host;
 pub mod hotkey;
 pub mod input;
+pub mod magic;
 pub mod nodes;
 pub mod options;
 pub mod preset;

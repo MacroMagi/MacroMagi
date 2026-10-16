@@ -9,6 +9,9 @@
 //! Engines resolve bindings just before a block runs, so a block always sees
 //! the variable's current value, converted to the kind of value the setting
 //! expects (see [`coerce`]).
+//!
+//! A variable keeps its value from one run to the next unless it is set to
+//! *reset*: then every run starts it at its starting value.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -18,17 +21,32 @@ use crate::text::trim_float;
 /// The key that marks a bound setting: `{"$var": "name"}`.
 pub const BINDING_KEY: &str = "$var";
 
+fn yes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Variable {
     pub name: String,
-    /// The value it has when a macro starts.
+    /// The value it starts with: at every run when `reset` is on, otherwise
+    /// only the first time.
     #[serde(default)]
     pub value: Value,
+    /// Back to `value` whenever a run starts. Files from before this option
+    /// existed always reset, so that is what a missing field means.
+    #[serde(default = "yes")]
+    pub reset: bool,
 }
 
 impl Variable {
+    /// A variable that every run starts at `value`.
     pub fn new(name: impl Into<String>, value: Value) -> Self {
-        Self { name: name.into(), value }
+        Self { name: name.into(), value, reset: true }
+    }
+
+    /// A variable that starts empty and keeps its value from one run to the next.
+    pub fn kept(name: impl Into<String>) -> Self {
+        Self { name: name.into(), value: Value::Null, reset: false }
     }
 }
 

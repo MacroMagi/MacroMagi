@@ -10,12 +10,14 @@
 mod app;
 mod background;
 mod cli;
+mod components;
 mod controller;
 mod displays;
 mod document;
 mod examples;
 mod history;
 mod icon;
+mod magic;
 mod paths;
 mod presets;
 mod settings;

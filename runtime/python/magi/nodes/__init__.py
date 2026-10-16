@@ -35,6 +35,7 @@ def value_node(node_type):
 
 
 # Importing the modules runs their decorators, which fills the tables above.
+from . import ai as _ai  # noqa: E402,F401
 from . import flow as _flow  # noqa: E402,F401
 from . import input as _input  # noqa: E402,F401
 from . import logic as _logic  # noqa: E402,F401

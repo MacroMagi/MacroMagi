@@ -561,6 +561,11 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
         }
         "clipboard" => Ok(Value::String(cx.clipboard()?)),
         "sound_level" => Ok(Value::Object(cx.sound_level(&arg(args, "params")?)?)),
+        "ai_classify" => Ok(Value::Object(cx.ai_classify(&arg(args, "params")?)?)),
+        "ai_watch" => {
+            let (hits, label) = cx.ai_watch(&arg(args, "params")?, arg(args, "node")?)?;
+            Ok(json!({ "hits": hits, "label": label }))
+        }
         "sound_match" => Ok(Value::Object(cx.sound_match(&arg(args, "params")?, arg(args, "node")?)?)),
         "notify" => {
             let node: Option<NodeId> = arg(args, "node")?;
@@ -584,6 +589,11 @@ fn candidates(config: &PythonConfig) -> Vec<Vec<OsString>> {
     };
     if bundled.is_file() {
         list.push(vec![bundled.into_os_string()]);
+    }
+    // The one downloaded from the AI settings page, unless it is waiting to be removed.
+    let downloaded = config.data_dir.join("components").join("python");
+    if downloaded.join("python.exe").is_file() && !downloaded.join(".remove").exists() {
+        list.push(vec![downloaded.join("python.exe").into_os_string()]);
     }
     let system: &[&[&str]] =
         if cfg!(windows) { &[&["py", "-3"], &["python"], &["python3"]] } else { &[&["python3"], &["python"]] };
@@ -674,5 +684,29 @@ mod tests {
         let config = PythonConfig { interpreter: Some("/opt/py/bin/python".into()), ..PythonConfig::default() };
         assert_eq!(candidates(&config), vec![vec![OsString::from("/opt/py/bin/python")]]);
         assert!(candidates(&PythonConfig::default()).len() >= 2);
+    }
+
+    #[test]
+    fn a_python_beside_the_app_comes_first_then_a_downloaded_one() {
+        let root = std::env::temp_dir().join(format!("magi-candidates-{}", std::process::id()));
+        let (app_dir, data_dir) = (root.join("app"), root.join("data"));
+        let beside = if cfg!(windows) {
+            app_dir.join("python").join("python.exe")
+        } else {
+            app_dir.join("python").join("bin").join("python3")
+        };
+        let downloaded = data_dir.join("components").join("python");
+        std::fs::create_dir_all(beside.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&downloaded).unwrap();
+        std::fs::write(&beside, b"").unwrap();
+        std::fs::write(downloaded.join("python.exe"), b"").unwrap();
+        let config = PythonConfig { interpreter: None, app_dir, data_dir };
+        let list = candidates(&config);
+        assert_eq!(list[0], vec![beside.into_os_string()]);
+        assert_eq!(list[1], vec![downloaded.join("python.exe").into_os_string()]);
+        // Marked for removal: skipped.
+        std::fs::write(downloaded.join(".remove"), b"").unwrap();
+        assert!(!candidates(&config).contains(&vec![downloaded.join("python.exe").into_os_string()]));
+        let _ = std::fs::remove_dir_all(root);
     }
 }

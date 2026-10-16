@@ -23,6 +23,22 @@ pub struct ProcessEntry {
 #[cfg(windows)]
 pub use self::windows::{focus_window, foreground_process, running_processes, trim_memory};
 
+/// Where the pointer is, in physical desktop pixels.
+#[cfg(windows)]
+pub fn cursor_position() -> Option<magi_core::geom::Point> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: a plain call writing into a local structure.
+    (unsafe { GetCursorPos(&mut point) } != 0).then(|| magi_core::geom::Point::new(point.x, point.y))
+}
+
+/// Where the pointer is, in physical desktop pixels.
+#[cfg(not(windows))]
+pub fn cursor_position() -> Option<magi_core::geom::Point> {
+    None
+}
+
 #[cfg(not(windows))]
 pub fn foreground_process() -> Option<String> {
     None

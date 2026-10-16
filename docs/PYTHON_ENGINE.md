@@ -10,19 +10,20 @@ MacroMagi can run macros with Python. This page covers how to set that up, the s
 
 ## Setting it up
 
-Install any Python 3.8 or newer. That is all: the engine uses only the standard library, so there is nothing to `pip install`.
+The Windows package comes with Python, in the `python` folder next to `macromagi.exe`, so the engine works as it is. On Linux and macOS, any Python 3.8 or newer will do – most systems have one. The engine uses only the standard library, so there is nothing to `pip install`.
 
 With the engine setting on *Automatic* (the default), MacroMagi uses Python when it finds it and the built-in native engine when it does not. It looks, in order, for:
 
 1. the interpreter chosen under *Settings → Engine*;
 2. a `python` folder next to the MacroMagi executable (`python/python.exe` on Windows, `python/bin/python3` elsewhere);
-3. `py -3`, `python`, `python3` on Windows; `python3`, `python` elsewhere.
+3. a Python downloaded from *Settings → AI → Downloads* (Windows);
+4. `py -3`, `python`, `python3` on Windows; `python3`, `python` elsewhere.
 
-*Settings → Engine → Check* starts Python and tells you what was found.
+*Settings → Engine* lists every Python it finds, with its version, in a drop-down: leave it on *Found automatically* or choose one, or pick another file. The refresh button looks again, and *Check* starts the chosen Python and tells you whether it works. When no Python is found at all, the page offers *Download Python*.
 
-### A fully portable setup
+### Your own Python
 
-To carry Python along with MacroMagi, put a self-contained Python distribution in a folder named `python` next to the executable – for example the "embeddable package" from python.org on Windows. MacroMagi prefers it over anything installed on the system.
+To use a different Python with MacroMagi, choose it under *Settings → Engine*, or put a self-contained Python distribution in a folder named `python` next to the executable – for example the "embeddable package" from python.org on Windows. MacroMagi prefers that folder over anything installed on the system.
 
 ## Python Script blocks
 
@@ -44,7 +45,7 @@ result = magi.vars["runs"]
 
 ### Variables
 
-`magi.vars` are the macro's [variables](../README.md#variables) – the same ones the Variables panel lists and Set Variable, Counter and the blocks' linked settings use. Changing one from a script changes it for every block that follows it, at once:
+`magi.vars` are the macro's [variables](../README.md#variables) – the same ones the Variables panel lists and Set Variable, Counter and the blocks' linked settings use. Changing one from a script changes it for every block that follows it, at once. A variable whose *Reset at the start of each run* is off keeps what a script stored in it for the next run, so a script can count across runs:
 
 ```python
 # Make every Wait block that follows "pause" a bit shorter.
@@ -60,7 +61,7 @@ Things to know:
 - Each run of a Start block is its own thread. `magi.vars` is shared between all of them, and each read or write is one step; if several runs read, change and write back the same variable, use your own lock.
 - In long loops of your own, call `magi.sleep()` now and then or check `magi.stopped`. A script that never does cannot be asked to stop; after a few seconds MacroMagi restarts the Python engine to end it.
 - You can `import` anything your Python has installed.
-- Python Script blocks only run on the Python engine. On the native engine they report an error.
+- Python Script blocks only run on the Python engine. When the native engine runs a macro, it skips them with a warning in the console, and the editor shows a warning sign on them; clicking it opens *Settings → Engine*.
 
 ## The `magi` API
 
@@ -142,7 +143,18 @@ The Python engine is an interpreter for the same graphs the native engine runs. 
 
 This is why no packages are needed, why both engines click and see identically, and why timing stays accurate: waits and recording playback are timed in Rust, not by Python's scheduler.
 
-Messages are JSON, one per line, on standard input and output. They are listed at the top of [`runtime/python/magi/protocol.py`](../runtime/python/magi/protocol.py). The operations Python can ask for are `sleep`, `actions`, `play_recording`, `find_image`, `find_color`, `send`, `move` and `cursor` – implemented in `perform` in [`crates/magi-engine/src/python.rs`](../crates/magi-engine/src/python.rs).
+Messages are JSON, one per line, on standard input and output. They are listed at the top of [`runtime/python/magi/protocol.py`](../runtime/python/magi/protocol.py). The operations Python can ask for are implemented in `perform` in [`crates/magi-engine/src/python.rs`](../crates/magi-engine/src/python.rs):
+
+| Kind | Operations |
+| --- | --- |
+| Time and input | `sleep`, `actions`, `send`, `move`, `cursor`, `play_recording`, `autoclick`, `rate` |
+| The screen | `find_image`, `find_color`, `focus_window` |
+| Sound | `sound_level`, `sound_match` |
+| AI models | `ai_classify`, `ai_watch` |
+| Variables and values | `resolve`, `var_get`, `var_set`, `vars`, `set_variable`, `counter`, `math`, `compare`, `text` |
+| The desktop | `clipboard`, `notify` |
+
+Running an AI model is one of them: models run in Rust on both engines, so the Python engine needs no machine-learning packages either.
 
 One Python process is started on first use and kept for as long as MacroMagi runs, so hotkey-started macros begin without a start-up delay.
 

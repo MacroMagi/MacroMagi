@@ -24,10 +24,12 @@ use magi_core::text::format_hex_color;
 use magi_engine::{LogEntry, LogLevel};
 
 use crate::background::{self, BackgroundLayer};
+use crate::components::{Component, Components, Status as ComponentStatus};
 use crate::controller::{Controller, ControllerConfig};
 use crate::document::Document;
 use crate::examples;
 use crate::history::History;
+use crate::magic::MagicDoc;
 use crate::paths::Paths;
 use crate::presets::PresetLibrary;
 use crate::settings::{ExportChoices, Settings, SettingsPage, Tab};
@@ -35,6 +37,7 @@ use crate::theme::{self, Palette, ThemeMode};
 use crate::ui::autoclicker::{ClickerEnv, ClickerEvent, ClickerTab};
 use crate::ui::inspector::{self, InspectorEnv};
 use crate::ui::macro_tab::{MacroEnv, MacroEvent, MacroTab};
+use crate::ui::magic_tab::{MagicEnv, MagicEvent, MagicTab};
 use crate::ui::options::{self, OptionsEvent, RulesWindow};
 use crate::ui::overlay::{OverlayOutcome, TargetOverlay};
 use crate::ui::recording_editor;
@@ -46,6 +49,7 @@ const TOAST_SECONDS: f32 = 4.0;
 const SETTINGS_SAVE_DELAY: Duration = Duration::from_millis(800);
 const MACRO_FILTER: (&str, &[&str]) = ("MacroMagi macro", &["magi"]);
 const PRESET_FILTER: (&str, &[&str]) = ("MacroMagi preset", &["mp"]);
+const MAGIC_FILTER: (&str, &[&str]) = ("MacroMagi model", &["magic"]);
 /// Below this width the banner's menus show icons only.
 const COMPACT_BANNER_BELOW: f32 = 720.0;
 /// Below this width the banner's menus are folded into one.
@@ -58,6 +62,16 @@ enum Pending {
     Open(Option<PathBuf>),
     Example(usize),
     ClickerGraph,
+    Quit,
+}
+
+/// What replaces the Magic tab's model once the user has decided about its unsaved changes.
+#[derive(Clone)]
+enum MagicPending {
+    New,
+    Open,
+    Import { folder: bool },
+    OpenModel(String),
     Quit,
 }
 
@@ -89,6 +103,11 @@ enum PresetKind {
 enum Job {
     Toast(String, bool),
     BackgroundReady(String),
+    /// A download finished (or failed): the message to show.
+    Component(Result<String, String>),
+    /// The parts' statuses, worked out off the UI thread.
+    ComponentStatuses(Vec<(Component, ComponentStatus)>),
+    Pythons(Vec<(PathBuf, String)>),
 }
 
 struct Toast {
@@ -134,7 +153,19 @@ pub struct MagiApp {
     clicker_tab: ClickerTab,
     clicker_history: History<AutoClickerConfig>,
     macro_tab: MacroTab,
+    magic_tab: MagicTab,
     presets: PresetLibrary,
+    /// Optional downloads, their statuses (when known), and the one being installed.
+    components: Components,
+    component_statuses: Vec<(Component, ComponentStatus)>,
+    installing: Option<(Component, Arc<std::sync::Mutex<String>>)>,
+    /// Python interpreters found on the system (`None`: not looked for yet).
+    pythons: Option<Vec<(PathBuf, String)>>,
+    gpus: Vec<magi_platform::gpu::Gpu>,
+    /// Where AI models run, as last applied.
+    applied_device: Option<magi_ml::Device>,
+    looking_for_python: bool,
+    checking_components: bool,
 
     /// The hotkey being rebound, and the chord pressed so far.
     capture: Option<(HotkeyTarget, Hotkey)>,
@@ -150,6 +181,7 @@ pub struct MagiApp {
     /// The Rate block shown in the Variable Rate Editor.
     rate_window: Option<NodeId>,
     pending: Option<Pending>,
+    magic_pending: Option<MagicPending>,
     export: Option<ExportChoices>,
     preset_prompt: Option<(PresetKind, String)>,
     hotkey_warning: Option<HotkeyWarning>,
@@ -166,8 +198,8 @@ pub struct MagiApp {
     activity: HashMap<NodeId, magi_engine::Activity>,
 
     background: BackgroundLayer,
-    /// The banner logo, made for light or dark mode.
-    logo: Option<(bool, egui::TextureHandle)>,
+    /// The banner logo, in the colour it was made for.
+    logo: Option<(egui::Color32, egui::TextureHandle)>,
     applied_palette: Option<(bool, Option<[u8; 3]>, u32)>,
     applied_window: Option<(bool, bool, f32)>,
     applied_title: String,
@@ -195,6 +227,7 @@ impl MagiApp {
         let ctx = cc.egui_ctx.clone();
         controller.clicker_monitor().set_waker(move || ctx.request_repaint());
 
+        let components = Components::new(&paths.data_dir, &paths.app_dir);
         let mut app = Self {
             presets: PresetLibrary::load(paths.presets_dir()),
             backgrounds: background::list(&paths.backgrounds_dir()),
@@ -209,6 +242,15 @@ impl MagiApp {
             data_dir_error,
             clicker_tab: ClickerTab,
             macro_tab: MacroTab::default(),
+            magic_tab: MagicTab::default(),
+            components,
+            component_statuses: Vec::new(),
+            installing: None,
+            pythons: None,
+            gpus: magi_platform::gpu::gpus(),
+            applied_device: None,
+            looking_for_python: false,
+            checking_components: false,
             capture: None,
             snip: None,
             overlay: None,
@@ -219,6 +261,7 @@ impl MagiApp {
             recording_window: None,
             rate_window: None,
             pending: None,
+            magic_pending: None,
             export: None,
             preset_prompt: None,
             hotkey_warning: None,
@@ -239,8 +282,20 @@ impl MagiApp {
             screenshot: options.screenshot.map(|path| Screenshot { path, frames_left: 45, requested: false }),
         };
         app.macro_tab.view.palette_size = vec2(app.settings.palette_size[0], app.settings.palette_size[1]);
+        app.start_onnxruntime();
 
-        if let Some(path) = options.open {
+        let magic = options
+            .open
+            .as_ref()
+            .is_some_and(|path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case(magi_core::magic::EXTENSION)));
+        if let Some(path) = options.open.as_ref().filter(|_| magic) {
+            // A model: it opens in the Magic tab.
+            match magi_core::magic::MagicFile::load(path) {
+                Ok(file) => app.magic_tab.doc = Some(MagicDoc::new(file, Some(path.clone()), Vec::new())),
+                Err(error) => app.toast_error(format!("Could not open {}: {error}", path.display())),
+            }
+            app.settings.tab = Tab::Magic;
+        } else if let Some(path) = options.open {
             app.open_path(&path);
         } else if let Some(index) = options.example {
             app.replace_document(Document::new(examples::build(index, &app.registry), None));
@@ -399,7 +454,98 @@ impl MagiApp {
                 project.graph = self.settings.clicker.to_graph(&self.registry);
                 self.replace_document(Document::new(project, None));
             }
-            Pending::Quit => self.allow_close = true,
+            Pending::Quit => self.magic_guarded(MagicPending::Quit),
+        }
+    }
+
+    /// Runs an action that replaces the Magic tab's model, asking first if it has unsaved changes.
+    fn magic_guarded(&mut self, action: MagicPending) {
+        if self.magic_tab.doc.as_ref().is_some_and(MagicDoc::would_lose_changes) {
+            self.magic_pending = Some(action);
+        } else {
+            self.magic_perform(action);
+        }
+    }
+
+    fn magic_perform(&mut self, action: MagicPending) {
+        match action {
+            MagicPending::New => self.set_magic_doc(None),
+            MagicPending::Open => {
+                let Some(path) = rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file() else {
+                    return;
+                };
+                match magi_core::magic::MagicFile::load(&path) {
+                    Ok(file) => self.set_magic_doc(Some(MagicDoc::new(file, Some(path), Vec::new()))),
+                    Err(error) => self.toast_error(format!("Could not open the model: {error}")),
+                }
+            }
+            MagicPending::Import { folder } => {
+                let path = if folder {
+                    rfd::FileDialog::new().set_title("Choose the model's project folder").pick_folder()
+                } else {
+                    rfd::FileDialog::new().add_filter("Model or project", &["onnx", "zip"]).pick_file()
+                };
+                let Some(path) = path else { return };
+                match crate::magic::import::import(&path) {
+                    Ok(imported) => {
+                        let name = imported.file.model.name.clone();
+                        self.set_magic_doc(Some(MagicDoc::new(imported.file, None, imported.notes)));
+                        self.toast(format!("Imported “{name}”. Check what the import found, then try it."));
+                    }
+                    Err(error) => self.toast_error(format!("Could not import: {error}")),
+                }
+            }
+            MagicPending::OpenModel(asset) => {
+                let Some(bytes) = self.doc.project.assets.model(&asset).cloned() else { return };
+                match magi_core::magic::MagicFile::from_bytes(&bytes) {
+                    Ok(file) => {
+                        let mut doc = MagicDoc::new(file, None, Vec::new());
+                        doc.mark_kept();
+                        self.set_magic_doc(Some(doc));
+                        self.settings.tab = Tab::Magic;
+                    }
+                    Err(error) => self.toast_error(format!("Could not open the model: {error}")),
+                }
+            }
+            MagicPending::Quit => self.allow_close = true,
+        }
+    }
+
+    /// Puts a model in the Magic tab, stopping anything running on the old one.
+    fn set_magic_doc(&mut self, doc: Option<MagicDoc>) {
+        self.magic_tab.tester = None;
+        self.magic_tab.picture = None;
+        self.magic_tab.doc = doc;
+    }
+
+    /// Saves the Magic tab's model, asking where when it has no file yet. True once saved.
+    fn save_magic(&mut self, choose_path: bool) -> bool {
+        let Some(doc) = &mut self.magic_tab.doc else { return false };
+        let path = match (&doc.path, choose_path) {
+            (Some(path), false) => Some(path.clone()),
+            _ => rfd::FileDialog::new()
+                .add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1)
+                .set_file_name(format!("{}.magic", doc.title()))
+                .save_file(),
+        };
+        let Some(mut path) = path else { return false };
+        if path.extension().is_none() {
+            path.set_extension(magi_core::magic::EXTENSION);
+        }
+        // The blocks it comes with, ready for any macro.
+        if doc.file.model.blocks.is_none() {
+            doc.file.model.blocks = Some(crate::magic::starter_blocks(&doc.file.model, "", &self.registry));
+        }
+        match doc.file.save(&path) {
+            Ok(()) => {
+                doc.mark_saved(path.clone());
+                self.toast(format!("Saved {}", path.display()));
+                true
+            }
+            Err(error) => {
+                self.toast_error(format!("Could not save: {error}"));
+                false
+            }
         }
     }
 
@@ -519,6 +665,72 @@ impl MagiApp {
                 }
             }
             UiRequest::EditRate(node) => self.rate_window = Some(node),
+            UiRequest::LoadModel(node, key) => {
+                let Some(path) = rfd::FileDialog::new().add_filter(MAGIC_FILTER.0, MAGIC_FILTER.1).pick_file() else {
+                    return;
+                };
+                match magi_core::magic::MagicFile::load(&path)
+                    .and_then(|file| Ok((file.model.name.clone(), file.for_macro()?)))
+                {
+                    Ok((name, bytes)) => {
+                        let id = self.doc.project.assets.add_model(name, bytes);
+                        if let Some(node) = self.doc.project.graph.node_mut(node) {
+                            node.set_param(&key, id);
+                        }
+                    }
+                    Err(error) => self.toast_error(format!("Could not open the model: {error}")),
+                }
+            }
+            UiRequest::OpenModel(asset) => self.magic_guarded(MagicPending::OpenModel(asset)),
+            UiRequest::AddImageFile(node) => {
+                let dialog = rfd::FileDialog::new().add_filter("Images", &["png", "jpg", "jpeg", "bmp", "webp", "gif"]);
+                let Some(paths) = dialog.pick_files() else { return };
+                for path in paths {
+                    let loaded = std::fs::read(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| magi_vision::decode(&bytes).map_err(|e| e.to_string()))
+                        .and_then(|bitmap| magi_vision::encode_png(bitmap.as_ref()).map_err(|e| e.to_string()));
+                    match loaded {
+                        Ok(png) => {
+                            let name = path
+                                .file_stem()
+                                .map_or_else(|| "Image".to_owned(), |s| s.to_string_lossy().into_owned());
+                            let id = self.doc.project.assets.add_image(name, png);
+                            self.push_image(node, id);
+                        }
+                        Err(error) => self.toast_error(format!("Could not load {}: {error}", path.display())),
+                    }
+                }
+            }
+            UiRequest::AddSoundFile(node) => {
+                let dialog = rfd::FileDialog::new().add_filter("Sounds", &["wav", "mp3", "ogg", "flac"]);
+                let Some(paths) = dialog.pick_files() else { return };
+                for path in paths {
+                    let loaded = std::fs::read(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| magi_audio::prepare_upload(&bytes).map_err(|e| e.to_string()));
+                    match loaded {
+                        Ok(wav) => {
+                            let name = path
+                                .file_stem()
+                                .map_or_else(|| "Sound".to_owned(), |s| s.to_string_lossy().into_owned());
+                            let id = self.doc.project.assets.add_audio(name, wav);
+                            if let Some(node) = self.doc.project.graph.node_mut(node) {
+                                let mut params: magi_core::nodes::sound::SoundMatchParams = node.params_or_default();
+                                let mut sounds = params.targets();
+                                if !sounds.iter().any(|t| t.sound == id) {
+                                    sounds
+                                        .push(magi_core::nodes::sound::SoundTarget { sound: id, group: String::new() });
+                                }
+                                params.sound.clear();
+                                node.set_param("sounds", sounds);
+                                node.set_param("sound", "");
+                            }
+                        }
+                        Err(error) => self.toast_error(format!("Could not load {}: {error}", path.display())),
+                    }
+                }
+            }
         }
     }
 
@@ -558,11 +770,51 @@ impl MagiApp {
             (SnipTarget::ClickerPosition, SnipOutcome::Point(Point { x, y, display })) => {
                 self.settings.clicker.position = ClickPosition::Fixed { x, y, display };
             }
+            (SnipTarget::AddImage(node), SnipOutcome::Image { png }) => {
+                let count = self.doc.project.assets.of_kind(magi_core::assets::AssetKind::Image).count();
+                let id = self.doc.project.assets.add_image(format!("Image {}", count + 1), png);
+                self.push_image(node, id);
+            }
+            (SnipTarget::ImageRegion(node, index), SnipOutcome::Region(region)) => {
+                let Some(node) = self.doc.project.graph.node_mut(node) else { return };
+                let params: magi_core::nodes::vision::FindImageParams = node.params_or_default();
+                let mut images = params.targets();
+                if let Some(target) = images.get_mut(index) {
+                    target.region = Some(region);
+                    node.set_param("images", images);
+                    node.set_param("image", "");
+                }
+            }
+            (SnipTarget::ImageGroupRegion(node, index), SnipOutcome::Region(region)) => {
+                let Some(node) = self.doc.project.graph.node_mut(node) else { return };
+                let mut params: magi_core::nodes::vision::FindImageParams = node.params_or_default();
+                if let Some(group) = params.groups.get_mut(index) {
+                    group.region = Some(region);
+                    node.set_param("groups", params.groups);
+                }
+            }
+            (SnipTarget::MagicArea, SnipOutcome::Region(region)) => {
+                if let Some(doc) = &mut self.magic_tab.doc {
+                    doc.file.model.capture.area = magi_core::magic::CaptureArea::Region { rect: region };
+                }
+            }
             (SnipTarget::ClickerNode(node), SnipOutcome::Point(point)) => {
                 targets::apply(&mut self.doc.project.graph, &TargetSource::Clicker { node }, TargetShape::Point(point));
             }
             _ => {}
         }
+    }
+
+    /// Adds an image to an Image Detection block's list.
+    fn push_image(&mut self, node: NodeId, id: String) {
+        let Some(node) = self.doc.project.graph.node_mut(node) else { return };
+        let params: magi_core::nodes::vision::FindImageParams = node.params_or_default();
+        let mut images = params.targets();
+        if !images.iter().any(|t| t.image == id) {
+            images.push(magi_core::nodes::vision::ImageTarget { image: id, ..Default::default() });
+        }
+        node.set_param("images", images);
+        node.set_param("image", "");
     }
 
     fn apply_hotkey(&mut self, target: HotkeyTarget, hotkey: Hotkey) {
@@ -657,6 +909,23 @@ impl MagiApp {
                     self.settings.appearance.background = Some(name);
                     self.backgrounds = background::list(&self.paths.backgrounds_dir());
                 }
+                Job::Component(result) => {
+                    self.installing = None;
+                    match result {
+                        Ok(message) => self.toast(message),
+                        Err(error) => self.toast_error(error),
+                    }
+                    self.refresh_components(ctx);
+                    self.pythons = None;
+                }
+                Job::ComponentStatuses(statuses) => {
+                    self.checking_components = false;
+                    self.component_statuses = statuses;
+                }
+                Job::Pythons(found) => {
+                    self.looking_for_python = false;
+                    self.pythons = Some(found);
+                }
             }
         }
 
@@ -702,6 +971,8 @@ impl MagiApp {
             }
         }
 
+        self.apply_device();
+
         // Settings are written a moment after they stop changing.
         if self.settings != self.saved_settings {
             let since = *self.settings_changed.get_or_insert_with(Instant::now);
@@ -711,6 +982,87 @@ impl MagiApp {
                 ctx.request_repaint_after(SETTINGS_SAVE_DELAY);
             }
         }
+    }
+
+    /// Loads ONNX Runtime if it has been downloaded, and applies the AI device setting.
+    fn start_onnxruntime(&mut self) {
+        self.components.clean_up();
+        if let Some((library, gpu)) = self.components.onnxruntime() {
+            if let Some(directml) = self.components.directml() {
+                magi_platform::gpu::preload(&directml);
+            }
+            if let Err(error) = magi_ml::use_onnxruntime(&library, gpu) {
+                self.toast_error(format!("ONNX Runtime could not be loaded: {}", error.0));
+            }
+        }
+        self.apply_device();
+    }
+
+    fn apply_device(&mut self) {
+        // Called every frame too, so a changed setting takes effect at once.
+        if self.applied_device != Some(self.settings.ai_device) {
+            self.applied_device = Some(self.settings.ai_device);
+            magi_ml::set_device(self.settings.ai_device);
+        }
+    }
+
+    /// Where AI models run, in a few words.
+    fn ai_engines(&self) -> String {
+        let runtime = magi_ml::onnxruntime();
+        match self.settings.ai_device {
+            magi_ml::Device::Auto => match runtime {
+                Some((_, true)) => "the fastest of CPU and graphics card".into(),
+                Some(_) => "the faster CPU engine".into(),
+                None => "the CPU".into(),
+            },
+            magi_ml::Device::Cpu => "the CPU".into(),
+            magi_ml::Device::Gpu { index } => match (runtime, self.gpus.iter().find(|g| g.index == index)) {
+                (Some((_, true)), Some(gpu)) => gpu.name.clone(),
+                _ => "a graphics card that is not available".into(),
+            },
+        }
+    }
+
+    /// Works out the optional parts' statuses in the background (it can start Python).
+    fn refresh_components(&mut self, ctx: &egui::Context) {
+        let components = self.components.clone();
+        let python = self.python_for_packages();
+        self.spawn_job(ctx, move || {
+            Job::ComponentStatuses(
+                Component::ALL.iter().map(|c| (*c, components.status(*c, python.as_deref()))).collect(),
+            )
+        });
+    }
+
+    /// The Python that packages (PyTorch) go into: MacroMagi's own, else the chosen one, else the first found.
+    fn python_for_packages(&self) -> Option<PathBuf> {
+        self.components
+            .python()
+            .or_else(|| self.settings.python_path.clone())
+            .or_else(|| self.pythons.as_ref().and_then(|found| found.first().map(|(p, _)| p.clone())))
+    }
+
+    fn install_component(&mut self, ctx: &egui::Context, component: Component, remove: bool) {
+        if self.installing.is_some() {
+            return;
+        }
+        let progress =
+            Arc::new(std::sync::Mutex::new(if remove { "Removing…".to_owned() } else { "Starting…".to_owned() }));
+        self.installing = Some((component, Arc::clone(&progress)));
+        let components = self.components.clone();
+        let python = self.python_for_packages();
+        let repaint = ctx.clone();
+        self.spawn_job(ctx, move || {
+            let report = |message: String| {
+                *progress.lock().unwrap_or_else(|p| p.into_inner()) = message;
+                repaint.request_repaint();
+            };
+            Job::Component(if remove {
+                components.uninstall(component, python.as_deref())
+            } else {
+                components.install(component, python.as_deref(), &report)
+            })
+        });
     }
 
     fn save_settings(&mut self) {
@@ -760,6 +1112,10 @@ impl MagiApp {
         let title = match self.settings.tab {
             Tab::AutoClicker => "MacroMagi".to_owned(),
             Tab::Macro => format!("{}{} – MacroMagi", self.doc.title(), if self.doc.is_dirty() { " •" } else { "" }),
+            Tab::Magic => match &self.magic_tab.doc {
+                Some(doc) => format!("{}{} – MacroMagi", doc.title(), if doc.is_dirty() { " •" } else { "" }),
+                None => "Magic – MacroMagi".to_owned(),
+            },
         };
         if title != self.applied_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -777,16 +1133,20 @@ impl MagiApp {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = if compact { 2.0 } else { 6.0 };
             if width > 470.0 {
-                let dark = theme::palette().dark;
-                if self.logo.as_ref().is_none_or(|(made_for, _)| *made_for != dark) {
-                    self.logo = Some((dark, crate::icon::logo(ui.ctx(), dark)));
+                let color = theme::accent();
+                if self.logo.as_ref().is_none_or(|(made_for, _)| *made_for != color) {
+                    self.logo = Some((color, crate::icon::logo(ui.ctx(), color)));
                 }
                 if let Some((_, logo)) = &self.logo {
                     ui.add(egui::Image::new((logo.id(), vec2(24.0, 24.0))));
                 }
             }
             let names = if width < 430.0 { ("Clicker", "Macro") } else { ("Auto Clicker", "Macro") };
-            widgets::segmented(ui, &mut self.settings.tab, &[(Tab::AutoClicker, names.0), (Tab::Macro, names.1)]);
+            widgets::segmented(
+                ui,
+                &mut self.settings.tab,
+                &[(Tab::AutoClicker, names.0), (Tab::Macro, names.1), (Tab::Magic, "Magic")],
+            );
             ui.add_space(if compact { 2.0 } else { 6.0 });
 
             if width < TINY_BANNER_BELOW {
@@ -801,19 +1161,22 @@ impl MagiApp {
                 self.menus(ui, &ctx, label);
             }
 
-            let (can_undo, can_redo) = match self.settings.tab {
+            let history = match self.settings.tab {
                 Tab::AutoClicker => {
-                    (self.clicker_history.can_undo(&self.settings.clicker), self.clicker_history.can_redo())
+                    Some((self.clicker_history.can_undo(&self.settings.clicker), self.clicker_history.can_redo()))
                 }
-                Tab::Macro => (self.doc.can_undo(), self.doc.can_redo()),
+                Tab::Macro => Some((self.doc.can_undo(), self.doc.can_redo())),
+                Tab::Magic => None,
             };
-            let undo = egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE).frame(false);
-            if ui.add_enabled(can_undo, undo).on_hover_text("Undo (Ctrl+Z)").clicked() {
-                self.undo();
-            }
-            let redo = egui::Button::new(icon::ARROW_CLOCKWISE).frame(false);
-            if ui.add_enabled(can_redo, redo).on_hover_text("Redo (Ctrl+Y)").clicked() {
-                self.redo();
+            if let Some((can_undo, can_redo)) = history {
+                let undo = egui::Button::new(icon::ARROW_COUNTER_CLOCKWISE).frame(false);
+                if ui.add_enabled(can_undo, undo).on_hover_text("Undo (Ctrl+Z)").clicked() {
+                    self.undo();
+                }
+                let redo = egui::Button::new(icon::ARROW_CLOCKWISE).frame(false);
+                if ui.add_enabled(can_redo, redo).on_hover_text("Redo (Ctrl+Y)").clicked() {
+                    self.redo();
+                }
             }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -875,6 +1238,10 @@ impl MagiApp {
             match event {
                 OptionsEvent::OpenStopHotkeys => self.stop_hotkeys_open = true,
                 OptionsEvent::OpenProcessRules => self.rules_window.open = true,
+                OptionsEvent::OpenDownloads => {
+                    self.settings.settings_page = SettingsPage::Ai;
+                    self.settings_window.open = true;
+                }
                 OptionsEvent::CreateShortcut => {
                     let icon_dir = self.paths.data_dir.join("icon");
                     self.spawn_job(ctx, move || {
@@ -888,7 +1255,9 @@ impl MagiApp {
                 }
             }
         }
-        self.presets_menu(ui, &label(icon::BOOKMARK_SIMPLE, "Presets"));
+        if self.settings.tab != Tab::Magic {
+            self.presets_menu(ui, &label(icon::BOOKMARK_SIMPLE, "Presets"));
+        }
 
         match self.settings.tab {
             Tab::AutoClicker => {
@@ -912,6 +1281,7 @@ impl MagiApp {
                 }
                 self.view_menu(ui, &label(icon::MONITOR, "View"));
             }
+            Tab::Magic => {}
         }
     }
 
@@ -919,6 +1289,7 @@ impl MagiApp {
         match self.settings.tab {
             Tab::AutoClicker => self.clicker_history.undo(&mut self.settings.clicker),
             Tab::Macro => self.doc.undo(),
+            Tab::Magic => {}
         }
     }
 
@@ -926,6 +1297,7 @@ impl MagiApp {
         match self.settings.tab {
             Tab::AutoClicker => self.clicker_history.redo(&mut self.settings.clicker),
             Tab::Macro => self.doc.redo(),
+            Tab::Magic => {}
         }
     }
 
@@ -1012,7 +1384,7 @@ impl MagiApp {
                         Box::new(|app| app.load_clicker_settings()),
                     );
                 }
-                Tab::Macro => {
+                Tab::Macro | Tab::Magic => {
                     ui.separator();
                     ui.weak(format!("{blocks} blocks"));
                 }
@@ -1033,7 +1405,9 @@ impl MagiApp {
         let mut import = false;
         let has_selection = !self.macro_tab.view.selection.is_empty();
         ui.menu_button(label, |ui| {
-            ui.set_min_width(230.0);
+            // A fixed width: rows with a button at their right end would otherwise
+            // stretch the menu as wide as the screen allows.
+            ui.set_width(240.0);
             let library = self.presets.entries().iter().map(|entry| (&entry.preset, Some(&entry.path)));
             let bundled = self.doc.project.presets.iter().map(|preset| (preset, None));
             let mut any = false;
@@ -1049,19 +1423,19 @@ impl MagiApp {
                 ui.horizontal(|ui| {
                     let name =
                         if path.is_some() { preset.name.clone() } else { format!("{}  (in this file)", preset.name) };
-                    if ui.button(name).clicked() {
+                    let width = ui.available_width() - if path.is_some() { 30.0 } else { 0.0 };
+                    let button = egui::Button::new(name).truncate().min_size(vec2(width, 22.0));
+                    if ui.add_sized([width, 22.0], button).clicked() {
                         match &preset.body {
                             PresetBody::AutoClicker(config) => load = Some(config.clone()),
                             PresetBody::Nodes(nodes) => insert = Some(nodes.clone()),
                         }
                         ui.close();
                     }
-                    if let Some(path) = path {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if widgets::icon_button(ui, icon::TRASH, "Delete this preset").clicked() {
-                                delete = Some(path.clone());
-                            }
-                        });
+                    if let Some(path) = path
+                        && widgets::icon_button(ui, icon::TRASH, "Delete this preset").clicked()
+                    {
+                        delete = Some(path.clone());
                     }
                 });
             }
@@ -1076,7 +1450,7 @@ impl MagiApp {
                         ui.close();
                     }
                 }
-                Tab::Macro => {
+                Tab::Macro | Tab::Magic => {
                     let save = egui::Button::new(format!("{}  Save selected blocks…", icon::FLOPPY_DISK));
                     if ui
                         .add_enabled(has_selection, save)
@@ -1259,8 +1633,171 @@ impl MagiApp {
                 MacroEvent::ToggleRecording => self.toggle_recording(None, true),
                 MacroEvent::Request(request) => self.handle_request(ui.ctx(), request),
                 MacroEvent::Toast(text) => self.toast(text),
+                MacroEvent::ClearVariable(name) => self.controller.clear_variable(&name),
+                MacroEvent::OpenEngineSettings => {
+                    self.settings.settings_page = SettingsPage::Engine;
+                    self.settings_window.open = true;
+                }
+                MacroEvent::ClearConsole => {
+                    self.logs.clear();
+                    self.error_node = None;
+                }
             }
         }
+    }
+
+    fn magic(&mut self, ui: &mut Ui) {
+        let displays = crate::displays::current();
+        let env = MagicEnv { displays: &displays, engines: self.ai_engines(), dry_run: self.settings.dry_run };
+        let events = self.magic_tab.show(ui, &env);
+        for event in events {
+            self.magic_event(ui.ctx(), event, &displays);
+        }
+    }
+
+    fn magic_event(&mut self, ctx: &egui::Context, event: MagicEvent, displays: &magi_core::geom::Displays) {
+        match event {
+            MagicEvent::New => self.magic_guarded(MagicPending::New),
+            MagicEvent::Open => self.magic_guarded(MagicPending::Open),
+            MagicEvent::Import { folder } => self.magic_guarded(MagicPending::Import { folder }),
+            MagicEvent::Save | MagicEvent::SaveAs => {
+                self.save_magic(matches!(event, MagicEvent::SaveAs));
+            }
+            MagicEvent::UseInMacro => self.use_model_in_macro(),
+            MagicEvent::ReplaceModel => {
+                let Some(path) = rfd::FileDialog::new().add_filter("ONNX model", &["onnx"]).pick_file() else { return };
+                let Some(doc) = &mut self.magic_tab.doc else { return };
+                match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|bytes| doc.replace_onnx(bytes)) {
+                    Ok(()) => {
+                        self.magic_tab.tester = None;
+                        self.toast("Model replaced");
+                    }
+                    Err(error) => self.toast_error(format!("Could not use that model: {error}")),
+                }
+            }
+            MagicEvent::PickArea => {
+                self.handle_request(ctx, UiRequest::Snip(crate::ui::SnipMode::Region, SnipTarget::MagicArea))
+            }
+            MagicEvent::AddData { finetune, class } => {
+                let dialog = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg", "bmp", "webp"]);
+                let Some(paths) = dialog.pick_files() else { return };
+                let Some(doc) = &mut self.magic_tab.doc else { return };
+                let folder = if finetune { "tune" } else { "train" };
+                let mut added = 0;
+                for path in paths {
+                    let Ok(bytes) = std::fs::read(&path) else { continue };
+                    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                    let file = format!("data/{folder}/{class}/{added:04}-{name}");
+                    doc.file.data.insert(file.clone(), bytes);
+                    let item = magi_core::magic::DataItem { file, class };
+                    if finetune {
+                        doc.file.model.finetune.push(item)
+                    } else {
+                        doc.file.model.training.push(item)
+                    }
+                    added += 1;
+                }
+                self.toast(format!("{added} pictures added"));
+            }
+            MagicEvent::TryPicture => {
+                let dialog = rfd::FileDialog::new().add_filter("Pictures", &["png", "jpg", "jpeg", "bmp", "webp"]);
+                let Some(path) = dialog.pick_file() else { return };
+                let Some(doc) = &self.magic_tab.doc else { return };
+                let result = std::fs::read(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| magi_vision::decode(&bytes).map_err(|e| e.to_string()))
+                    .and_then(|bitmap| {
+                        let mut model = magi_ml::Model::load(&doc.file.onnx, &doc.file.model.input).map_err(|e| e.0)?;
+                        model.classify(&bitmap.rgba, bitmap.width, bitmap.height).map_err(|e| e.0)
+                    });
+                match result {
+                    Ok(probabilities) => {
+                        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                        self.magic_tab.picture = Some((name, probabilities));
+                    }
+                    Err(error) => self.toast_error(format!("Could not run the model: {error}")),
+                }
+            }
+            MagicEvent::StartTest => {
+                let Some(doc) = &self.magic_tab.doc else { return };
+                let host = self.controller.machine(self.settings.dry_run);
+                let repaint = ctx.clone();
+                self.magic_tab.picture = None;
+                self.magic_tab.tester = Some(crate::magic::Tester::start(
+                    doc.file.onnx.clone(),
+                    doc.file.model.clone(),
+                    displays.clone(),
+                    host,
+                    self.magic_tab.press,
+                    move || repaint.request_repaint(),
+                ));
+            }
+            MagicEvent::StopTest => self.magic_tab.tester = None,
+        }
+    }
+
+    /// Puts the Magic tab's model into the open macro – replacing an earlier
+    /// version of it, if the macro has one – with blocks that run it.
+    fn use_model_in_macro(&mut self) {
+        let Some(doc) = &mut self.magic_tab.doc else { return };
+        let bytes = match doc.file.for_macro() {
+            Ok(bytes) => bytes,
+            Err(error) => return self.toast_error(format!("Could not prepare the model: {error}")),
+        };
+        doc.mark_kept();
+        let name = doc.file.model.name.clone();
+        let model = doc.file.model.clone();
+        let project = &mut self.doc.project;
+        // An earlier version: a model asset of the same name.
+        let previous: Vec<String> = project
+            .assets
+            .of_kind(magi_core::assets::AssetKind::Model)
+            .filter(|a| a.name == name)
+            .map(|a| a.id.clone())
+            .collect();
+        let id = project.assets.add_model(name.clone(), bytes);
+        let mut updated = 0;
+        for node in project.graph.nodes_mut() {
+            if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY)
+                && let Some(current) = node.param::<String>("model")
+                && previous.contains(&current)
+                && current != id
+            {
+                node.set_param("model", &id);
+                updated += 1;
+            }
+        }
+        for old in previous.iter().filter(|old| **old != id) {
+            let still_used = project.graph.referenced_assets(&self.registry).contains(old);
+            if !still_used {
+                project.assets.remove(old);
+            }
+        }
+        let uses = project.graph.nodes().any(|n| {
+            matches!(n.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY)
+                && n.param::<String>("model").as_deref() == Some(id.as_str())
+        });
+        if !uses {
+            let mut blocks =
+                model.blocks.clone().unwrap_or_else(|| crate::magic::starter_blocks(&model, &id, &self.registry));
+            for node in &mut blocks.nodes {
+                if matches!(node.kind.as_str(), ids::AI_WATCH | ids::AI_CLASSIFY) {
+                    node.set_param("model", &id);
+                }
+            }
+            let at = self.macro_tab.view.free_spot(&self.doc.project);
+            let new = self.doc.project.graph.insert_fragment(&blocks, [at.x.round(), at.y.round()]);
+            if let Some(first) = new.first() {
+                self.macro_tab.view.reveal(*first);
+            }
+            self.toast(format!("“{name}” added to the macro, with blocks that run it"));
+        } else {
+            self.toast(match updated {
+                0 => format!("“{name}” is already in the macro"),
+                n => format!("“{name}” updated in the macro ({n} blocks)"),
+            });
+        }
+        self.settings.tab = Tab::Macro;
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -1338,12 +1875,20 @@ impl MagiApp {
                 hotkey: node.params_or_default::<StartParams>().hotkey,
             })
             .collect();
+        let installing = self
+            .installing
+            .as_ref()
+            .map(|(component, progress)| (*component, progress.lock().unwrap_or_else(|p| p.into_inner()).clone()));
         let env = SettingsEnv {
             capturing: self.capture.as_ref().map(|(target, pending)| (target, pending)),
             python: &python,
             starts: &starts,
             backgrounds: &self.backgrounds,
             downloading: self.downloading,
+            pythons: self.pythons.as_deref(),
+            gpus: &self.gpus,
+            components: &self.component_statuses,
+            installing,
         };
         let events = self.settings_window.show(ctx, &mut self.settings, &env);
         for event in events {
@@ -1393,6 +1938,24 @@ impl MagiApp {
                     self.settings.reset_all();
                     self.toast("All settings reset");
                 }
+                SettingsEvent::FindPythons => {
+                    if !self.looking_for_python {
+                        self.looking_for_python = true;
+                        self.pythons = None;
+                        let (components, app_dir) = (self.components.clone(), self.paths.app_dir.clone());
+                        self.spawn_job(ctx, move || {
+                            Job::Pythons(crate::components::find_pythons(&components, &app_dir))
+                        });
+                    }
+                }
+                SettingsEvent::CheckComponents => {
+                    if !self.checking_components {
+                        self.checking_components = true;
+                        self.refresh_components(ctx);
+                    }
+                }
+                SettingsEvent::Install(component) => self.install_component(ctx, component, false),
+                SettingsEvent::Remove(component) => self.install_component(ctx, component, true),
                 SettingsEvent::SetStartHotkey(node, hotkey) => {
                     if let Some(node) = self.doc.project.graph.node_mut(node) {
                         node.set_param("hotkey", hotkey);
@@ -1531,6 +2094,7 @@ impl MagiApp {
 
     fn dialogs(&mut self, ctx: &egui::Context) {
         self.unsaved_dialog(ctx);
+        self.unsaved_model_dialog(ctx);
         self.export_dialog(ctx);
         self.preset_dialog(ctx);
         self.hotkey_warning_dialog(ctx);
@@ -1569,6 +2133,49 @@ impl MagiApp {
                 self.perform(action);
             }
             Some(None) => self.pending = None,
+            None => {}
+        }
+    }
+
+    fn unsaved_model_dialog(&mut self, ctx: &egui::Context) {
+        if self.pending.is_some() {
+            return;
+        }
+        let Some(action) = self.magic_pending.clone() else { return };
+        let Some(title) = self.magic_tab.doc.as_ref().map(MagicDoc::title) else {
+            self.magic_pending = None;
+            return self.magic_perform(action);
+        };
+        let mut decision = None;
+        egui::Modal::new(egui::Id::new("unsaved-model")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.label(RichText::new("Save the model?").strong().size(15.0));
+            ui.label(format!("“{title}” in the Magic tab has changes that have not been saved."));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if widgets::accent_button(ui, "Save", theme::accent(), vec2(70.0, 26.0)).clicked() {
+                    decision = Some(Some(true));
+                }
+                if ui.button("Don't save").clicked() {
+                    decision = Some(Some(false));
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    decision = Some(None);
+                }
+            });
+        });
+        match decision {
+            Some(Some(true)) => {
+                self.magic_pending = None;
+                if self.save_magic(false) {
+                    self.magic_perform(action);
+                }
+            }
+            Some(Some(false)) => {
+                self.magic_pending = None;
+                self.magic_perform(action);
+            }
+            Some(None) => self.magic_pending = None,
             None => {}
         }
     }
@@ -1817,11 +2424,16 @@ impl eframe::App for MagiApp {
         self.shortcuts(&ctx);
 
         // Closing with unsaved changes asks first.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close && self.doc.is_dirty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.pending = Some(Pending::Quit);
+        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_close {
+            if self.doc.is_dirty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.pending = Some(Pending::Quit);
+            } else if self.magic_tab.doc.as_ref().is_some_and(MagicDoc::would_lose_changes) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.magic_pending = Some(MagicPending::Quit);
+            }
         }
-        if self.allow_close && self.pending.is_none() && self.screenshot.is_none() {
+        if self.allow_close && self.pending.is_none() && self.magic_pending.is_none() && self.screenshot.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         let (size, minimized) =
@@ -1881,6 +2493,7 @@ impl eframe::App for MagiApp {
             match self.settings.tab {
                 Tab::AutoClicker => self.clicker(ui),
                 Tab::Macro => self.macro_editor(ui),
+                Tab::Magic => self.magic(ui),
             }
         });
 
@@ -2167,5 +2780,124 @@ mod tests {
         harness.get_by_label_contains("Reset all hotkeys").click();
         harness.run_steps(3);
         assert_eq!(harness.state().settings.run_hotkey, Hotkey::key(Key::F7));
+    }
+
+    #[test]
+    fn the_presets_menu_stays_narrow_with_presets_in_it() {
+        let mut harness = app_sized(1280.0, 900.0);
+        harness.state_mut().settings.tab = Tab::Macro;
+        harness.state_mut().doc.project.presets.push(magi_core::preset::Preset {
+            name: "A preset with a rather long name that would make the menu wide".into(),
+            description: String::new(),
+            body: magi_core::preset::PresetBody::Nodes(magi_core::preset::NodePreset {
+                fragment: magi_core::graph::Fragment::default(),
+                assets: Vec::new(),
+            }),
+        });
+        harness.run_steps(2);
+        harness.get_by_label_contains("Presets").click();
+        harness.run_steps(3);
+        let row = harness.get_by_label_contains("(in this file)").rect();
+        let import = harness.get_by_label_contains("Import a .mp file").rect();
+        assert!(row.width() <= 260.0 && import.width() <= 260.0, "{row:?} {import:?}");
+    }
+
+    /// A tiny model with one adjustable setting, as the Magic tab would hold it.
+    fn magic_doc() -> MagicDoc {
+        use magi_core::magic::{ClassSpec, MagicFile, MagicModel, ModelSetting, SettingKind, SettingTarget};
+        let onnx = include_bytes!("../../magi-engine/tests/data/channel_means.onnx").to_vec();
+        let model = MagicModel {
+            name: "Watcher".into(),
+            classes: ["red", "green", "blue"]
+                .iter()
+                .map(|label| ClassSpec { label: (*label).into(), act: *label != "red", threshold: 0.5, delay_ms: 0.0 })
+                .collect(),
+            settings: vec![ModelSetting {
+                key: "thresh".into(),
+                label: "Confidence".into(),
+                kind: SettingKind::Percent,
+                min: 1.0,
+                max: 100.0,
+                default: 60.0,
+                value: 60.0,
+                targets: vec![SettingTarget::Threshold { class: 1 }, SettingTarget::Threshold { class: 2 }],
+                ..ModelSetting::default()
+            }],
+            ..MagicModel::default()
+        };
+        MagicDoc::new(MagicFile { model, onnx, ..MagicFile::default() }, None, Vec::new())
+    }
+
+    #[test]
+    fn a_model_from_the_magic_tab_goes_into_the_macro_with_blocks_that_run_it() {
+        let mut harness = app_sized(1280.0, 900.0);
+        harness.state_mut().settings.tab = Tab::Magic;
+        harness.state_mut().magic_tab.doc = Some(magic_doc());
+        harness.run_steps(3);
+        harness.state_mut().use_model_in_macro();
+        harness.run_steps(3);
+
+        let state = harness.state();
+        assert_eq!(state.settings.tab, Tab::Macro);
+        let models: Vec<String> =
+            state.doc.project.assets.of_kind(magi_core::assets::AssetKind::Model).map(|a| a.id.clone()).collect();
+        assert_eq!(models.len(), 1);
+        let watch = state.doc.project.graph.nodes().find(|n| n.kind == ids::AI_WATCH).expect("an AI Watch block");
+        assert_eq!(watch.param::<String>("model").as_ref(), Some(&models[0]));
+        let watch = watch.id;
+        let blocks = state.doc.project.graph.nodes().count();
+
+        // Using it again adds nothing new.
+        harness.state_mut().use_model_in_macro();
+        harness.run_steps(2);
+        assert_eq!(harness.state().doc.project.graph.nodes().count(), blocks);
+
+        // The block shows the model's setting, and changing it is kept per block.
+        harness.state_mut().macro_tab.view.focus_node(watch);
+        harness.run_steps(3);
+        harness.get_by_label("Confidence");
+        let node = harness.state_mut().doc.project.graph.node_mut(watch).unwrap();
+        node.set_param("settings", serde_json::json!({ "thresh": 80.0 }));
+        harness.run_steps(2);
+        let reset = harness.query_all_by_label(icon::ARROW_COUNTER_CLOCKWISE).count();
+        assert!(reset >= 1, "a changed setting has a reset button");
+
+        // And it opens back in the Magic tab.
+        harness.get_by_label_contains("Open in Magic").click();
+        harness.run_steps(3);
+        assert_eq!(harness.state().settings.tab, Tab::Magic);
+        assert_eq!(harness.state().magic_tab.doc.as_ref().map(MagicDoc::title).as_deref(), Some("Watcher"));
+    }
+
+    #[test]
+    fn replacing_an_unsaved_model_asks_first() {
+        let mut harness = app_sized(1280.0, 900.0);
+        harness.state_mut().settings.tab = Tab::Magic;
+        harness.state_mut().magic_tab.doc = Some(magic_doc());
+        harness.run_steps(2);
+        let displays = magi_core::geom::Displays::default();
+        let ctx = harness.ctx.clone();
+        harness.state_mut().magic_event(&ctx, MagicEvent::New, &displays);
+        harness.run_steps(3);
+        assert!(harness.state().magic_tab.doc.is_some(), "nothing is lost before the answer");
+        harness.get_by_label("Save the model?");
+        harness.get_by_label("Cancel").click();
+        harness.run_steps(3);
+        assert!(harness.state().magic_tab.doc.is_some());
+
+        harness.state_mut().magic_event(&ctx, MagicEvent::New, &displays);
+        harness.run_steps(3);
+        harness.get_by_label("Don't save").click();
+        harness.run_steps(3);
+        assert!(harness.state().magic_tab.doc.is_none());
+
+        // Once in the macro, nothing would be lost.
+        harness.state_mut().magic_tab.doc = Some(magic_doc());
+        harness.state_mut().use_model_in_macro();
+        harness.state_mut().settings.tab = Tab::Magic;
+        harness.run_steps(2);
+        harness.state_mut().magic_event(&ctx, MagicEvent::New, &displays);
+        harness.run_steps(2);
+        assert!(harness.state().magic_tab.doc.is_none() && harness.state().magic_pending.is_none());
     }
 }

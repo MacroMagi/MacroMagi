@@ -95,7 +95,8 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
                 options.tab = Some(match value("--tab")? {
                     "clicker" => Tab::AutoClicker,
                     "macro" => Tab::Macro,
-                    other => return Err(format!("unknown tab `{other}` (use clicker or macro)")),
+                    "magic" => Tab::Magic,
+                    other => return Err(format!("unknown tab `{other}` (use clicker, macro or magic)")),
                 });
             }
             "--cards" => options.show_cards = true,
