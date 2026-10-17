@@ -1,6 +1,6 @@
 [package]
 name = "magi-vision"
-description = "MacroMagi screen analysis: template matching and colour search on raw pixel buffers."
+description = "MacroMagi screen analysis: template matching and color search on raw pixel buffers."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -117,6 +117,41 @@ impl FindImageParams {
     }
 }
 
+/// How much a Text Scan block enlarges the picture before reading it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Enlarge {
+    #[default]
+    Off,
+    Double,
+    Triple,
+}
+
+impl Enlarge {
+    pub fn factor(self) -> u32 {
+        match self {
+            Enlarge::Off => 1,
+            Enlarge::Double => 2,
+            Enlarge::Triple => 3,
+        }
+    }
+}
+
+/// Settings of a **Text Scan** block.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReadTextParams {
+    /// Where to read. `None` reads the whole of `display`.
+    pub region: Option<Rect>,
+    pub display: u8,
+    /// Text to look for; empty: any text counts as found.
+    pub find: String,
+    pub match_case: bool,
+    pub enlarge: Enlarge,
+    /// A language tag such as `en-US`; empty for the system's languages.
+    pub language: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FindColorParams {
@@ -223,13 +258,66 @@ pub(super) fn register(registry: &mut Registry) {
 
     registry.register(
         NodeDef::new(
+            ids::READ_TEXT,
+            "Text Scan",
+            Category::Vision,
+            "Reads the text in an area of the screen (optical character recognition). “Text” is what it \
+             reads, line by line. With text to look for, “Found” says whether it is there and “Position” \
+             is where; “Number” is the first number in the text. Uses the text recognition built into \
+             Windows.",
+        )
+        .keywords(&["ocr", "read", "text", "scan", "recognise", "recognize", "number", "words", "letters"])
+        .data_out("found", "Found", DataType::Bool)
+        .data_out("text", "Text", DataType::Text)
+        .data_out("position", "Position", DataType::Point)
+        .data_out("number", "Number", DataType::Number)
+        .param(
+            ParamDef::new("region", "Area", ParamKind::Region)
+                .help("The area to read. A small area around the text is faster and reads more reliably."),
+        )
+        .param(ParamDef::new("display", "Display", ParamKind::Display).help("The display read when there is no area."))
+        .param(
+            ParamDef::new("find", "Look for", ParamKind::Text { multiline: false })
+                .help("Text that makes “Found” true. Empty: any text does."),
+        )
+        .param(ParamDef::new("match_case", "Match upper and lower case", ParamKind::Bool))
+        .param(
+            ParamDef::new(
+                "enlarge",
+                "Enlarge",
+                ParamKind::choice(&[
+                    ("off", "No – the text is a normal size"),
+                    ("double", "Twice – small text"),
+                    ("triple", "Three times – tiny text"),
+                ]),
+            )
+            .help("Text recognition needs letters at least about 10 pixels tall."),
+        )
+        .param(
+            ParamDef::new("language", "Language", ParamKind::Text { multiline: false })
+                .help("A language tag such as en-US or de-DE. Empty: the languages of your Windows."),
+        )
+        .defaults(&ReadTextParams::default())
+        .summarize(|node, _| {
+            let p: ReadTextParams = node.params_or_default();
+            let headline = if p.find.trim().is_empty() {
+                "Reads text".to_owned()
+            } else {
+                format!("Looks for “{}”", p.find.trim())
+            };
+            vec![headline, region_line(p.region, p.display)]
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
             ids::FIND_COLOR,
             "Color Detection",
             Category::Vision,
-            "Looks for a colour on screen. “Found” is true when at least one pixel in the search \
+            "Looks for a color on screen. “Found” is true when at least one pixel in the search \
              area matches; “Position” is the first matching pixel.",
         )
-        .keywords(&["pixel", "colour", "color", "rgb", "detect"])
+        .keywords(&["pixel", "color", "colour", "rgb", "detect"])
         .data_out("found", "Found", DataType::Bool)
         .data_out("position", "Position", DataType::Point)
         .param(ParamDef::new("color", "Color", ParamKind::Color))

@@ -7,15 +7,15 @@
 //! two things a person means by "it looks the same":
 //!
 //! * **structure** – the zero-mean normalised cross-correlation of the two
-//!   patches over all three colour channels. Unrelated content scores near 0,
+//!   patches over all three color channels. Unrelated content scores near 0,
 //!   which is what makes a threshold like 80% meaningful.
-//! * **colour closeness** – `(1 − RMS pixel difference)²`. Correlation alone
+//! * **color closeness** – `(1 − RMS pixel difference)²`. Correlation alone
 //!   ignores brightness and contrast, so a greyed-out button would otherwise
 //!   match its enabled twin perfectly. Squaring it keeps mere "same shape,
-//!   different colours" coincidences well below the usual 80% threshold.
+//!   different colors" coincidences well below the usual 80% threshold.
 //!
 //! Identical pixels score exactly `1.0`. A needle with no structure at all (a
-//! solid colour) is scored on colour closeness only.
+//! solid color) is scored on color closeness only.
 //!
 //! Very small or featureless needles (a bare edge, a 12 px square) can score
 //! surprisingly high against unrelated content; the ignored `chance_scores`
@@ -61,7 +61,7 @@ const ROW_CANDIDATES: usize = 3;
 const REFINE_RADIUS: i64 = 2;
 /// Candidates scoring this far below the leader are dropped during refinement.
 const PRUNE_MARGIN: f64 = 0.15;
-/// Per-sample variance below which a patch counts as a solid colour.
+/// Per-sample variance below which a patch counts as a solid color.
 const FLAT_VARIANCE: f64 = 1.0;
 /// Memory budget for the summed-area tables of one band of the coarse scan.
 const BAND_BYTES: usize = 24 * 1024 * 1024;
@@ -270,7 +270,7 @@ impl Level {
     /// Similarity of the haystack patch at `(x, y)`, given its sums.
     fn score(&self, x: usize, y: usize, patch: Sums) -> f64 {
         let pixels = self.samples / 3.0;
-        // Σ (patch − needle)², needed for the colour term either way.
+        // Σ (patch − needle)², needed for the color term either way.
         let squared_error = |cross: f64| (patch.squares - 2.0 * cross + self.needle_sums.squares).max(0.0);
         let closeness = |squared_error: f64| {
             let c = 1.0 - (squared_error / self.samples).sqrt() / 255.0;
@@ -485,7 +485,7 @@ mod tests {
     }
 
     #[test]
-    fn colour_matters_not_only_shape() {
+    fn color_matters_not_only_shape() {
         let button = |rgb| {
             let mut b = Bitmap { width: 40, height: 24, rgba: [128, 128, 128, 255].repeat(40 * 24) };
             fill(&mut b, 6, 5, 28, 14, rgb);
@@ -515,7 +515,7 @@ mod tests {
     }
 
     #[test]
-    fn solid_needles_are_matched_on_colour() {
+    fn solid_needles_are_matched_on_color() {
         let mut screen = Bitmap { width: 120, height: 80, rgba: [20, 20, 20, 255].repeat(120 * 80) };
         fill(&mut screen, 70, 30, 20, 20, [255, 60, 0]);
         let orange = Bitmap { width: 10, height: 10, rgba: [255, 60, 0, 255].repeat(100) };

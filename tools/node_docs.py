@@ -35,7 +35,7 @@ KIND_NAMES = {
     "bool": "on/off", "int": "whole number", "float": "number", "duration": "duration",
     "percent": "percentage", "text": "text", "code": "code", "choice": "choice", "key": "key",
     "mouse_button": "mouse button", "hotkey": "hotkey", "point": "screen position",
-    "region": "screen area", "color": "colour", "image": "image", "recording": "recording",
+    "region": "screen area", "color": "color", "image": "image", "recording": "recording",
     "actions": "list of inputs", "cases": "list of cases", "clicker": "Auto Clicker settings",
     "variable": "variable", "definition": "definition", "block": "block", "display": "display",
     "audio": "sound", "images": "list of images", "sounds": "list of sounds",

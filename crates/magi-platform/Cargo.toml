@@ -35,6 +35,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# Text recognition (Windows.Media.Ocr). The same version screen capture uses.
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+] }
 
 # Everything else listens through rdev.
 [target.'cfg(not(windows))'.dependencies]
@@ -43,6 +51,8 @@ rdev = "0.5"
 [dev-dependencies]
 # The system tests inject input "as the user" (without MacroMagi's marker).
 enigo.workspace = true
+# To decode the picture the text recognition test reads.
+magi-vision.workspace = true
 
 [lints]
 workspace = true

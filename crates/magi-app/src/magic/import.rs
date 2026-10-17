@@ -8,7 +8,7 @@
 //! * the class names, from a Markdown table with a "Class" column, or from a
 //!   dictionary of numbered entries in code (`3: {"desc": "Hit", "hit": True}`),
 //!   which may also say which classes call for action;
-//! * the colour normalisation, from `mean`/`std` lists of three numbers;
+//! * the color normalisation, from `mean`/`std` lists of three numbers;
 //! * the screen area, from a crop size given relative to a 1080-pixel screen;
 //! * adjustable settings, from a `settings.json` of numbers, or else from
 //!   typed declarations in code (`thresh: int = 60`, with named numbers looked
@@ -198,12 +198,12 @@ pub fn import(path: &Path) -> Result<Imported, String> {
         (Some(mean), Some(std)) => {
             magic.input.mean = mean;
             magic.input.std = std;
-            notes.push(format!("Colour normalisation found: mean {mean:?}, std {std:?}."));
+            notes.push(format!("Color normalisation found: mean {mean:?}, std {std:?}."));
         }
         _ => {
             magic.input.mean = IMAGENET_MEAN;
             magic.input.std = IMAGENET_STD;
-            notes.push("No colour normalisation was found; the common ImageNet one is used.".into());
+            notes.push("No color normalisation was found; the common ImageNet one is used.".into());
         }
     }
 
@@ -257,7 +257,7 @@ pub fn import(path: &Path) -> Result<Imported, String> {
 
     // Key and cooldown.
     let mentions_space = texts.iter().any(|(_, t)| t.to_lowercase().contains("space"));
-    magic.action.key = Key::Space;
+    magic.action.key = magi_core::input::Button::Key(Key::Space);
     notes.push(if mentions_space {
         "The key to press is Space (the files mention it).".into()
     } else {

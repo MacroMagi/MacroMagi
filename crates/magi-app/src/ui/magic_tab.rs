@@ -111,7 +111,7 @@ impl MagicTab {
     }
 
     fn toolbar(&mut self, ui: &mut Ui, env: &MagicEnv<'_>, events: &mut Vec<MagicEvent>) {
-        ui.horizontal(|ui| {
+        widgets::button_row(ui, |ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.menu_button(format!("{}  Import", icon::DOWNLOAD_SIMPLE), |ui| {
                 ui.set_width(250.0);
@@ -142,6 +142,10 @@ impl MagicTab {
             }
             ui.add_space(6.0);
             let ready = self.doc.as_ref().is_some_and(|d| !d.file.onnx.is_empty());
+            // The button sits in its own scope, which would not move to the next line by itself.
+            if ui.available_size_before_wrap().x < 130.0 {
+                ui.end_row();
+            }
             ui.add_enabled_ui(ready, |ui| {
                 if widgets::accent_button(
                     ui,
@@ -159,7 +163,7 @@ impl MagicTab {
                 ui.label(
                     RichText::new(format!("{}  {}", icon::CPU, env.engines)).size(11.5).color(theme::text_faint()),
                 )
-                .on_hover_text("Where models run. Change it under Settings → AI.");
+                .on_hover_text("Where models run. Change it under Settings › AI.");
                 if let Some(doc) = &self.doc {
                     let name = if doc.is_dirty() { format!("{} •", doc.title()) } else { doc.title() };
                     ui.add(egui::Label::new(RichText::new(name).color(theme::text_dim())).truncate());
@@ -172,7 +176,7 @@ impl MagicTab {
         let doc = self.doc.as_ref().expect("checked by the caller");
         ui.label(RichText::new("TRY IT").size(10.5).color(theme::text_faint()));
         let running = self.tester.is_some();
-        ui.horizontal(|ui| {
+        widgets::button_row(ui, |ui| {
             let (text, color) = if running {
                 (format!("{}  Stop", icon::STOP), theme::danger())
             } else {
@@ -302,7 +306,7 @@ fn empty_state(ui: &mut Ui, events: &mut Vec<MagicEvent>) {
         ui.label(RichText::new(icon::MAGIC_WAND).size(46.0).color(theme::accent()));
         ui.label(RichText::new("Magic").size(22.0).strong());
         ui.add_space(4.0);
-        ui.set_max_width(460.0);
+        ui.set_max_width(ui.available_width().min(460.0));
         ui.add(
             egui::Label::new(
                 RichText::new(
@@ -314,22 +318,33 @@ fn empty_state(ui: &mut Ui, events: &mut Vec<MagicEvent>) {
             .wrap(),
         );
         ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            ui.add_space((ui.available_width() - 420.0).max(0.0) / 2.0);
-            if widgets::accent_button(ui, format!("{}  Import a project folder…", icon::FOLDER_OPEN), theme::accent(), vec2(0.0, 32.0))
-                .clicked()
-            {
+        let buttons = |ui: &mut Ui, events: &mut Vec<MagicEvent>| {
+            let folder = format!("{}  Import a project folder…", icon::FOLDER_OPEN);
+            if widgets::accent_button(ui, folder, theme::accent(), vec2(0.0, 32.0)).clicked() {
                 events.push(MagicEvent::Import { folder: true });
             }
-            if ui.add(egui::Button::new(format!("{}  Import a .zip or .onnx…", icon::FILE_ZIP)).min_size(vec2(0.0, 32.0))).clicked() {
+            let file = egui::Button::new(format!("{}  Import a .zip or .onnx…", icon::FILE_ZIP));
+            if ui.add(file.min_size(vec2(0.0, 32.0))).clicked() {
                 events.push(MagicEvent::Import { folder: false });
             }
-            if ui.add(egui::Button::new(format!("{}  Open .magic…", icon::FOLDER_OPEN)).min_size(vec2(0.0, 32.0))).clicked() {
+            let open = egui::Button::new(format!("{}  Open .magic…", icon::FOLDER_OPEN));
+            if ui.add(open.min_size(vec2(0.0, 32.0))).clicked() {
                 events.push(MagicEvent::Open);
             }
-        });
+        };
+        // Side by side when they fit, else one under the other.
+        if ui.available_width() >= 560.0 {
+            ui.horizontal(|ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                ui.add_space((ui.available_width() - 520.0).max(0.0) / 2.0);
+                buttons(ui, events);
+            });
+        } else {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            buttons(ui, events);
+        }
         ui.add_space(10.0);
-        widgets::note(ui, "Training and fine-tuning your own models here is coming. PyTorch, which they need, can already be installed under Settings → AI.");
+        widgets::note(ui, "Training and fine-tuning your own models here is coming. PyTorch, which they need, can already be installed under Settings › AI.");
     });
 }
 
@@ -386,7 +401,9 @@ fn editor(ui: &mut Ui, doc: &mut MagicDoc, env: &MagicEnv<'_>, events: &mut Vec<
     card(ui, "When it acts", |ui| {
         ui.horizontal(|ui| {
             widgets::fixed_label(ui, RichText::new("Press").color(theme::text_dim()), 120.0);
-            widgets::key_picker(ui, "magic-key", &mut model.action.key);
+            if let Some(picked) = widgets::input_picker(ui, "magic-key", model.action.key, true) {
+                model.action.key = picked;
+            }
         });
         ui.horizontal(|ui| {
             widgets::fixed_label(ui, RichText::new("Hold for").color(theme::text_dim()), 120.0);
@@ -510,7 +527,7 @@ fn classes_card(ui: &mut Ui, model: &mut MagicModel) {
             ui.end_row();
         }
     });
-    ui.horizontal(|ui| {
+    widgets::button_row(ui, |ui| {
         if ui.small_button(format!("{}  Add answer", icon::PLUS)).clicked() {
             let n = model.classes.len();
             model.classes.push(ClassSpec { label: format!("Class {n}"), threshold: 0.5, ..ClassSpec::default() });
@@ -647,7 +664,7 @@ fn input_card(ui: &mut Ui, model: &mut MagicModel) {
         widgets::segmented(ui, &mut input.layout, &[(Layout::Nchw, "Channels first"), (Layout::Nhwc, "Channels last")]);
     });
     ui.horizontal(|ui| {
-        widgets::fixed_label(ui, RichText::new("Colours").color(theme::text_dim()), 110.0);
+        widgets::fixed_label(ui, RichText::new("Colors").color(theme::text_dim()), 110.0);
         widgets::segmented(ui, &mut input.color, &[(ColorOrder::Rgb, "RGB"), (ColorOrder::Bgr, "BGR")]);
     });
     ui.horizontal(|ui| {

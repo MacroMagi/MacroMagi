@@ -16,7 +16,7 @@ use magi_core::assets::AssetKind;
 use magi_core::geom::{Displays, Point, Rect};
 use magi_core::graph::{Node, NodeId};
 use magi_core::hotkey::Hotkey;
-use magi_core::input::{Key, MouseButton};
+use magi_core::input::{Button, Key, MouseButton};
 use magi_core::nodes::flow::{Case, DefineParams};
 use magi_core::nodes::{EngineSupport, ParamDef, ParamKind, Registry, ids};
 use magi_core::project::Project;
@@ -490,7 +490,11 @@ fn edit_param(
         }
         ParamKind::Color => {
             let text: String = read(node, param);
-            let mut rgb = parse_hex_color(&text).unwrap_or([255, 0, 0]);
+            // Empty (a comment's default) stands for the theme color.
+            let mut rgb = parse_hex_color(&text).unwrap_or_else(|| {
+                let accent = theme::accent();
+                [accent.r(), accent.g(), accent.b()]
+            });
             ui.horizontal(|ui| {
                 if ui.color_edit_button_srgb(&mut rgb).changed() {
                     node.set_param(key, format_hex_color(rgb));
@@ -501,7 +505,7 @@ fn edit_param(
                 }
                 if ui
                     .button(format!("{}  Pick", icon::EYEDROPPER))
-                    .on_hover_text("Take the colour of a pixel on screen")
+                    .on_hover_text("Take the color of a pixel on screen")
                     .clicked()
                 {
                     requests.push(UiRequest::Snip(SnipMode::Color, SnipTarget::NodeParam(node_id, key.to_owned())));
@@ -555,8 +559,8 @@ fn edit_param(
                 },
             );
         }
-        ParamKind::Images => super::lists::edit_images(ui, project, node_id, env.images, requests),
-        ParamKind::Sounds => super::lists::edit_sounds(ui, project, node_id, requests),
+        ParamKind::Images => super::lists::edit_images(ui, project, env.registry, node_id, env.images, requests),
+        ParamKind::Sounds => super::lists::edit_sounds(ui, project, env.registry, node_id, requests),
         ParamKind::AudioDevice => {
             let current: String = read(node, param);
             let shown = if current.is_empty() { "System default".to_owned() } else { current.clone() };
@@ -957,13 +961,41 @@ pub fn edit_actions(ui: &mut Ui, node: &mut Node, key: &str, displays: &Displays
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
                     let pick = SnipTarget::Action(node.id, key.to_owned(), index);
+                    // A key or a mouse button: choosing one of the other kind changes the input's kind.
+                    let replacement = match action {
+                        Action::Key { key, mode } => match widgets::input_picker(ui, "key", Button::Key(*key), true) {
+                            Some(Button::Key(picked)) => {
+                                *key = picked;
+                                changed = true;
+                                None
+                            }
+                            Some(Button::Mouse(button)) => {
+                                Some(Action::Mouse { button, mode: *mode, clicks: 1, at: None })
+                            }
+                            _ => None,
+                        },
+                        Action::Mouse { button, mode, .. } => {
+                            match widgets::input_picker(ui, "button", Button::Mouse(*button), true) {
+                                Some(Button::Mouse(picked)) => {
+                                    *button = picked;
+                                    changed = true;
+                                    None
+                                }
+                                Some(Button::Key(key)) => Some(Action::Key { key, mode: *mode }),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(new) = replacement {
+                        *action = new;
+                        changed = true;
+                    }
                     match action {
-                        Action::Key { key, mode } => {
-                            changed |= widgets::key_picker(ui, "key", key);
+                        Action::Key { mode, .. } => {
                             changed |= press_mode_picker(ui, mode);
                         }
-                        Action::Mouse { button, mode, clicks, at } => {
-                            changed |= widgets::mouse_button_picker(ui, "button", button);
+                        Action::Mouse { mode, clicks, at, .. } => {
                             changed |= press_mode_picker(ui, mode);
                             if *mode == PressMode::Tap {
                                 changed |= ui

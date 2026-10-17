@@ -9,6 +9,66 @@ use crate::input::MouseButton;
 use crate::recording::MouseReplay;
 use crate::text::{format_ms, trim_float};
 
+/// What an Auto Typer does with a line break.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewLines {
+    #[default]
+    Enter,
+    ShiftEnter,
+    Space,
+    Skip,
+}
+
+/// Settings of an **Auto Typer** block.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoTypeParams {
+    pub text: String,
+    /// Characters per second.
+    pub speed: f64,
+    /// How much each pause may differ, `0.0..=1.0`.
+    pub variation: f64,
+    /// A longer pause after punctuation.
+    pub punctuation_pause: bool,
+    /// The chance of a typo (typed, then corrected) per letter, `0.0..=1.0`.
+    pub typos: f64,
+    /// Leave out spaces and line breaks at both ends.
+    pub trim: bool,
+    /// Characters to leave out at the start.
+    pub skip: u64,
+    /// Type at most this many characters; 0 for all.
+    pub limit: u64,
+    pub new_lines: NewLines,
+    pub enter_at_end: bool,
+}
+
+impl Default for AutoTypeParams {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            speed: 12.0,
+            variation: 0.3,
+            punctuation_pause: true,
+            typos: 0.0,
+            trim: false,
+            skip: 0,
+            limit: 0,
+            new_lines: NewLines::Enter,
+            enter_at_end: false,
+        }
+    }
+}
+
+impl AutoTypeParams {
+    /// The characters to type, after trimming, skipping and the limit.
+    pub fn characters(&self, text: &str) -> Vec<char> {
+        let text = if self.trim { text.trim() } else { text };
+        let chars = text.chars().filter(|c| *c != '\r').skip(self.skip as usize);
+        if self.limit > 0 { chars.take(self.limit as usize).collect() } else { chars.collect() }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActionParams {
@@ -122,6 +182,79 @@ pub(super) fn register(registry: &mut Registry) {
                 timing.push_str(&format!(" at {}×", trim_float(p.speed, 2)));
             }
             vec![asset.name.clone(), recording.summary(), timing]
+        }),
+    );
+
+    registry.register(
+        NodeDef::new(
+            ids::AUTOTYPE,
+            "Auto Typer",
+            Category::Input,
+            "Types text, character by character, at a speed that can vary like a person's. The text is \
+             its own setting, a variable it is linked to, or whatever is wired into “Text”.",
+        )
+        .keywords(&["type", "typing", "text", "keyboard", "write", "paste", "autotype", "typer"])
+        .flow_in()
+        .flow_out(ports::OUT, "")
+        .data_in("text", "Text", DataType::Text)
+        .data_out("typed", "Characters typed", DataType::Number)
+        .param(
+            ParamDef::new("text", "Text", ParamKind::Text { multiline: true })
+                .help("What to type. A value wired into “Text” is typed instead."),
+        )
+        .param(
+            ParamDef::new("speed", "Characters per second", ParamKind::float(0.5, 2000.0, "per second"))
+                .help("A person types about 5 per second (60 words a minute)."),
+        )
+        .param(
+            ParamDef::new("variation", "Speed variation", ParamKind::Percent)
+                .help("How much each pause between characters may differ, so the rhythm is not mechanical."),
+        )
+        .param(
+            ParamDef::new("punctuation_pause", "Pause after punctuation", ParamKind::Bool)
+                .help("A longer pause after . , ! ? ; and :, as people make."),
+        )
+        .param(
+            ParamDef::new("typos", "Typos", ParamKind::Percent)
+                .help("The chance of mistyping a letter and correcting it with Backspace. 0% types it right."),
+        )
+        .param(ParamDef::new("trim", "Trim spaces at the ends", ParamKind::Bool))
+        .param(ParamDef::new("skip", "Skip the first", ParamKind::int(0, 10_000_000, "characters")))
+        .param(
+            ParamDef::new("limit", "Type at most", ParamKind::int(0, 10_000_000, "characters"))
+                .help("0 types everything."),
+        )
+        .param(ParamDef::new(
+            "new_lines",
+            "Line breaks",
+            ParamKind::choice(&[
+                ("enter", "Press Enter"),
+                ("shift_enter", "Press Shift+Enter – a new line in a chat box"),
+                ("space", "Type a space"),
+                ("skip", "Leave them out"),
+            ]),
+        ))
+        .param(ParamDef::new("enter_at_end", "Press Enter at the end", ParamKind::Bool))
+        .defaults(&AutoTypeParams::default())
+        .summarize(|node, _| {
+            let p: AutoTypeParams = node.params_or_default();
+            let text = p.text.trim();
+            let headline = if text.is_empty() {
+                "Types the text wired in".to_owned()
+            } else {
+                let short: String = text.chars().take(28).collect();
+                let more = if text.chars().count() > 28 { "…" } else { "" };
+                format!("“{}{more}”", short.replace('\n', " "))
+            };
+            let mut speed = format!("{} per second", trim_float(p.speed, 1));
+            if p.variation > 0.0 {
+                speed.push_str(&format!(" ± {:.0}%", p.variation * 100.0));
+            }
+            let mut lines = vec![headline, speed];
+            if p.limit > 0 {
+                lines.push(format!("At most {} characters", p.limit));
+            }
+            lines
         }),
     );
 

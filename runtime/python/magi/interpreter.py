@@ -219,7 +219,8 @@ class Run:
             except ExitLoop:
                 if self.loops:
                     frame = self.loops.pop()
-                    current = program.flow_targets.get((frame[0], "done"))
+                    # A Repeat leaves through "done"; an AI Watch through its usual output.
+                    current = program.flow_targets.get((frame[0], "done"), program.flow_targets.get((frame[0], "out")))
                 else:
                     current = None
                 continue

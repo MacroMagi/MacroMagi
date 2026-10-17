@@ -22,6 +22,15 @@ def action(run, node):
     return OUT
 
 
+@flow_node("input.autotype")
+def autotype(run, node):
+    wired, value = run.input(node, "text")
+    run.waited = True
+    typed = run.host.call("autotype", params=node["params"], wired=wired, value=value, node=node["id"])
+    run.outputs[node["id"]] = {"typed": typed}
+    return OUT
+
+
 @flow_node("input.recording")
 def recording(run, node):
     run.waited = True

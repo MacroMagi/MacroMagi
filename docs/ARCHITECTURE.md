@@ -14,7 +14,7 @@ This document explains how MacroMagi is put together and, more importantly, *why
 ```text
 magi-app                egui UI, controller, CLI, the Magic tab
 ├── magi-engine         runs macros
-│   ├── magi-vision     pictures: image and colour search
+│   ├── magi-vision     pictures: image and color search
 │   ├── magi-audio      sound: loudness, pitch, recognising sounds
 │   ├── magi-ml         AI models: preparing pictures, running them
 │   └── magi-core
@@ -27,7 +27,7 @@ magi-app                egui UI, controller, CLI, the Magic tab
 | Crate | Owns | Must not |
 | --- | --- | --- |
 | `magi-core` | Graphs, block definitions, the input vocabulary, recordings, assets, the `.magi`, `.mp` and `.magic` formats, the `Host` interface | Touch the OS or draw anything |
-| `magi-vision` | Template matching and colour search on pixel buffers | Know where pixels come from |
+| `magi-vision` | Template matching and color search on pixel buffers | Know where pixels come from |
 | `magi-audio` | Loudness, pitch, sound fingerprints and matching; decoding uploaded sound files | Know where sound comes from |
 | `magi-ml` | Running small vision models (ONNX): preparing a picture the way a model expects, the built-in engine, ONNX Runtime when it has been downloaded, choosing the CPU or a graphics card | Capture the screen or know about blocks |
 | `magi-platform` | Sending input, listening for input, gamepads, screen capture, listening to sound, notifications, the clipboard, listing graphics cards and sound inputs | Know about graphs or blocks |
@@ -83,13 +83,13 @@ This is the contract both engines implement. If you change one, change the other
 
 **Variables.** A macro's variables live in its session and are shared by all its runs. They start from the project's values whenever a run starts while nothing else is running – except variables set to keep their value, which carry on from the last run, also after the macro is edited, until MacroMagi closes. A setting bound to a variable (`{"$var": name}`) is resolved just before the block runs, converted to the kind of value the setting expects ([`variables.rs`](../crates/magi-core/src/variables.rs)). Both engines keep variables on the Rust side: the Python engine reads and changes them through operations on the pipe, so there is one source of truth, and the monitor shows their current values.
 
-**Groups.** A group that is turned off disables every block in it. The engines never see groups: the frozen program is built from a copy of the graph in which those blocks are disabled.
+**Groups.** Groups form a tree: a group may be inside another, and a block is directly in one group at most. A group that is turned off disables every block in it and in the groups inside it. The engines never see groups: the frozen program is built from a copy of the graph in which those blocks are disabled.
 
 **Disabled blocks.** A disabled flow block is skipped: execution continues from its `out` output (or its first output if it has no `out`). A disabled value block yields `null`.
 
 **Blocks one engine cannot run.** Python Script blocks need the Python engine. The native engine treats them as disabled and says so once in the console; the editor marks them while the Python engine is not available.
 
-**AI models.** An AI block names a model asset – a `.magic` file embedded in the macro. The program loads a model once, the first time a block uses it, onto the engine chosen under *Settings → AI*. A look captures the model's screen area, prepares the picture as the model's description says, runs the model and decides: the likeliest answer *acts* when its class is marked to act and the model is at least as sure as that class's threshold. The block's own setting values are applied over the model's first. AI Watch repeats this, waits the class's delay before pressing the model's key, and then ignores answers for the cooldown so one event is not acted on twice. Both engines call the same operations, so a model behaves the same on either.
+**AI models.** An AI block names a model asset – a `.magic` file embedded in the macro. The program loads a model once, the first time a block uses it, onto the engine chosen under *Settings → AI*. A look captures the model's screen area, prepares the picture as the model's description says, runs the model and decides: the likeliest answer *acts* when its class is marked to act and the model is at least as sure as that class's threshold. The block's own setting values are applied over the model's first. AI Watch repeats this and works like a loop: when the model acts, it waits the class's delay, presses the model's key or clicks its mouse button, and runs the blocks under *Acted* as a loop round with its outputs up to date. Back at the block, it ignores answers for the cooldown, so one event is not acted on twice, and watches again. A Stop that leaves the loop, or the end of its time, continues from its usual output. Both engines call the same operations, so a model behaves the same on either.
 
 **Errors.** A failure ends the run and is reported against the block it happened in.
 
@@ -145,6 +145,7 @@ pub trait Host: Send + Sync {
     fn clipboard_text(&self) -> Result<String, HostError>;
     fn notify(&self, notification: &Notification) -> Result<(), HostError>;
     fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError>;  // recent sound
+    fn read_text(&self, picture: &Frame, language: &str) -> Result<Vec<TextWord>, HostError>;  // OCR
 }
 ```
 
@@ -157,6 +158,10 @@ Three implementations exist:
 Adding a capability a macro can use means adding a method here, implementing it in `SystemHost` and `SimHost`, and exposing it through an operation in `ops.rs`. *Switch to Window*, the clipboard, notifications and listening to sound were all added this way.
 
 **Sound.** `listen` returns the most recent stretch of sound from what the computer plays (loopback capture) or a microphone – a named one, or the system's default. `SystemHost` opens a source only while a macro listens: a thread owns the audio stream, keeps the last seconds in a ring buffer and closes the stream after a quiet while. Each clip says where it ends in the stream, so a listener knows which part it has already heard. The analysis – loudness, the strongest frequency, and recognising an uploaded sound by comparing the shape of its spectrum over time, independent of volume – is pure code in `magi-audio`. Recognition keeps a running fingerprint of the stream rather than re-analysing it on every look, which keeps long sounds cheap, and can recognise a sound by its first part while it is still playing. A recognised sound counts once: what was heard before the match is not looked at again.
+
+**Text.** `read_text` recognises the words in a picture. `SystemHost` uses the text recognition built into Windows (`Windows.Media.Ocr`, [`ocr.rs`](../crates/magi-platform/src/ocr.rs)), so nothing has to be downloaded; `SimHost` returns words a test sets. The Text Scan operation captures the area, enlarges it when asked (within the size the recogniser accepts), and turns the words into the block's outputs.
+
+**Keys on Windows** are sent as scan codes, as a keyboard sends them, because many games read the keyboard that way and ignore keys sent only as virtual keys. Extended keys (arrows, the right-hand Ctrl and Alt…) are sent as virtual keys, which marks them correctly.
 
 **Images.** An Image Detection block may look for several images. Images that share a search area share one screen capture, and the images are matched in parallel. With less *Detail*, the capture and the images are shrunk before matching; shrunk images are cached by the program, so this costs nothing per look.
 
@@ -214,20 +219,22 @@ The Auto Clicker's form ([`clicker_form.rs`](../crates/magi-app/src/ui/clicker_f
 
 ### Look
 
-Every colour comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/theme.rs), built from three choices: light or dark (or the system's), the theme colour (none = monochrome), and how opaque panels are over a background picture. UI code asks for colours by role – `theme::text()`, `theme::accent()`, `theme::category_color(…)` – never by value, so changing the theme recolours everything at once, block categories and icons included. The banner logo is recoloured from the icon by brightness: its ink takes the colour the buttons have, and its white parts are cut out.
+Every color comes from one `Palette` in [`theme.rs`](../crates/magi-app/src/theme.rs), built from three choices: light or dark (or the system's), the theme color (none = monochrome), and how opaque panels are over a background picture. UI code asks for colors by role – `theme::text()`, `theme::accent()`, `theme::category_color(…)` – never by value, so changing the theme recolors everything at once, block categories and icons included. The banner logo is recolored from the icon by brightness: its ink takes the color the buttons have, and its white parts are cut out.
 
 ### The Magic tab
 
 The Magic tab edits one model at a time – a [`MagicFile`](../crates/magi-core/src/magic.rs): the ONNX bytes, a description (`MagicModel`) and optional training pictures.
 
-- **Importing** ([`magic/import.rs`](../crates/magi-app/src/magic/import.rs)) takes an `.onnx` file, or a folder or ZIP that contains one, and reads the project's text files for hints: class names (a Markdown table or a dictionary in code), which classes act, colour statistics, the screen area, the key, and adjustable settings (a `settings.json`, or typed declarations in code). It reads files; it never runs them. Everything it found or guessed becomes a note in the tab.
+- **Importing** ([`magic/import.rs`](../crates/magi-app/src/magic/import.rs)) takes an `.onnx` file, or a folder or ZIP that contains one, and reads the project's text files for hints: class names (a Markdown table or a dictionary in code), which classes act, color statistics, the screen area, the key, and adjustable settings (a `settings.json`, or typed declarations in code). It reads files; it never runs them. Everything it found or guessed becomes a note in the tab.
 - **Trying** a model runs it on a `magi-magic-test` thread against the same host as macros (so dry run applies), and shows the picture it saw and its answers.
 - **Use in Macro** embeds the model as an asset (`.magic` bytes without training pictures, with an id derived from the content). An earlier model of the same name is replaced and the blocks that used it are pointed at the new one; when no block uses the model yet, its blocks are added.
 - Replacing the model in the tab asks first, unless its changes are saved or already in the macro.
 
 ### Optional downloads
 
-[`components.rs`](../crates/magi-app/src/components.rs) installs parts that some features need and MacroMagi does not ship – ONNX Runtime, ONNX Runtime for graphics cards, Python and PyTorch – into `data/components/<part>`, and removes them again. It also reports copies already on the computer (a system Python, PyTorch in the Python in use). Downloads come from each part's publisher only when the user clicks *Install*. A part in use cannot be deleted on Windows, so it is marked and deleted at the next start, and nothing uses a marked part in the meantime.
+[`components.rs`](../crates/magi-app/src/components.rs) installs parts that some features need and MacroMagi does not ship – ONNX Runtime, ONNX Runtime for graphics cards, Python and PyTorch – into `data/components/<part>`, and removes them again. Python is managed on the Engine page, the others on the AI page. It also reports copies already on the computer (PyTorch in the Python macros use).
+
+**Which Python.** Opening the Engine page starts nothing. *Check* (and, once, the first run of a macro) lists the Pythons on the computer and asks the engine which one "automatic" stands for (`magi_engine::python::resolve_interpreter`, which runs each candidate briefly, without a window, and reports its real file). The answer is kept in the settings, and the parts that install Python packages use the same interpreter as macros. Downloads come from each part's publisher only when the user clicks *Install*. A part in use cannot be deleted on Windows, so it is marked and deleted at the next start, and nothing uses a marked part in the meantime.
 
 ### Screen targets
 

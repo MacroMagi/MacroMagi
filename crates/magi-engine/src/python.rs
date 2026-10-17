@@ -563,10 +563,17 @@ fn perform(cx: &mut RunCx, op: &str, args: &Value) -> OpResult<Value> {
         "sound_level" => Ok(Value::Object(cx.sound_level(&arg(args, "params")?)?)),
         "ai_classify" => Ok(Value::Object(cx.ai_classify(&arg(args, "params")?)?)),
         "ai_watch" => {
-            let (hits, label) = cx.ai_watch(&arg(args, "params")?, arg(args, "node")?)?;
-            Ok(json!({ "hits": hits, "label": label }))
+            let returning: Option<bool> = arg(args, "returning")?;
+            let step = cx.ai_watch(&arg(args, "params")?, arg(args, "node")?, returning.unwrap_or(false))?;
+            Ok(serde_json::to_value(step).map_err(|e| EngineError::new(e.to_string()))?)
         }
         "sound_match" => Ok(Value::Object(cx.sound_match(&arg(args, "params")?, arg(args, "node")?)?)),
+        "autotype" => {
+            let wired: Option<bool> = arg(args, "wired")?;
+            let value = wired.unwrap_or(false).then(|| args.get("value").cloned().unwrap_or(Value::Null));
+            Ok(json!(cx.autotype(&arg(args, "params")?, value, arg(args, "node")?)?))
+        }
+        "read_text" => Ok(Value::Object(cx.read_text(&arg(args, "params")?)?)),
         "notify" => {
             let node: Option<NodeId> = arg(args, "node")?;
             cx.notify(&arg(args, "params")?, args.get("value").cloned(), node.unwrap_or(0))?;
@@ -599,6 +606,36 @@ fn candidates(config: &PythonConfig) -> Vec<Vec<OsString>> {
         if cfg!(windows) { &[&["py", "-3"], &["python"], &["python3"]] } else { &[&["python3"], &["python"]] };
     list.extend(system.iter().map(|command| command.iter().map(OsString::from).collect()));
     list
+}
+
+/// The interpreter the engine would use with `config`, without starting the
+/// runtime: its full path and version. "Automatic" resolves to a real file
+/// this way, so other features (installing packages) use the same Python as
+/// macros. Starts Python briefly: call it off the UI thread.
+pub fn resolve_interpreter(config: &PythonConfig) -> Option<(PathBuf, String)> {
+    const ASK: &str = "import sys; print(sys.executable); print('%d.%d.%d' % sys.version_info[:3])";
+    for candidate in candidates(config) {
+        let mut command = Command::new(&candidate[0]);
+        command.args(&candidate[1..]).args(["-c", ASK]).env("PYTHONDONTWRITEBYTECODE", "1").stdin(Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let Ok(output) = command.output() else { continue };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty());
+        let (Some(path), Some(version)) = (lines.next(), lines.next()) else { continue };
+        let parts: Vec<u32> = version.split('.').take(2).map(|n| n.parse().unwrap_or(0)).collect();
+        if parts.len() == 2 && (parts[0], parts[1]) >= (3, 8) {
+            return Some((PathBuf::from(path), version.to_owned()));
+        }
+    }
+    None
 }
 
 /// Where the runtime sources live, unpacking the built-in copy if needed.

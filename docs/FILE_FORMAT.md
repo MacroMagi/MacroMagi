@@ -139,16 +139,22 @@ and takes the variable's value each time the block runs, converted to the kind o
 ### Groups
 
 ```json
-"groups": [ { "id": 1, "name": "Find and click", "color": [63, 127, 230], "nodes": [2, 3], "enabled": false } ]
+"groups": [
+  { "id": 1, "name": "Find and click", "color": [63, 127, 230], "nodes": [2, 3], "enabled": false },
+  { "id": 2, "name": "Retry", "nodes": [4], "parent": 1 }
+]
 ```
 
 | Field | Meaning |
 | --- | --- |
 | `id` | A positive integer, unique among the groups. |
 | `name` | Shown on the group's box. |
-| `color` | Optional `[r, g, b]`; omitted for the theme colour. |
+| `color` | Optional `[r, g, b]`; omitted for the theme color. |
 | `nodes` | Ids of the blocks in the group. Ids of missing blocks are dropped on load; a group left empty is dropped. |
-| `enabled` | Optional; `false` turns the group off, which skips every block in it as if each were disabled. Omitted when `true`. |
+| `enabled` | Optional; `false` turns the group off, which skips every block in it – and in the groups inside it – as if each were disabled. Omitted when `true`. |
+| `parent` | Optional. The `id` of the group this one is inside. Omitted for a group at the top level. |
+
+A block is directly in one group at most: `nodes` lists only the blocks that are not in a group inside it. Files from before 0.1.3 could list a block in several groups; such a block stays in the smallest of them, and a group whose blocks were all in a larger group is put inside it.
 
 ### Wires
 
@@ -204,7 +210,7 @@ Blocks saved before 0.1.2 have a single `"image"` or `"sound"` instead. It is st
 
 ### AI blocks
 
-AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: values for the model's adjustable settings, by key, for this block only. A key that is missing takes the model's own value.
+AI Watch and AI Model have `model` (the id of a `model` asset) and `settings`: values for the model's adjustable settings, by key, for this block only. A key that is missing takes the model's own value. AI Watch has two flow outputs: `acted`, followed each time the model acts, and `out`, followed when its time is up.
 
 ```json
 "params": { "model": "mdl-3a…", "settings": { "thresh": 60 }, "display": 0, "press": true, "duration_ms": 0, "max_fps": 0 }
@@ -383,7 +389,7 @@ data/tune/<class>/<file>      fine-tuning pictures, one folder per class (option
 | `input` | How a picture becomes the model's input: resized to `width × height`, laid out `nchw` (channels first) or `nhwc`, in `rgb` or `bgr` order, each value `v` (0–255) becoming `(v × scale − mean) / std` per channel. `softmax: true` turns raw scores into probabilities. `name` is the model's input name. |
 | `capture` | The screen area shown to the model: `{ "kind": "center", "height_share": … }` – a square in the middle of display `display`, as tall as that share of the display's height – or `{ "kind": "region", "rect": { "x", "y", "w", "h", "display" } }`. |
 | `classes` | One per answer the model gives, in its output order. `act`: whether this answer calls for the action; `threshold` (0–1): how sure the model must be; `delay_ms`: how long to wait before acting. |
-| `action` | The [key](#shared-vocabulary) to press, how long to hold it, and how long to ignore answers after acting. |
+| `action` | The [key or mouse button](#shared-vocabulary) to press (`"Space"`, `"Mouse:Left"`), how long to hold it, and how long to ignore answers after acting. |
 | `settings` | Adjustable settings, shown as sliders in the Magic tab and in each AI block. `kind` is `percent` or `milliseconds`. Each sets its `targets`: `{ "kind": "threshold", "class": n }`, `{ "kind": "delay", "class": n }`, `{ "kind": "cooldown" }` or `{ "kind": "hold" }`. A setting's `value` is applied over the values it targets. |
 | `blocks` | Optional. Blocks to use the model with – `nodes`, `wires` and `groups` as in a [nodes preset](#kind-nodes), without assets; added to a macro along with the model. |
 | `include` | What the archive holds besides `magic.json`: the model, the blocks, training pictures, fine-tuning pictures. |
@@ -405,12 +411,12 @@ A model asset inside a `.magi` file is the same archive with `training`, `finetu
 
 **Durations** are milliseconds and may be fractional.
 
-**Colours** are `#RRGGBB`.
+**Colors** are `#RRGGBB`.
 
 ## Versioning
 
 `version` is a single integer per format, currently `1` for all three.
 
 - A reader **rejects** files with a higher version than it knows, with a message asking the user to update.
-- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
+- Within a version, changes are additive: new optional fields with defaults, new block types, new stroke types. Readers ignore fields they do not know. (`options`, `clicker`, `look` strokes and the extended Auto Clicker settings were added this way in 0.1.0; `variables`, bound settings, `groups`, `display` on positions and areas, the `key_down`/`key_up`/`mouse_down`/`mouse_up`/`display` strokes and `audio` assets in 0.1.1; `model` assets, image and sound lists with groups, `mode`, `detail`, `match_ms`, `device` and the variables' `reset` in 0.1.2; group `parent`, the `input.autotype` and `vision.read_text` blocks, AI Watch's `acted` output and mouse buttons as a model's key in 0.1.3. Files from earlier versions load unchanged; earlier versions may refuse files that use later additions.)
 - A change that old readers would misread bumps the version, and the new reader migrates old files on load.

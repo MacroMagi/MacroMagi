@@ -39,7 +39,7 @@ impl Frame {
         Self { origin, width, height, rgba }
     }
 
-    /// A frame filled with one colour.
+    /// A frame filled with one color.
     pub fn solid(origin: Point, width: u32, height: u32, rgb: [u8; 3]) -> Self {
         let pixel = [rgb[0], rgb[1], rgb[2], 255];
         Self::new(origin, width, height, pixel.repeat(width as usize * height as usize))
@@ -175,6 +175,24 @@ pub trait Host: Send + Sync {
         let _ = (source, device, ms);
         Err(HostError::new("listening to sound is not available here"))
     }
+
+    /// The words in a picture (optical character recognition), with where
+    /// each is in the picture. `language` is a tag such as `en-US`, or empty
+    /// for the system's languages.
+    fn read_text(&self, picture: &Frame, language: &str) -> Result<Vec<TextWord>, HostError> {
+        let _ = (picture, language);
+        Err(HostError::new("reading text from the screen is not available on this system yet"))
+    }
+}
+
+/// A word read from a picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextWord {
+    pub text: String,
+    /// Where it is, in the picture's pixels.
+    pub rect: Rect,
+    /// The line it is on, counting from 0.
+    pub line: usize,
 }
 
 /// A host that sends nothing. It keeps a virtual pointer and a log of
@@ -195,6 +213,7 @@ struct SimState {
     notifications: Vec<Notification>,
     sound: SoundClip,
     screens: Option<Vec<Rect>>,
+    words: Vec<TextWord>,
 }
 
 impl SimHost {
@@ -240,6 +259,11 @@ impl SimHost {
     /// Makes `listen` return this sound.
     pub fn set_sound(&self, clip: SoundClip) {
         self.lock().sound = clip;
+    }
+
+    /// Makes `read_text` find these words.
+    pub fn set_text(&self, words: Vec<TextWord>) {
+        self.lock().words = words;
     }
 
     /// Everything sent so far.
@@ -315,6 +339,10 @@ impl Host for SimHost {
     fn notify(&self, notification: &Notification) -> Result<(), HostError> {
         self.lock().notifications.push(notification.clone());
         Ok(())
+    }
+
+    fn read_text(&self, _picture: &Frame, _language: &str) -> Result<Vec<TextWord>, HostError> {
+        Ok(self.lock().words.clone())
     }
 
     fn listen(&self, _source: SoundSource, _device: &str, ms: f64) -> Result<SoundClip, HostError> {

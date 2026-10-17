@@ -29,7 +29,7 @@ MacroMagi is source available under the [MacroMagi Terms](TERMS.md). By contribu
 3. On Linux, install the system packages listed in the [README](README.md#building-from-source).
 
 ```bash
-git clone https://github.com/MacroMagi/MacroMagi.git
+git clone https://github.com/MagiGun/MacroMagi.git
 cd MacroMagi
 cargo run -p magi-app
 ```
@@ -79,7 +79,7 @@ cargo run --release -p magi-app -- --screenshot docs/images/functions.png --tab 
 
 ```text
 crates/magi-core/      data model, block definitions, file formats    (no OS, no UI)
-crates/magi-vision/    image matching, colour search                  (pure functions on pixels)
+crates/magi-vision/    image matching, color search                  (pure functions on pixels)
 crates/magi-audio/     loudness, pitch, sound recognition, sound files (pure functions on samples)
 crates/magi-ml/        preparing pictures for AI models, running them  (CPU or graphics card)
 crates/magi-platform/  input, listening, gamepads, capture, sound     (the only OS code)
@@ -129,6 +129,7 @@ Tests sit next to the code they test (`#[cfg(test)] mod tests`), plus:
 - `crates/magi-engine/tests/engines.rs` – macros run end to end on both engines against a simulated machine. Any new block or change to execution belongs here.
 - the tests at the bottom of `crates/magi-app/src/ui/graph.rs` – the node editor driven headlessly with a simulated pointer and keyboard (dragging wires, moving and selecting blocks, shortcuts, zooming).
 - the tests at the bottom of `crates/magi-app/src/app.rs` – the whole app driven headlessly, with key presses fed to the controller exactly as the system listener would (assigning hotkeys and using them at once, opening the block list, taking a model from the Magic tab into a macro).
+- `windows_reads_the_text_in_a_screenshot` in `crates/magi-platform/tests/system.rs` – ignored by default; reads a documentation screenshot with the text recognition built into Windows.
 - `real_projects_import` in `crates/magi-app/src/magic/import.rs` – ignored by default; imports the projects named in `MAGI_IMPORT` (separated by `;`) and prints what was found, to check the importer against real models: `MAGI_IMPORT=path/to/project cargo test -p magi-app real_projects_import -- --ignored --nocapture`. With `MAGI_IMPORT_OUT` set to a folder, each import is also saved there as a `.magic` file.
 - `crates/magi-platform/tests/system.rs` – ignored by default; checks against the real machine.
 
@@ -141,7 +142,7 @@ Guidelines:
 
 ## Reporting bugs
 
-Open an [issue](https://github.com/MacroMagi/MacroMagi/issues) with:
+Open an [issue](https://github.com/MagiGun/MacroMagi/issues) with:
 
 - what you did, what you expected, what happened instead;
 - your operating system and version (and, on Linux, X11 or Wayland);
@@ -166,4 +167,4 @@ Releases are built and published by [`.github/workflows/release.yml`](.github/wo
    ```
 
    or run the workflow from *Actions → Release → Run workflow* with the tag name.
-3. The workflow builds Windows, Linux and macOS (Apple silicon and Intel) packages. The Windows package also gets Python's embeddable distribution in a `python` folder; its version is `PYTHON_VERSION` in the workflow, kept the same as in `crates/magi-app/src/components.rs`. If – and only if – all of them build, it publishes a GitHub release with the packages and a `SHA256SUMS.txt`. A failed build publishes nothing; fix it and run the workflow again for the same tag.
+3. The workflow builds the Windows package (Linux and macOS packages are not built for now). It also gets Python's embeddable distribution in a `python` folder; its version is `PYTHON_VERSION` in the workflow, kept the same as in `crates/magi-app/src/components.rs`. Only if the build succeeds does it publish a GitHub release with the package and a `SHA256SUMS.txt`. A failed build publishes nothing; fix it and run the workflow again for the same tag.

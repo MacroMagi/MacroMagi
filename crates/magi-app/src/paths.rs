@@ -36,7 +36,7 @@ impl Paths {
         self.data_dir.join("presets")
     }
 
-    /// Background pictures chosen in Settings → Appearance.
+    /// Background pictures chosen in Settings › Appearance.
     pub fn backgrounds_dir(&self) -> PathBuf {
         self.data_dir.join("backgrounds")
     }

@@ -372,7 +372,7 @@ fn fastest(onnx: &[u8], spec: &InputSpec, candidates: &[Engine]) -> Engine {
 mod tests {
     use super::*;
 
-    /// A tiny ONNX model, built by hand: the average of each colour channel of
+    /// A tiny ONNX model, built by hand: the average of each color channel of
     /// a 4×4 picture – three "classes" that are red, green and blue.
     pub fn channel_means() -> Vec<u8> {
         use prost::Message;

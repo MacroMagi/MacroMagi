@@ -27,7 +27,7 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter};
 use crate::error::{Error, Result};
 use crate::geom::{Displays, Rect};
 use crate::graph::Fragment;
-use crate::input::Key;
+use crate::input::{Button, Key};
 
 pub const FORMAT: &str = "macromagi.magic";
 pub const FORMAT_VERSION: u32 = 1;
@@ -35,7 +35,7 @@ pub const EXTENSION: &str = "magic";
 const MANIFEST: &str = "magic.json";
 const MODEL_FILE: &str = "model/model.onnx";
 
-/// The standard ImageNet colour statistics most vision models are trained with.
+/// The standard ImageNet color statistics most vision models are trained with.
 pub const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 pub const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
@@ -59,7 +59,7 @@ pub enum ColorOrder {
 }
 
 /// How a picture is turned into the numbers the model reads: resized to
-/// `width × height`, each colour value `v` (0–255) becoming
+/// `width × height`, each color value `v` (0–255) becoming
 /// `(v × scale − mean) / std`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -157,7 +157,8 @@ pub struct ClassSpec {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ActionSpec {
-    pub key: Key,
+    /// A key, or a mouse button. Files from before mouse buttons hold a key's name, which reads as that key.
+    pub key: Button,
     /// How long the key is held.
     pub hold_ms: f64,
     /// After acting, answers are ignored for this long, so one event is not
@@ -167,7 +168,7 @@ pub struct ActionSpec {
 
 impl Default for ActionSpec {
     fn default() -> Self {
-        Self { key: Key::Space, hold_ms: 5.0, cooldown_ms: 500.0 }
+        Self { key: Button::Key(Key::Space), hold_ms: 5.0, cooldown_ms: 500.0 }
     }
 }
 
@@ -465,6 +466,14 @@ fn read<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec<u8>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_key_to_press_may_be_a_mouse_button_and_old_files_keep_their_key() {
+        let old: ActionSpec = serde_json::from_str(r#"{ "key": "Space", "hold_ms": 5.0 }"#).unwrap();
+        assert_eq!(old.key, Button::Key(Key::Space));
+        let click: ActionSpec = serde_json::from_str(r#"{ "key": "Mouse:Left" }"#).unwrap();
+        assert_eq!(click.key, Button::Mouse(crate::input::MouseButton::Left));
+    }
 
     fn two_classes() -> MagicModel {
         MagicModel {

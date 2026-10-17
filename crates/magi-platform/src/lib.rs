@@ -20,6 +20,7 @@ mod inject;
 pub mod keymap;
 mod listen;
 pub mod notify;
+pub mod ocr;
 pub mod system;
 
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -27,7 +28,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use magi_core::geom::{Point, Rect};
-use magi_core::host::{Frame, Host, HostError, Notification, SoundClip, SoundSource, WindowInfo, WindowQuery};
+use magi_core::host::{
+    Frame, Host, HostError, Notification, SoundClip, SoundSource, TextWord, WindowInfo, WindowQuery,
+};
 use magi_core::input::InputEvent;
 
 pub use inject::{INJECTION_MARKER, Injector};
@@ -112,6 +115,10 @@ impl Host for SystemHost {
 
     fn listen(&self, source: SoundSource, device: &str, ms: f64) -> Result<SoundClip, HostError> {
         self.listener.listen(source, device, ms)
+    }
+
+    fn read_text(&self, picture: &Frame, language: &str) -> Result<Vec<TextWord>, HostError> {
+        ocr::read_text(picture, language)
     }
 }
 

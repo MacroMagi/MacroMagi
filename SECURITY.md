@@ -6,7 +6,7 @@ MacroMagi sends keyboard and mouse input, reads the screen, and can run Python c
 
 Please report security problems **privately**, not in a public issue:
 
-- Use **[Report a vulnerability](https://github.com/MacroMagi/MacroMagi/security/advisories/new)** on the repository's *Security* tab.
+- Use **[Report a vulnerability](https://github.com/MagiGun/MacroMagi/security/advisories/new)** on the repository's *Security* tab.
 
 Include what you found, how to reproduce it, and which version or commit and operating system you used. You will get an acknowledgement, and a fix or an explanation before anything is made public.
 

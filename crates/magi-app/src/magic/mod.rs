@@ -243,10 +243,16 @@ fn run_test(
         }
         if act && press {
             std::thread::sleep(Duration::from_secs_f64(decision.delay_ms.max(0.0) / 1000.0));
-            let key = current.action.key;
-            let _ = host.send(&InputEvent::KeyDown { key });
+            let (down, up) = match current.action.key {
+                magi_core::input::Button::Key(key) => (InputEvent::KeyDown { key }, InputEvent::KeyUp { key }),
+                magi_core::input::Button::Mouse(button) => {
+                    (InputEvent::ButtonDown { button }, InputEvent::ButtonUp { button })
+                }
+                magi_core::input::Button::Pad(_) => continue,
+            };
+            let _ = host.send(&down);
             std::thread::sleep(Duration::from_secs_f64(current.action.hold_ms.max(0.0) / 1000.0));
-            let _ = host.send(&InputEvent::KeyUp { key });
+            let _ = host.send(&up);
         }
         if last_repaint.elapsed() >= Duration::from_millis(33) {
             last_repaint = Instant::now();

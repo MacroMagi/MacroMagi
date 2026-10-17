@@ -294,7 +294,7 @@ fn nested_repeats_multiply() {
     });
 }
 
-/// `Start → Decision`, with one case fed by Image Detection.
+/// `Start › Decision`, with one case fed by Image Detection.
 fn decision_project() -> (Project, NodeId) {
     let mut b = Builder::new();
     let image = add_target_asset(&mut b.project);
@@ -1126,6 +1126,78 @@ fn the_clipboard_and_notifications_reach_the_machine() {
     }
 }
 
+// ---- typing and reading text ------------------------------------------------
+
+#[test]
+fn the_auto_typer_types_its_text_with_line_breaks_skips_and_limits() {
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let fast = json!({ "speed": 1000.0, "variation": 0.0, "punctuation_pause": false });
+    let mut first = fast.clone();
+    first["text"] = json!(
+        "Hi
+yo"
+    );
+    let mut second = fast;
+    (second["text"], second["skip"], second["limit"]) = (json!("abcd"), json!(1), json!(2));
+    let lines = b.node(ids::AUTOTYPE, first);
+    let part = b.node(ids::AUTOTYPE, second);
+    let log = b.node(ids::LOG, json!({ "message": "typed" }));
+    b.chain(&[start, lines, part, log]);
+    b.wire(part, "typed", log, "value");
+    on_all(&b.project, start, SimHost::new, |kind, outcome| {
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+        let typed: Vec<String> = outcome
+            .sent
+            .iter()
+            .filter_map(|e| match e {
+                InputEvent::Text { text } => Some(text.clone()),
+                InputEvent::KeyDown { key: Key::Enter } => Some("⏎".into()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed.concat(), "Hi⏎yobc", "{kind:?}");
+        assert_eq!(outcome.logs, ["typed 2"], "{kind:?}");
+    });
+}
+
+#[test]
+fn text_scan_reads_the_words_finds_text_and_gives_the_first_number() {
+    use magi_core::host::TextWord;
+    let word =
+        |text: &str, x: i32, y: i32, line: usize| TextWord { text: text.into(), rect: Rect::new(x, y, 30, 12), line };
+    let host = || {
+        let host = SimHost::with_screen(Frame::solid(Point::new(0, 0), 200, 100, [0, 0, 0]));
+        host.set_text(vec![word("Gold:", 10, 10, 0), word("1,250", 50, 10, 0), word("Play", 10, 40, 1)]);
+        host
+    };
+    let mut b = Builder::new();
+    let start = b.node(ids::START, json!({}));
+    let scan = b.node(ids::READ_TEXT, json!({ "find": "play" }));
+    let text = b.node(ids::LOG, json!({ "message": "read" }));
+    let number = b.node(ids::LOG, json!({ "message": "number" }));
+    let click = b.node(ids::INPUT, json!({ "actions": [Action::click(MouseButton::Left)] }));
+    b.chain(&[start, text, number, click]);
+    b.wire(scan, "text", text, "value").wire(scan, "number", number, "value").wire(scan, "position", click, "position");
+    on_all(&b.project, start, host, |kind, outcome| {
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+        assert_eq!(
+            outcome.logs,
+            [
+                "read Gold: 1,250
+Play",
+                "number 1250"
+            ],
+            "{kind:?}"
+        );
+        assert!(
+            outcome.sent.contains(&InputEvent::MoveTo { x: 25, y: 46 }),
+            "{kind:?}: clicks the middle of “Play”: {:?}",
+            outcome.sent
+        );
+    });
+}
+
 // ---- several displays ------------------------------------------------------
 
 fn two_displays() -> SimHost {
@@ -1302,7 +1374,7 @@ fn two_pictures(second: bool) -> SimHost {
     SimHost::with_screen(frame)
 }
 
-/// `Start → Decision`, fed by an Image Detection block with `params`; logs which image was found.
+/// `Start › Decision`, fed by an Image Detection block with `params`; logs which image was found.
 fn images_project(params: impl FnOnce(&str, &str) -> serde_json::Value) -> (Project, NodeId) {
     let mut b = Builder::new();
     let first = add_image(&mut b.project, "checkers", target_image());
@@ -1463,12 +1535,12 @@ fn sound_recognition_listens_for_several_sounds_and_says_which() {
 
 // ---- AI models -----------------------------------------------------------------
 
-/// A model that averages each colour of the middle of the screen: its
+/// A model that averages each color of the middle of the screen: its
 /// "classes" are red, green and blue. Acting on red presses R.
-fn colour_model(project: &mut Project) -> String {
+fn color_model(project: &mut Project) -> String {
     use magi_core::magic::*;
     let model = MagicModel {
-        name: "Colours".into(),
+        name: "Colors".into(),
         input: InputSpec { width: 4, height: 4, mean: [0.0; 3], std: [1.0; 3], ..InputSpec::default() },
         capture: CaptureSpec { area: CaptureArea::Center { height_share: 0.5 }, display: 0 },
         classes: vec![
@@ -1476,7 +1548,7 @@ fn colour_model(project: &mut Project) -> String {
             ClassSpec { label: "green".into(), ..ClassSpec::default() },
             ClassSpec { label: "blue".into(), ..ClassSpec::default() },
         ],
-        action: ActionSpec { key: Key::KeyR, hold_ms: 1.0, cooldown_ms: 200.0 },
+        action: ActionSpec { key: magi_core::input::Button::Key(Key::KeyR), hold_ms: 1.0, cooldown_ms: 200.0 },
         settings: vec![ModelSetting {
             key: "thresh".into(),
             label: "Confidence".into(),
@@ -1491,17 +1563,17 @@ fn colour_model(project: &mut Project) -> String {
         ..MagicModel::default()
     };
     let file = MagicFile { model, onnx: include_bytes!("data/channel_means.onnx").to_vec(), ..MagicFile::default() };
-    project.assets.add_model("Colours", file.for_macro().unwrap())
+    project.assets.add_model("Colors", file.for_macro().unwrap())
 }
 
-fn coloured(rgb: [u8; 3]) -> impl Fn() -> SimHost {
+fn colored(rgb: [u8; 3]) -> impl Fn() -> SimHost {
     move || SimHost::with_screen(Frame::solid(Point::new(0, 0), 320, 200, rgb))
 }
 
 #[test]
 fn an_ai_model_answers_about_the_middle_of_the_screen() {
     let mut b = Builder::new();
-    let model = colour_model(&mut b.project);
+    let model = color_model(&mut b.project);
     let start = b.node(ids::START, json!({}));
     let ask = b.node(ids::AI_CLASSIFY, json!({ "model": model }));
     let decision = b.node(ids::DECISION, json!({}));
@@ -1513,17 +1585,17 @@ fn an_ai_model_answers_about_the_middle_of_the_screen() {
         no,
     );
     b.wire(ask, "label", yes, "value");
-    on_all(&b.project, start, coloured([250, 10, 10]), |kind, outcome| {
+    on_all(&b.project, start, colored([250, 10, 10]), |kind, outcome| {
         assert!(outcome.logs.iter().any(|l| l.contains("saw red")), "{kind:?}: {:?}", outcome.logs);
     });
-    on_all(&b.project, start, coloured([10, 250, 10]), |kind, outcome| {
+    on_all(&b.project, start, colored([10, 250, 10]), |kind, outcome| {
         assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}: green is not acted on");
     });
 
     // The block's own settings: demanding 90% certainty, red is no longer enough.
     let mut strict = b.project.clone();
     strict.graph.node_mut(ask).unwrap().set_param("settings", json!({ "thresh": 90 }));
-    on_all(&strict, start, coloured([250, 10, 10]), |kind, outcome| {
+    on_all(&strict, start, colored([250, 10, 10]), |kind, outcome| {
         assert_eq!(outcome.taps(), [Key::KeyN], "{kind:?}");
     });
 }
@@ -1531,19 +1603,41 @@ fn an_ai_model_answers_about_the_middle_of_the_screen() {
 #[test]
 fn ai_watch_presses_the_model_key_once_per_event() {
     let mut b = Builder::new();
-    let model = colour_model(&mut b.project);
+    let model = color_model(&mut b.project);
     let start = b.node(ids::START, json!({}));
     let watch = b.node(ids::AI_WATCH, json!({ "model": model, "duration_ms": 60.0 }));
     let report = b.log("hits");
     b.chain(&[start, watch, report]);
     b.wire(watch, "hits", report, "value");
-    on_all(&b.project, start, coloured([250, 10, 10]), |kind, outcome| {
+    on_all(&b.project, start, colored([250, 10, 10]), |kind, outcome| {
         assert_eq!(outcome.taps(), [Key::KeyR], "{kind:?}: once, then the cooldown");
         assert!(outcome.logs.iter().any(|l| l == "hits 1"), "{kind:?}: {:?}", outcome.logs);
     });
     let mut quiet = b.project.clone();
     quiet.graph.node_mut(watch).unwrap().set_param("press", false);
-    on_all(&quiet, start, coloured([250, 10, 10]), |kind, outcome| {
+    on_all(&quiet, start, colored([250, 10, 10]), |kind, outcome| {
         assert!(outcome.taps().is_empty(), "{kind:?}: watching only");
+    });
+}
+
+#[test]
+fn ai_watch_runs_the_blocks_under_acted_each_time_it_acts() {
+    let mut b = Builder::new();
+    let model = color_model(&mut b.project);
+    let start = b.node(ids::START, json!({}));
+    let watch = b.node(ids::AI_WATCH, json!({ "model": model, "press": false }));
+    let seen = b.log("saw");
+    let count = b.log("times");
+    let leave = b.node(ids::STOP, json!({ "scope": "exit_loop" }));
+    let done = b.log("done");
+    b.flow(start, ports::OUT, watch).flow(watch, "acted", seen).flow(seen, ports::OUT, count);
+    b.flow(count, ports::OUT, leave).flow(watch, ports::OUT, done);
+    b.wire(watch, "label", seen, "value").wire(watch, "hits", count, "value");
+    on_all(&b.project, start, colored([250, 10, 10]), |kind, outcome| {
+        assert!(outcome.errors.is_empty(), "{kind:?}: {:?}", outcome.errors);
+        assert!(outcome.taps().is_empty(), "{kind:?}: watching only");
+        let ours: Vec<&String> =
+            outcome.logs.iter().filter(|l| ["saw", "times", "done"].iter().any(|w| l.starts_with(w))).collect();
+        assert_eq!(ours, ["saw red", "times 1", "done"], "{kind:?}: the branch ran with the answer, then left");
     });
 }

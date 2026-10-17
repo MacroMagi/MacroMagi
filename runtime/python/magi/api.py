@@ -160,7 +160,7 @@ class Magi:
         return _sighting(self._run.host.find_image(params))
 
     def find_color(self, color, tolerance=16, region=None):
-        """Look for a colour such as "#FF8800" on screen."""
+        """Look for a color such as "#FF8800" on screen."""
         params = {"color": str(color), "tolerance": int(tolerance), "region": _region(region)}
         return _sighting(self._run.host.find_color(params))
 

@@ -1,7 +1,7 @@
 //! The places on screen a macro touches: click positions and search areas,
 //! in the order a run reaches them.
 //!
-//! Used by the editor's *View → Show on screen* overlay, which numbers them
+//! Used by the editor's *View › Show on screen* overlay, which numbers them
 //! and lets them be dragged into place.
 
 use std::collections::{BTreeSet, HashSet};

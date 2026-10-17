@@ -14,7 +14,7 @@ pub struct CommentParams {
     pub height: f64,
     /// Folded to its title line.
     pub collapsed: bool,
-    /// `#RRGGBB`, or empty for the theme's colour.
+    /// `#RRGGBB`, or empty for the theme's color.
     pub color: String,
 }
 
@@ -44,7 +44,10 @@ pub(super) fn register(registry: &mut Registry) {
         .param(ParamDef::new("width", "Width", ParamKind::float(80.0, 4000.0, "")))
         .param(ParamDef::new("height", "Height", ParamKind::float(40.0, 4000.0, "")))
         .param(ParamDef::new("collapsed", "Folded", ParamKind::Bool))
-        .param(ParamDef::new("color", "Colour", ParamKind::Text { multiline: false }).help("#RRGGBB, or empty"))
+        .param(
+            ParamDef::new("color", "Color", ParamKind::Color)
+                .help("Pick a color or type #RRGGBB. Empty (the reset button) uses the theme color."),
+        )
         .defaults(&CommentParams::default()),
     );
 }

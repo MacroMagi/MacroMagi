@@ -5,7 +5,7 @@
 //! keeps these algorithms easy to test and reusable from any engine.
 //!
 //! * [`find_template`] – locate an image inside a larger one (template matching).
-//! * [`find_color`] – locate pixels of a given colour.
+//! * [`find_color`] – locate pixels of a given color.
 //! * [`decode`] / [`encode_png`] – convert between image files and pixel buffers.
 //!
 //! This is the crate where a future local vision model would be added, as
@@ -55,6 +55,39 @@ impl Bitmap {
     pub fn as_ref(&self) -> ImageRef<'_> {
         ImageRef::new(self.width, self.height, &self.rgba)
     }
+}
+
+/// Enlarges an image by a whole factor with bilinear filtering, which keeps
+/// the edges of letters smooth (text recognition reads small text better
+/// enlarged).
+pub fn enlarge(image: ImageRef<'_>, factor: u32) -> Bitmap {
+    let factor = factor.max(1);
+    let (width, height) = (image.width * factor, image.height * factor);
+    if factor == 1 || image.width == 0 || image.height == 0 {
+        return Bitmap { width: image.width, height: image.height, rgba: image.rgba.to_vec() };
+    }
+    let stride = image.width as usize * 4;
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    let scale = 1.0 / factor as f32;
+    for y in 0..height {
+        // The centre of the output pixel, in source pixels.
+        let sy = ((y as f32 + 0.5) * scale - 0.5).clamp(0.0, (image.height - 1) as f32);
+        let (y0, fy) = (sy.floor() as usize, sy.fract());
+        let y1 = (y0 + 1).min(image.height as usize - 1);
+        for x in 0..width {
+            let sx = ((x as f32 + 0.5) * scale - 0.5).clamp(0.0, (image.width - 1) as f32);
+            let (x0, fx) = (sx.floor() as usize, sx.fract());
+            let x1 = (x0 + 1).min(image.width as usize - 1);
+            let o = (y as usize * width as usize + x as usize) * 4;
+            for c in 0..4 {
+                let at = |xx: usize, yy: usize| f32::from(image.rgba[yy * stride + xx * 4 + c]);
+                let top = at(x0, y0) * (1.0 - fx) + at(x1, y0) * fx;
+                let bottom = at(x0, y1) * (1.0 - fx) + at(x1, y1) * fx;
+                rgba[o + c] = (top * (1.0 - fy) + bottom * fy).round() as u8;
+            }
+        }
+    }
+    Bitmap { width, height, rgba }
 }
 
 /// Shrinks an image by a whole factor, each pixel the average of a

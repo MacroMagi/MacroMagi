@@ -63,7 +63,7 @@ impl SettingsPage {
 #[serde(default)]
 pub struct Appearance {
     pub theme: ThemeMode,
-    /// The theme colour. `None` is monochrome.
+    /// The theme color. `None` is monochrome.
     pub accent: Option<[u8; 3]>,
     /// A picture behind the interface: a file name in the data folder's `backgrounds`.
     pub background: Option<String>,
@@ -127,6 +127,14 @@ pub struct Settings {
     pub engine: EnginePreference,
     /// A specific Python interpreter to use instead of searching for one.
     pub python_path: Option<PathBuf>,
+    /// The Python interpreters the last check found, with their versions.
+    pub pythons_found: Vec<(PathBuf, String)>,
+    /// The interpreter "automatic" stood for at the last check.
+    pub python_auto: Option<(PathBuf, String)>,
+    /// Python has been looked for at least once.
+    pub python_checked: bool,
+    /// The Macro tab shows only Run, Stop and the console.
+    pub lightweight: bool,
     pub record: RecordOptions,
     /// Add a Play Recording block to the graph as soon as a recording ends.
     pub auto_insert_recording: bool,
@@ -141,11 +149,11 @@ pub struct Settings {
     /// What the export dialog offers by default.
     pub export: ExportChoices,
     pub show_console: bool,
-    /// View → Grid: the canvas grid.
+    /// View › Grid: the canvas grid.
     pub show_grid: bool,
-    /// View → Block activity: blocks glow while they run.
+    /// View › Block activity: blocks glow while they run.
     pub show_activity: bool,
-    /// View → Variables: the panel listing the macro's variables.
+    /// View › Variables: the panel listing the macro's variables.
     pub show_variables: bool,
     /// A sound and a desktop notification when a macro finishes by itself.
     pub notify_on_finish: bool,
@@ -174,6 +182,10 @@ impl Default for Settings {
             options: AutomationOptions::default(),
             engine: EnginePreference::Auto,
             python_path: None,
+            pythons_found: Vec::new(),
+            python_auto: None,
+            python_checked: false,
+            lightweight: false,
             record: RecordOptions::default(),
             auto_insert_recording: true,
             appearance: Appearance::default(),

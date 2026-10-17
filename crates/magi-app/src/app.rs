@@ -21,7 +21,7 @@ use magi_core::preset::{NodePreset, Preset, PresetBody};
 use magi_core::project::Project;
 use magi_core::targets::{self, TargetShape, TargetSource};
 use magi_core::text::format_hex_color;
-use magi_engine::{LogEntry, LogLevel};
+use magi_engine::{LogEntry, LogLevel, PythonStatus};
 
 use crate::background::{self, BackgroundLayer};
 use crate::components::{Component, Components, Status as ComponentStatus};
@@ -99,15 +99,20 @@ enum PresetKind {
     Blocks,
 }
 
+/// How far an install has got, shared with the thread doing it: what it is
+/// doing, and the share done when known.
+type Progress = Arc<std::sync::Mutex<(String, Option<f32>)>>;
+
 /// Work done off the UI thread, reporting back.
 enum Job {
     Toast(String, bool),
     BackgroundReady(String),
-    /// A download finished (or failed): the message to show.
-    Component(Result<String, String>),
+    /// A download or removal finished (or failed): the message to show.
+    Component(Component, Result<String, String>),
     /// The parts' statuses, worked out off the UI thread.
     ComponentStatuses(Vec<(Component, ComponentStatus)>),
-    Pythons(Vec<(PathBuf, String)>),
+    /// The Pythons found, and the one "automatic" stands for.
+    Pythons(Vec<(PathBuf, String)>, Option<(PathBuf, String)>),
 }
 
 struct Toast {
@@ -131,7 +136,7 @@ pub struct StartupOptions {
     pub screenshot: Option<PathBuf>,
     /// Open the first recording block's information card (for screenshots).
     pub show_cards: bool,
-    /// Open View → Screen targets (for screenshots).
+    /// Open View › Screen targets (for screenshots).
     pub show_targets: bool,
     /// Select the first block of this type (for screenshots).
     pub select_kind: Option<String>,
@@ -158,9 +163,8 @@ pub struct MagiApp {
     /// Optional downloads, their statuses (when known), and the one being installed.
     components: Components,
     component_statuses: Vec<(Component, ComponentStatus)>,
-    installing: Option<(Component, Arc<std::sync::Mutex<String>>)>,
+    installing: Option<(Component, Progress)>,
     /// Python interpreters found on the system (`None`: not looked for yet).
-    pythons: Option<Vec<(PathBuf, String)>>,
     gpus: Vec<magi_platform::gpu::Gpu>,
     /// Where AI models run, as last applied.
     applied_device: Option<magi_ml::Device>,
@@ -198,7 +202,9 @@ pub struct MagiApp {
     activity: HashMap<NodeId, magi_engine::Activity>,
 
     background: BackgroundLayer,
-    /// The banner logo, in the colour it was made for.
+    /// The About window, opened from the banner logo.
+    about_open: bool,
+    /// The banner logo, in the color it was made for.
     logo: Option<(egui::Color32, egui::TextureHandle)>,
     applied_palette: Option<(bool, Option<[u8; 3]>, u32)>,
     applied_window: Option<(bool, bool, f32)>,
@@ -246,7 +252,6 @@ impl MagiApp {
             components,
             component_statuses: Vec::new(),
             installing: None,
-            pythons: None,
             gpus: magi_platform::gpu::gpus(),
             applied_device: None,
             looking_for_python: false,
@@ -275,6 +280,7 @@ impl MagiApp {
             error_node: None,
             activity: HashMap::new(),
             background: BackgroundLayer::default(),
+            about_open: false,
             logo: None,
             applied_palette: None,
             applied_window: None,
@@ -909,24 +915,35 @@ impl MagiApp {
                     self.settings.appearance.background = Some(name);
                     self.backgrounds = background::list(&self.paths.backgrounds_dir());
                 }
-                Job::Component(result) => {
+                Job::Component(component, result) => {
                     self.installing = None;
                     match result {
                         Ok(message) => self.toast(message),
                         Err(error) => self.toast_error(error),
                     }
                     self.refresh_components(ctx);
-                    self.pythons = None;
+                    if component == Component::Python {
+                        self.find_pythons(ctx);
+                    }
                 }
                 Job::ComponentStatuses(statuses) => {
                     self.checking_components = false;
                     self.component_statuses = statuses;
                 }
-                Job::Pythons(found) => {
+                Job::Pythons(found, auto) => {
                     self.looking_for_python = false;
-                    self.pythons = Some(found);
+                    self.settings.pythons_found = found;
+                    self.settings.python_auto = auto;
+                    self.settings.python_checked = true;
                 }
             }
+        }
+        // The first time Python is tried (a macro ran), find out which Pythons there are, once.
+        if !self.settings.python_checked
+            && !self.looking_for_python
+            && self.controller.python_status() != PythonStatus::Unknown
+        {
+            self.find_pythons(ctx);
         }
 
         // Hand the latest macro and settings to the controller.
@@ -1034,34 +1051,76 @@ impl MagiApp {
         });
     }
 
-    /// The Python that packages (PyTorch) go into: MacroMagi's own, else the chosen one, else the first found.
+    /// The Python that packages (PyTorch) go into: the one macros use – the
+    /// chosen one, else what "automatic" stood for at the last check.
     fn python_for_packages(&self) -> Option<PathBuf> {
-        self.components
-            .python()
-            .or_else(|| self.settings.python_path.clone())
-            .or_else(|| self.pythons.as_ref().and_then(|found| found.first().map(|(p, _)| p.clone())))
+        self.settings.python_path.clone().or_else(|| self.settings.python_auto.as_ref().map(|(p, _)| p.clone()))
+    }
+
+    fn python_config(&self) -> magi_engine::python::PythonConfig {
+        magi_engine::python::PythonConfig {
+            interpreter: self.settings.python_path.clone(),
+            app_dir: self.paths.app_dir.clone(),
+            data_dir: self.paths.data_dir.clone(),
+        }
+    }
+
+    /// Looks for Python interpreters, and works out which one "automatic"
+    /// stands for, off the UI thread. Starts no visible windows.
+    fn find_pythons(&mut self, ctx: &egui::Context) {
+        if self.looking_for_python {
+            return;
+        }
+        self.looking_for_python = true;
+        let (components, app_dir) = (self.components.clone(), self.paths.app_dir.clone());
+        let config = magi_engine::python::PythonConfig { interpreter: None, ..self.python_config() };
+        self.spawn_job(ctx, move || {
+            let mut found = crate::components::find_pythons(&components, &app_dir);
+            let auto = magi_engine::python::resolve_interpreter(&config);
+            let same = |a: &std::path::Path, b: &std::path::Path| {
+                a.canonicalize().unwrap_or_else(|_| a.to_owned()) == b.canonicalize().unwrap_or_else(|_| b.to_owned())
+            };
+            if let Some((path, version)) = &auto
+                && !found.iter().any(|(p, _)| same(p, path))
+            {
+                found.push((path.clone(), version.clone()));
+            }
+            Job::Pythons(found, auto)
+        });
     }
 
     fn install_component(&mut self, ctx: &egui::Context, component: Component, remove: bool) {
         if self.installing.is_some() {
             return;
         }
-        let progress =
-            Arc::new(std::sync::Mutex::new(if remove { "Removing…".to_owned() } else { "Starting…".to_owned() }));
+        let progress = Arc::new(std::sync::Mutex::new((
+            if remove { "Uninstalling…".to_owned() } else { "Starting…".to_owned() },
+            None,
+        )));
         self.installing = Some((component, Arc::clone(&progress)));
         let components = self.components.clone();
-        let python = self.python_for_packages();
+        let known = self.python_for_packages();
+        let config = self.python_config();
         let repaint = ctx.clone();
         self.spawn_job(ctx, move || {
-            let report = |message: String| {
-                *progress.lock().unwrap_or_else(|p| p.into_inner()) = message;
+            let report = |message: &str, share: Option<f32>| {
+                *progress.lock().unwrap_or_else(|p| p.into_inner()) = (message.to_owned(), share);
                 repaint.request_repaint();
             };
-            Job::Component(if remove {
-                components.uninstall(component, python.as_deref())
-            } else {
-                components.install(component, python.as_deref(), &report)
-            })
+            // PyTorch goes into the Python macros use, worked out now if it is not known yet.
+            let python = known.or_else(|| {
+                (component == Component::PyTorch)
+                    .then(|| magi_engine::python::resolve_interpreter(&config).map(|(path, _)| path))
+                    .flatten()
+            });
+            Job::Component(
+                component,
+                if remove {
+                    components.uninstall(component, python.as_deref())
+                } else {
+                    components.install(component, python.as_deref(), &report)
+                },
+            )
         });
     }
 
@@ -1137,8 +1196,13 @@ impl MagiApp {
                 if self.logo.as_ref().is_none_or(|(made_for, _)| *made_for != color) {
                     self.logo = Some((color, crate::icon::logo(ui.ctx(), color)));
                 }
-                if let Some((_, logo)) = &self.logo {
-                    ui.add(egui::Image::new((logo.id(), vec2(24.0, 24.0))));
+                if let Some((_, logo)) = &self.logo
+                    && ui
+                        .add(egui::Image::new((logo.id(), vec2(24.0, 24.0))).sense(egui::Sense::click()))
+                        .on_hover_text("About MacroMagi")
+                        .clicked()
+                {
+                    self.about_open = true;
                 }
             }
             let names = if width < 430.0 { ("Clicker", "Macro") } else { ("Auto Clicker", "Macro") };
@@ -1199,6 +1263,17 @@ impl MagiApp {
                 };
                 if widgets::icon_toggle(ui, glyph, hidden, hint).clicked() {
                     self.settings.hide_from_capture = !hidden;
+                }
+                if self.settings.tab == Tab::Macro {
+                    let light = self.settings.lightweight;
+                    let hint = if light {
+                        "Lightweight mode: only Run, Stop and the console – click to show the editor again"
+                    } else {
+                        "Lightweight mode: hide the editor, keeping only Run, Stop and the console"
+                    };
+                    if widgets::icon_toggle(ui, icon::FEATHER, light, hint).clicked() {
+                        self.settings.lightweight = !light;
+                    }
                 }
                 if self.controller.anything_running() {
                     let text = if compact || self.settings.stop_hotkey.is_none() {
@@ -1603,6 +1678,7 @@ impl MagiApp {
             dry_run: self.settings.dry_run,
             show_console: &mut self.settings.show_console,
             show_variables: &mut self.settings.show_variables,
+            lightweight: &mut self.settings.lightweight,
             show_grid: self.settings.show_grid,
             show_activity: self.settings.show_activity,
             record: &mut self.settings.record,
@@ -1875,17 +1951,22 @@ impl MagiApp {
                 hotkey: node.params_or_default::<StartParams>().hotkey,
             })
             .collect();
-        let installing = self
-            .installing
-            .as_ref()
-            .map(|(component, progress)| (*component, progress.lock().unwrap_or_else(|p| p.into_inner()).clone()));
+        let installing = self.installing.as_ref().map(|(component, progress)| {
+            let (message, share) = progress.lock().unwrap_or_else(|p| p.into_inner()).clone();
+            (*component, message, share)
+        });
+        let pythons = self.settings.python_checked.then(|| self.settings.pythons_found.clone());
+        let python_auto = self.settings.python_auto.clone();
         let env = SettingsEnv {
             capturing: self.capture.as_ref().map(|(target, pending)| (target, pending)),
             python: &python,
             starts: &starts,
             backgrounds: &self.backgrounds,
             downloading: self.downloading,
-            pythons: self.pythons.as_deref(),
+            pythons: pythons.as_deref(),
+            python_auto: python_auto.as_ref(),
+            looking_for_python: self.looking_for_python,
+            python_downloaded: self.components.python(),
             gpus: &self.gpus,
             components: &self.component_statuses,
             installing,
@@ -1895,6 +1976,7 @@ impl MagiApp {
             match event {
                 SettingsEvent::Request(request) => self.handle_request(ctx, request),
                 SettingsEvent::CheckPython => {
+                    self.find_pythons(ctx);
                     self.sync_controller();
                     // Starting Python can take a second; do it off the UI thread.
                     let (controller, ctx) = (self.controller.clone(), ctx.clone());
@@ -1937,16 +2019,6 @@ impl MagiApp {
                 SettingsEvent::ResetAll => {
                     self.settings.reset_all();
                     self.toast("All settings reset");
-                }
-                SettingsEvent::FindPythons => {
-                    if !self.looking_for_python {
-                        self.looking_for_python = true;
-                        self.pythons = None;
-                        let (components, app_dir) = (self.components.clone(), self.paths.app_dir.clone());
-                        self.spawn_job(ctx, move || {
-                            Job::Pythons(crate::components::find_pythons(&components, &app_dir))
-                        });
-                    }
                 }
                 SettingsEvent::CheckComponents => {
                     if !self.checking_components {
@@ -2093,6 +2165,17 @@ impl MagiApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.about_open {
+            let response = egui::Modal::new(egui::Id::new("about")).show(ctx, |ui| {
+                ui.set_width(280.0);
+                crate::ui::settings_window::about(ui);
+                ui.add_space(8.0);
+                ui.button("Close").clicked()
+            });
+            if response.inner || response.should_close() {
+                self.about_open = false;
+            }
+        }
         self.unsaved_dialog(ctx);
         self.unsaved_model_dialog(ctx);
         self.export_dialog(ctx);

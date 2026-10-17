@@ -1,4 +1,4 @@
-//! The screen picker: choose a point, an area, an image or a colour on screen.
+//! The screen picker: choose a point, an area, an image or a color on screen.
 //!
 //! It works like a screenshot tool. One display is captured and shown frozen
 //! in a full-screen window on that display; the user points or drags on that
@@ -142,7 +142,7 @@ impl Snip {
         let mut result = None;
         let hint = match self.mode {
             SnipMode::Point => "Click the position",
-            SnipMode::Color => "Click the colour",
+            SnipMode::Color => "Click the color",
             SnipMode::Region => "Drag a box around the area to search",
             SnipMode::Image => "Drag a box around the thing to look for",
         };

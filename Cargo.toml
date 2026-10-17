@@ -3,12 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.95"
 authors = ["MacroMagi contributors"]
-repository = "https://github.com/MacroMagi/MacroMagi"
-homepage = "https://github.com/MacroMagi/MacroMagi"
+repository = "https://github.com/MagiGun/MacroMagi"
+homepage = "https://github.com/MagiGun/MacroMagi"
 publish = false
 
 [workspace.dependencies]
@@ -40,7 +40,7 @@ gilrs = { version = "0.11", default-features = false, features = ["xinput"] }
 xcap = "0.9"
 
 # UI (only magi-app may depend on these)
-eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "links", "wayland", "x11"] }
 egui = "0.36"
 egui-phosphor = "0.14"
 egui_extras = { version = "0.36", default-features = false }

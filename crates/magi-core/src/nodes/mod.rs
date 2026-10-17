@@ -50,6 +50,8 @@ pub mod ids {
     pub const CHANCE: &str = "logic.chance";
     pub const PYTHON: &str = "script.python";
     pub const AUTOCLICK: &str = "input.autoclick";
+    pub const AUTOTYPE: &str = "input.autotype";
+    pub const READ_TEXT: &str = "vision.read_text";
     pub const FOCUS_WINDOW: &str = "window.focus";
     pub const RATE: &str = "flow.rate";
     pub const DEFINE: &str = "flow.define";

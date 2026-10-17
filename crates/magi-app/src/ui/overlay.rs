@@ -1,4 +1,4 @@
-//! View → Screen targets: every position the macro clicks and every area it
+//! View › Screen targets: every position the macro clicks and every area it
 //! searches, drawn over a frozen picture of one display and numbered in the
 //! order a run reaches them. Each can be dragged into place; areas can also
 //! be resized by their corners. Changes go straight into the macro.

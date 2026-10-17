@@ -15,7 +15,7 @@ use crate::components::{Component, Status as ComponentStatus};
 use crate::settings::{Settings, SettingsPage, UI_SCALE_RANGE};
 use crate::theme::{self, ThemeMode};
 
-/// Theme colours offered as swatches; any other can be picked.
+/// Theme colors offered as swatches; any other can be picked.
 const SWATCHES: [[u8; 3]; 8] = [
     [0x9B, 0x6D, 0xFF],
     [0x4D, 0xA3, 0xFF],
@@ -44,18 +44,24 @@ pub struct SettingsEnv<'a> {
     pub backgrounds: &'a [String],
     /// A background is being downloaded.
     pub downloading: bool,
-    /// Python interpreters found on the system; `None` while not looked for yet.
+    /// Python interpreters found by the last check; `None` before the first.
     pub pythons: Option<&'a [(std::path::PathBuf, String)]>,
+    /// The interpreter "automatic" stood for at the last check.
+    pub python_auto: Option<&'a (std::path::PathBuf, String)>,
+    /// A check for Python is under way.
+    pub looking_for_python: bool,
+    /// The Python downloaded from this page, if there is one.
+    pub python_downloaded: Option<std::path::PathBuf>,
     pub gpus: &'a [magi_platform::gpu::Gpu],
     /// The optional downloads and where each stands (empty until worked out).
     pub components: &'a [(Component, ComponentStatus)],
-    /// The part being installed or removed, and how far along it is.
-    pub installing: Option<(Component, String)>,
+    /// The part being installed or removed, what it is doing, and the share done when known.
+    pub installing: Option<(Component, String, Option<f32>)>,
 }
 
 pub enum SettingsEvent {
     Request(UiRequest),
-    /// Try to start Python now and report what happened.
+    /// Look for Pythons, and try to start the one macros use.
     CheckPython,
     ChooseBackgroundFile,
     DownloadBackground(String),
@@ -64,8 +70,6 @@ pub enum SettingsEvent {
     ResetAll,
     /// A Start block's hotkey was changed or cleared here.
     SetStartHotkey(NodeId, Hotkey),
-    /// Look for Python interpreters (again).
-    FindPythons,
     /// Work out the optional downloads' statuses.
     CheckComponents,
     Install(Component),
@@ -266,7 +270,7 @@ impl SettingsWindow {
         }
 
         section(ui, "About");
-        ui.label(format!("MacroMagi {}", magi_core::VERSION));
+        about(ui);
     }
 
     fn appearance(
@@ -284,10 +288,12 @@ impl SettingsWindow {
             &[(ThemeMode::System, ThemeMode::System.label()), (ThemeMode::Light, "Light"), (ThemeMode::Dark, "Dark")],
         );
 
-        section(ui, "Theme colour");
-        widgets::note(ui, "Colours every part of MacroMagi, icons and blocks included.");
+        section(ui, "Theme color");
+        widgets::note(ui, "Colors every part of MacroMagi, icons and blocks included.");
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            // The rings reach past the circles; keep them clear of the edge.
+            ui.add_space(4.0);
             let mono = look.accent.is_none();
             if swatch(ui, None, mono).on_hover_text("Monochrome").clicked() {
                 look.accent = None;
@@ -298,7 +304,7 @@ impl SettingsWindow {
                 }
             }
             let mut custom = look.accent.unwrap_or([0x9B, 0x6D, 0xFF]);
-            if ui.color_edit_button_srgb(&mut custom).on_hover_text("Any colour").changed() {
+            if ui.color_edit_button_srgb(&mut custom).on_hover_text("Any color").changed() {
                 look.accent = Some(custom);
             }
         });
@@ -369,7 +375,7 @@ fn percent_slider(ui: &mut Ui, label: &str, hint: &str, value: &mut f32) {
     });
 }
 
-/// A round colour swatch; `None` is the monochrome swatch (half black, half white).
+/// A round color swatch; `None` is the monochrome swatch (half black, half white).
 fn swatch(ui: &mut Ui, rgb: Option<[u8; 3]>, selected: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(22.0, 22.0), egui::Sense::click());
     let painter = ui.painter();
@@ -422,7 +428,7 @@ fn ui_scale(ui: &mut Ui, settings: &mut Settings) {
         if response.changed() {
             changed_at = now;
         }
-        if ui.small_button("100%").clicked() {
+        if widgets::reset_button(ui, (pending - 1.0).abs() > 1e-4) {
             pending = 1.0;
             changed_at = f64::NEG_INFINITY;
         }
@@ -649,77 +655,152 @@ fn engine(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &
     );
 
     section(ui, "Python");
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         let (text, color) = match env.python {
             PythonStatus::Running { version, command } => (format!("Python {version} ({command})"), theme::success()),
             PythonStatus::Unknown => ("Python has not been started yet".to_owned(), theme::text_dim()),
             PythonStatus::Unavailable(reason) => (reason.clone(), theme::warning()),
         };
-        if ui.button("Check").on_hover_text("Start Python now to see whether it works").clicked() {
+        let busy = env.looking_for_python;
+        let check = egui::Button::new(if busy {
+            "Checking…".to_owned()
+        } else {
+            format!("{}  Check", icon::ARROWS_CLOCKWISE)
+        });
+        if ui
+            .add_enabled(!busy, check)
+            .on_hover_text("Look for Pythons on this computer, and start the one macros use to see whether it works")
+            .clicked()
+        {
             events.push(SettingsEvent::CheckPython);
         }
         ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).wrap());
     });
-    // Which Python: found automatically, one of those found, or any file.
-    if env.pythons.is_none() {
-        events.push(SettingsEvent::FindPythons);
-    }
+    // Which Python: whatever "automatic" finds, one of those found, or any file.
     let found = env.pythons.unwrap_or_default();
     let describe = |path: &std::path::Path| match found.iter().find(|(p, _)| p == path) {
         Some((_, version)) => format!("Python {version} – {}", path.display()),
         None => path.display().to_string(),
     };
-    ui.horizontal(|ui| {
-        let shown = settings.python_path.as_deref().map_or_else(|| "Found automatically".to_owned(), describe);
-        egui::ComboBox::from_id_salt("python-choice")
-            .width(ui.available_width() - 70.0)
-            .truncate()
-            .selected_text(shown)
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(settings.python_path.is_none(), "Found automatically").clicked() {
-                    settings.python_path = None;
+    let auto = match (env.python_auto, env.pythons) {
+        (Some((path, version)), _) => format!("(auto) Python {version} – {}", path.display()),
+        (None, Some(_)) => "(auto) no Python found".to_owned(),
+        (None, None) => "(auto) not checked yet – press Check".to_owned(),
+    };
+    let shown = settings.python_path.as_deref().map_or_else(|| auto.clone(), describe);
+    egui::ComboBox::from_id_salt("python-choice")
+        .width(ui.available_width() - 8.0)
+        .truncate()
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            if ui.selectable_label(settings.python_path.is_none(), &auto).clicked() {
+                settings.python_path = None;
+            }
+            for (path, version) in found {
+                let chosen = settings.python_path.as_deref() == Some(path.as_path());
+                if ui.selectable_label(chosen, format!("Python {version} – {}", path.display())).clicked() {
+                    settings.python_path = Some(path.clone());
                 }
-                for (path, version) in found {
-                    let chosen = settings.python_path.as_deref() == Some(path.as_path());
-                    if ui.selectable_label(chosen, format!("Python {version} – {}", path.display())).clicked() {
-                        settings.python_path = Some(path.clone());
-                    }
-                }
-                if ui.button(format!("{}  Another file…", icon::FOLDER_OPEN)).clicked()
-                    && let Some(file) = rfd::FileDialog::new().set_title("Choose the Python interpreter").pick_file()
-                {
-                    settings.python_path = Some(file);
-                }
-            });
-        if ui.button(icon::ARROWS_CLOCKWISE).on_hover_text("Look for Python again").clicked() {
-            events.push(SettingsEvent::FindPythons);
-        }
-    });
+            }
+            if ui.button(format!("{}  Another file…", icon::FOLDER_OPEN)).clicked()
+                && let Some(file) = rfd::FileDialog::new().set_title("Choose the Python interpreter").pick_file()
+            {
+                settings.python_path = Some(file);
+            }
+        });
     match env.pythons {
-        None => widgets::note(ui, "Looking for Python…"),
-        Some([]) => {
-            widgets::notice(ui, icon::WARNING, "No Python was found on this computer.", theme::warning());
-            if Component::Python.unavailable().is_none() {
-                let busy = env.installing.as_ref().is_some_and(|(c, _)| *c == Component::Python);
-                if busy {
-                    widgets::note(ui, env.installing.as_ref().map(|(_, m)| m.clone()).unwrap_or_default());
-                } else if ui
-                    .button(format!("{}  Download Python ({})", icon::DOWNLOAD_SIMPLE, Component::Python.size()))
-                    .on_hover_text("Python for the Python engine and Python Script blocks")
-                    .clicked()
-                {
-                    events.push(SettingsEvent::Install(Component::Python));
-                }
-            } else if ui.button(format!("{}  Get Python from python.org", icon::ARROW_SQUARE_OUT)).clicked() {
+        None => widgets::note(ui, "Press Check to look for Python. It is also looked for the first time a macro runs."),
+        Some([]) => widgets::notice(ui, icon::WARNING, "No Python was found on this computer.", theme::warning()),
+        Some(found) => widgets::note(
+            ui,
+            if found.len() == 1 {
+                "1 Python installation found.".to_owned()
+            } else {
+                format!("{} Python installations found.", found.len())
+            },
+        ),
+    }
+
+    section(ui, "Download Python");
+    match Component::Python.unavailable() {
+        Some(_) => {
+            widgets::note(
+                ui,
+                "Python comes with most Linux and macOS systems; install it from python.org if it is missing.",
+            );
+            if ui.button(format!("{}  Get Python from python.org", icon::ARROW_SQUARE_OUT)).clicked() {
                 ui.ctx().open_url(egui::OpenUrl::new_tab("https://www.python.org/downloads/"));
             }
         }
-        Some(found) => widgets::note(ui, format!("{} Python installations found.", found.len())),
+        None => {
+            // Without the full check (which the AI page runs), whether the folder is there is enough.
+            let known = env.components.iter().find(|(c, _)| *c == Component::Python).map(|(_, s)| s.clone());
+            let status = known.unwrap_or_else(|| match &env.python_downloaded {
+                Some(path) => ComponentStatus::Installed { bytes: 0, detail: path.display().to_string() },
+                None => ComponentStatus::Missing,
+            });
+            component_card(ui, Component::Python, Some(&status), env, events);
+        }
     }
     widgets::note(
         ui,
         "An unused Python process is stopped after a few minutes to save memory; it starts again on the next run.",
     );
+}
+
+/// One optional download: what it is, where it stands, and Install or Uninstall.
+fn component_card(
+    ui: &mut Ui,
+    component: Component,
+    status: Option<&ComponentStatus>,
+    env: &SettingsEnv<'_>,
+    events: &mut Vec<SettingsEvent>,
+) {
+    egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(component.name()).strong());
+            let (text, color) = match status {
+                Some(ComponentStatus::Installed { bytes, detail }) if *bytes > 0 => {
+                    (format!("Installed · {detail} · {} MB", bytes / (1024 * 1024)), theme::success())
+                }
+                Some(ComponentStatus::Installed { detail, .. }) => (format!("Installed · {detail}"), theme::success()),
+                Some(ComponentStatus::OnSystem(detail)) => (format!("Found · {detail}"), theme::success()),
+                Some(ComponentStatus::Missing) => ("Not installed".to_owned(), theme::text_faint()),
+                Some(ComponentStatus::RemovedAfterRestart) => {
+                    ("Uninstalled when MacroMagi restarts".to_owned(), theme::warning())
+                }
+                None => ("…".to_owned(), theme::text_faint()),
+            };
+            ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).truncate());
+        });
+        widgets::note(ui, component.description());
+        match (&env.installing, component.unavailable()) {
+            (Some((busy, message, share)), _) if *busy == component => {
+                widgets::progress_bar(ui, *share);
+                ui.label(RichText::new(message).size(11.0).color(theme::text_dim()));
+            }
+            (_, Some(reason)) => widgets::note(ui, reason),
+            (installing, None) => {
+                let idle = installing.is_none();
+                ui.horizontal_wrapped(|ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    let installed = matches!(status, Some(ComponentStatus::Installed { .. }));
+                    if !installed {
+                        let label = format!("{}  Install ({})", icon::DOWNLOAD_SIMPLE, component.size());
+                        if ui.add_enabled(idle, egui::Button::new(label)).clicked() {
+                            events.push(SettingsEvent::Install(component));
+                        }
+                    }
+                    if installed
+                        && ui.add_enabled(idle, egui::Button::new(format!("{}  Uninstall", icon::TRASH))).clicked()
+                    {
+                        events.push(SettingsEvent::Remove(component));
+                    }
+                });
+            }
+        }
+    });
 }
 
 fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut Vec<SettingsEvent>) {
@@ -768,74 +849,35 @@ fn ai(ui: &mut Ui, settings: &mut Settings, env: &SettingsEnv<'_>, events: &mut 
         },
     );
 
-    section(ui, "Downloads");
-    widgets::note(
-        ui,
-        "Parts that some features need. Install them when you want those features; remove them any time.",
-    );
-    for component in Component::ALL {
-        let status = env.components.iter().find(|(c, _)| *c == component).map(|(_, s)| s);
-        egui::Frame::new().fill(theme::bg_raised()).corner_radius(theme::RADIUS).inner_margin(8).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(component.name()).strong());
-                let (text, color) = match status {
-                    Some(ComponentStatus::Installed { bytes, detail }) if *bytes > 0 => {
-                        (format!("Installed · {detail} · {} MB", bytes / (1024 * 1024)), theme::success())
-                    }
-                    Some(ComponentStatus::Installed { detail, .. }) => {
-                        (format!("Installed · {detail}"), theme::success())
-                    }
-                    Some(ComponentStatus::OnSystem(detail)) => (format!("Found · {detail}"), theme::success()),
-                    Some(ComponentStatus::Missing) => ("Not installed".to_owned(), theme::text_faint()),
-                    Some(ComponentStatus::RemovedAfterRestart) => {
-                        ("Removed when MacroMagi restarts".to_owned(), theme::warning())
-                    }
-                    None => ("…".to_owned(), theme::text_faint()),
-                };
-                ui.add(egui::Label::new(RichText::new(text).size(11.5).color(color)).truncate());
-            });
-            widgets::note(ui, component.description());
-            match (&env.installing, component.unavailable(), status) {
-                (Some((busy, progress)), ..) if *busy == component => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(RichText::new(progress).size(11.5).color(theme::text_dim()));
-                    });
-                }
-                (_, Some(reason), _) => widgets::note(ui, reason),
-                (installing, None, status) => {
-                    let idle = installing.is_none();
-                    ui.horizontal(|ui| {
-                        let installed = matches!(status, Some(ComponentStatus::Installed { .. }));
-                        if !installed
-                            && ui
-                                .add_enabled(
-                                    idle,
-                                    egui::Button::new(format!(
-                                        "{}  Install ({})",
-                                        icon::DOWNLOAD_SIMPLE,
-                                        component.size()
-                                    )),
-                                )
-                                .clicked()
-                        {
-                            events.push(SettingsEvent::Install(component));
-                        }
-                        if installed
-                            && ui.add_enabled(idle, egui::Button::new(format!("{}  Remove", icon::TRASH))).clicked()
-                        {
-                            events.push(SettingsEvent::Remove(component));
-                        }
-                    });
-                }
+    ui.horizontal(|ui| {
+        section(ui, "Downloads");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Max), |ui| {
+            if ui.small_button(format!("{}  Check again", icon::ARROWS_CLOCKWISE)).clicked() {
+                events.push(SettingsEvent::CheckComponents);
             }
         });
+    });
+    widgets::note(
+        ui,
+        "Parts that some features need. Install them when you want those features; uninstall them any time.",
+    );
+    for component in Component::AI {
+        let status = env.components.iter().find(|(c, _)| *c == component).map(|(_, s)| s);
+        component_card(ui, component, status, env, events);
         ui.add_space(4.0);
     }
-    if ui.button(format!("{}  Check again", icon::ARROWS_CLOCKWISE)).clicked() {
-        events.push(SettingsEvent::CheckComponents);
-    }
+}
+
+/// Who makes MacroMagi, with links to them.
+pub fn about(ui: &mut Ui) {
+    ui.label(RichText::new(format!("MacroMagi {}", magi_core::VERSION)).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        ui.label("Developed and created by");
+        ui.hyperlink_to("MagiGun", "https://github.com/MagiGun");
+        ui.label("and");
+        ui.hyperlink_to("uvxszi", "https://github.com/uvxszi");
+    });
 }
 
 #[cfg(test)]

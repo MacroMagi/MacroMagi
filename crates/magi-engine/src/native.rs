@@ -21,12 +21,12 @@ use magi_core::nodes::flow::{
     CallParams, DecisionParams, DefineParams, DelayParams, LogParams, RateParams, RepeatMode, RepeatParams, StopParams,
     StopScope, WaitUntilParams,
 };
-use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
+use magi_core::nodes::input::{ActionParams, AutoTypeParams, PlayRecordingParams};
 use magi_core::nodes::logic::{ChanceParams, CompareParams, GateOp, GateParams, MathParams, TextParams};
 use magi_core::nodes::sound::{SoundLevelParams, SoundMatchParams};
 use magi_core::nodes::system::NotifyParams;
 use magi_core::nodes::variables::{CounterParams, REACHED, SetVariableParams, VariableParams};
-use magi_core::nodes::vision::{FindColorParams, FindImageParams};
+use magi_core::nodes::vision::{FindColorParams, FindImageParams, ReadTextParams};
 use magi_core::nodes::window::FocusWindowParams;
 use magi_core::nodes::{EngineSupport, ids, ports};
 use magi_core::variables::{as_number, as_text, parse_literal};
@@ -111,14 +111,17 @@ impl NativeNodes {
         nodes.flow(ids::SET_VARIABLE, set_variable);
         nodes.flow(ids::COUNTER, counter);
         nodes.flow(ids::NOTIFY, notify);
-        nodes.flow(ids::AI_WATCH, |interp, node| {
-            let p: AiWatchParams = interp.params(node)?;
-            let (hits, label) = interp.cx.ai_watch(&p, node.id)?;
-            interp.outputs.insert(
-                node.id,
-                Map::from_iter([("hits".to_owned(), json!(hits)), ("label".to_owned(), json!(label))]),
-            );
+        nodes.flow(ids::AI_WATCH, ai_watch);
+        nodes.flow(ids::AUTOTYPE, |interp, node| {
+            let p: AutoTypeParams = interp.params(node)?;
+            let wired = interp.input(node, "text")?;
+            let typed = interp.cx.autotype(&p, wired, node.id)?;
+            interp.outputs.insert(node.id, Map::from_iter([("typed".to_owned(), json!(typed))]));
             Ok(Next::out())
+        });
+        nodes.value(ids::READ_TEXT, |interp, node| {
+            let p: ReadTextParams = interp.params(node)?;
+            interp.cx.read_text(&p)
         });
         nodes.value(ids::FIND_IMAGE, find_image);
         nodes.value(ids::FIND_COLOR, find_color);
@@ -231,7 +234,7 @@ impl Interp<'_> {
                     LogLevel::Warning,
                     Some(id),
                     format!(
-                        "Skipped “{}”: it needs the Python engine. Choose Python in Settings → Engine.",
+                        "Skipped “{}”: it needs the Python engine. Choose Python in Settings › Engine.",
                         program.registry.title(node)
                     ),
                 );
@@ -259,8 +262,13 @@ impl Interp<'_> {
                 }
                 Next::EndBranch => current = None,
                 Next::ExitLoop => match self.loops.pop() {
+                    // A Repeat leaves through "Done"; an AI Watch through its usual output.
                     Some(frame) => {
-                        current = program.graph.flow_target(frame.node, ports::DONE).map(|target| target.node)
+                        current = program
+                            .graph
+                            .flow_target(frame.node, ports::DONE)
+                            .or_else(|| program.graph.flow_target(frame.node, ports::OUT))
+                            .map(|target| target.node)
                     }
                     None => current = None,
                 },
@@ -345,6 +353,29 @@ fn delay(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
     let ms = interp.cx.jittered(p.ms, p.jitter_ms);
     interp.cx.sleep_ms(ms)?;
     Ok(Next::out())
+}
+
+/// Watches; each time the model acts, runs the blocks under "Acted" as a loop
+/// round and comes back to watching, until the time is up.
+fn ai_watch(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {
+    let p: AiWatchParams = interp.params(node)?;
+    let returning = interp.loops.last().is_some_and(|frame| frame.node == node.id);
+    let step = interp.cx.ai_watch(&p, node.id, returning)?;
+    interp.outputs.insert(
+        node.id,
+        Map::from_iter([("hits".to_owned(), json!(step.hits)), ("label".to_owned(), json!(step.label))]),
+    );
+    if step.acted {
+        if !returning {
+            interp.loops.push(LoopFrame { node: node.id, remaining: None });
+        }
+        Ok(Next::Port(magi_core::nodes::ai::ACTED.to_owned()))
+    } else {
+        if returning {
+            interp.loops.pop();
+        }
+        Ok(Next::out())
+    }
 }
 
 fn repeat(interp: &mut Interp<'_>, node: &Node) -> OpResult<Next> {

@@ -91,9 +91,9 @@ pub struct GraphEnv<'a> {
     pub running: &'a [NodeId],
     /// The block the last error was reported against.
     pub error_node: Option<NodeId>,
-    /// View → Grid.
+    /// View › Grid.
     pub show_grid: bool,
-    /// View → Block activity: blocks glow as they run.
+    /// View › Block activity: blocks glow as they run.
     pub show_activity: bool,
     /// The macro would run on the native engine, which skips Python-only blocks.
     pub python_missing: bool,
@@ -145,6 +145,8 @@ pub struct GraphView {
     pan: Vec2,
     zoom: f32,
     pub selection: BTreeSet<NodeId>,
+    /// Selected groups (their boxes, not the blocks in them).
+    pub selected_groups: BTreeSet<u64>,
     /// Draw order, back to front.
     order: Vec<NodeId>,
     wire_drag: Option<WireDrag>,
@@ -178,6 +180,7 @@ impl Default for GraphView {
             pan: Vec2::ZERO,
             zoom: 1.0,
             selection: BTreeSet::new(),
+            selected_groups: BTreeSet::new(),
             order: Vec::new(),
             wire_drag: None,
             band_start: None,
@@ -370,6 +373,8 @@ pub fn node_icon(kind: &str) -> &'static str {
         ids::CHANCE => icon::DICE_FIVE,
         ids::PYTHON => icon::CODE,
         ids::AUTOCLICK => icon::HAND_TAP,
+        ids::AUTOTYPE => icon::KEYBOARD,
+        ids::READ_TEXT => icon::TEXT_AA,
         ids::FOCUS_WINDOW => icon::APP_WINDOW,
         ids::RATE => icon::METRONOME,
         ids::DEFINE => icon::FUNCTION,
@@ -490,12 +495,24 @@ impl GraphView {
         }
     }
 
-    /// Puts the selected blocks in a new group.
+    /// Puts the selected blocks and groups in a new group, and selects it.
+    /// Groups inside groups are drawn inside their boxes.
     pub fn group_selection(&mut self, project: &mut Project) -> Option<u64> {
         let name = format!("Group {}", project.graph.groups().len() + 1);
-        let id = project.graph.add_group(&name, &self.selection)?;
+        let id = project.graph.add_group_around(&name, &self.selection, &self.selected_groups)?;
         self.renaming = Some(id);
+        self.selection.clear();
+        self.selected_groups = BTreeSet::from([id]);
         Some(id)
+    }
+
+    /// The selected blocks, and the blocks of the selected groups.
+    fn selected_blocks(&self, project: &Project) -> BTreeSet<NodeId> {
+        let mut blocks = self.selection.clone();
+        for group in &self.selected_groups {
+            blocks.extend(project.graph.group_blocks(*group));
+        }
+        blocks
     }
 
     /// The layer the nodes and wires are drawn on.
@@ -536,6 +553,7 @@ impl GraphView {
     /// Makes one block the selection and scrolls it into view.
     pub fn focus_node(&mut self, node: NodeId) {
         self.selection = BTreeSet::from([node]);
+        self.selected_groups.clear();
         self.bring_to_front(node);
     }
 
@@ -551,19 +569,24 @@ impl GraphView {
         Some(id)
     }
 
+    /// Deletes the selected blocks. A selected group is ungrouped: its blocks stay.
     pub fn delete_selection(&mut self, project: &mut Project) {
         for id in std::mem::take(&mut self.selection) {
             project.graph.remove(id);
         }
+        for id in std::mem::take(&mut self.selected_groups) {
+            project.graph.remove_group(id);
+        }
     }
 
     pub fn copy_selection(&self, ui: &Ui, project: &Project, registry: &Registry) {
-        if self.selection.is_empty() {
+        let blocks = self.selected_blocks(project);
+        if blocks.is_empty() {
             return;
         }
         // Copied as a self-contained node preset, so pasting into another
         // project (or another MacroMagi window) brings images and recordings along.
-        let preset = NodePreset::capture(&project.graph, &self.selection, &project.assets, registry);
+        let preset = NodePreset::capture(&project.graph, &blocks, &project.assets, registry);
         if let Ok(json) = serde_json::to_string(&preset) {
             ui.ctx().copy_text(format!("{CLIPBOARD_TAG}{json}"));
         }
@@ -590,13 +613,15 @@ impl GraphView {
     }
 
     fn duplicate_selection(&mut self, project: &mut Project) {
-        if self.selection.is_empty() {
+        let blocks = self.selected_blocks(project);
+        if blocks.is_empty() {
             return;
         }
-        let fragment = project.graph.fragment(&self.selection);
+        let fragment = project.graph.fragment(&blocks);
         let origin = fragment.origin();
         let ids = project.graph.insert_fragment(&fragment, [origin[0] + 28.0, origin[1] + 28.0]);
         self.selection = ids.iter().copied().collect();
+        self.selected_groups.clear();
         for id in ids {
             self.bring_to_front(id);
         }
@@ -743,6 +768,7 @@ impl GraphView {
                     }
                 } else {
                     self.selection = BTreeSet::from([layout.id]);
+                    self.selected_groups.clear();
                 }
             }
             if body.double_clicked() {
@@ -819,7 +845,7 @@ impl GraphView {
                 if response
                     .on_hover_text(
                         "Skipped: this block needs the Python engine, and the macro would run on the native one. \
-                         Click to choose Python in Settings → Engine.",
+                         Click to choose Python in Settings › Engine.",
                     )
                     .clicked()
                 {
@@ -895,6 +921,7 @@ impl GraphView {
                                     target.set_params(&params);
                                 }
                                 self.selection = BTreeSet::from([layout.id]);
+                                self.selected_groups.clear();
                                 ui.close();
                             }
                         }
@@ -1203,6 +1230,7 @@ impl GraphView {
     ) {
         if !self.selection.contains(&node.id) {
             self.selection = BTreeSet::from([node.id]);
+            self.selected_groups.clear();
         }
         let many = self.selection.len() > 1;
         if !many {
@@ -1265,19 +1293,17 @@ impl GraphView {
             self.group_selection(project);
             ui.close();
         }
-        let groups: Vec<u64> =
-            project.graph.groups().iter().filter(|g| g.nodes.contains(&node.id)).map(|g| g.id).collect();
-        if !groups.is_empty() && ui.button(format!("{}  Take out of its group", icon::SIGN_OUT)).clicked() {
-            for id in groups {
-                if let Some(group) = project.graph.group_mut(id) {
-                    for member in &self.selection {
-                        group.nodes.remove(member);
-                    }
-                }
-            }
-            let empty: Vec<u64> = project.graph.groups().iter().filter(|g| g.nodes.is_empty()).map(|g| g.id).collect();
-            for id in empty {
-                project.graph.remove_group(id);
+        // Out of the group they are in, into the one around it (if any).
+        let grouped: Vec<NodeId> =
+            self.selection.iter().copied().filter(|id| project.graph.group_of(*id).is_some()).collect();
+        if !grouped.is_empty()
+            && ui
+                .button(format!("{}  Take out of its group", icon::SIGN_OUT))
+                .on_hover_text("Out of the group it is in; into the group around that one, if there is one")
+                .clicked()
+        {
+            for id in grouped {
+                project.graph.take_out_of_group(id);
             }
             ui.close();
         }
@@ -1315,7 +1341,10 @@ impl GraphView {
                 (Some(wire), true) => {
                     project.graph.disconnect(wire);
                 }
-                _ if !modifiers.shift => self.selection.clear(),
+                _ if !modifiers.shift => {
+                    self.selection.clear();
+                    self.selected_groups.clear();
+                }
                 _ => {}
             }
             self.palette = None;
@@ -1337,6 +1366,7 @@ impl GraphView {
             if background.drag_stopped() {
                 if !modifiers.shift {
                     self.selection.clear();
+                    self.selected_groups.clear();
                 }
                 self.selection.extend(layouts.iter().filter(|l| l.rect.intersects(band)).map(|l| l.id));
             }
@@ -1415,6 +1445,7 @@ impl GraphView {
         }
         if select_all {
             self.selection = project.graph.nodes().map(|n| n.id).collect();
+            self.selected_groups.clear();
         }
         if duplicate {
             self.duplicate_selection(project);
@@ -1426,6 +1457,7 @@ impl GraphView {
             self.wire_drag = None;
             self.palette = None;
             self.selection.clear();
+            self.selected_groups.clear();
         }
         if copy || cut {
             self.copy_selection(ui, project, registry);
@@ -1801,36 +1833,63 @@ impl GraphView {
     }
 
     /// The boxes around groups of blocks, with their name, an on/off switch
-    /// and a menu. Dragging a group's title moves the whole group.
+    /// and a menu. A group inside another is drawn inside its box. Clicking a
+    /// group's title selects the group; dragging it moves the whole group.
     fn groups(&mut self, scene: &mut Ui, painter: &Painter, project: &mut Project, layouts: &[Layout]) {
         enum Change {
-            Move(u64, Vec2),
+            Move(BTreeSet<NodeId>, Vec2),
             Toggle(u64),
             Rename(u64, String),
             Color(u64, Option<[u8; 3]>),
             Ungroup(u64),
+            SelectInside(u64),
+            MoveInto(u64),
         }
         let mut changes = Vec::new();
-        let groups = project.graph.groups().to_vec();
-        for group in &groups {
-            let Some(bounds) =
-                layouts.iter().filter(|l| group.nodes.contains(&l.id)).map(|l| l.rect).reduce(|a, b| a.union(b))
-            else {
-                continue;
-            };
-            let rect = Rect::from_min_max(
-                bounds.min - vec2(GROUP_PAD, GROUP_PAD + GROUP_HEADER),
-                bounds.max + Vec2::splat(GROUP_PAD),
-            );
+        let graph = &project.graph;
+        let mut order: Vec<(usize, magi_core::graph::Group)> =
+            graph.groups().iter().map(|g| (graph.group_depth(g.id), g.clone())).collect();
+        // A box holds its blocks and the boxes of the groups inside it, so the innermost are measured first.
+        order.sort_by_key(|(depth, g)| (std::cmp::Reverse(*depth), g.id));
+        let mut rects: HashMap<u64, Rect> = HashMap::new();
+        for (_, group) in &order {
+            let bounds = layouts
+                .iter()
+                .filter(|l| group.nodes.contains(&l.id))
+                .map(|l| l.rect)
+                .chain(
+                    graph
+                        .groups()
+                        .iter()
+                        .filter(|g| g.parent == Some(group.id))
+                        .filter_map(|g| rects.get(&g.id).copied()),
+                )
+                .reduce(|a, b| a.union(b));
+            if let Some(bounds) = bounds {
+                let rect = Rect::from_min_max(
+                    bounds.min - vec2(GROUP_PAD, GROUP_PAD + GROUP_HEADER),
+                    bounds.max + Vec2::splat(GROUP_PAD),
+                );
+                rects.insert(group.id, rect);
+            }
+        }
+        // Outer boxes first, so the ones inside are drawn – and clicked – on top.
+        order.sort_by_key(|(depth, g)| (*depth, g.id));
+        let modifiers = scene.input(|i| i.modifiers);
+        let others_selected =
+            |id: u64, view: &Self| !view.selection.is_empty() || view.selected_groups.iter().any(|g| *g != id);
+        for (_, group) in &order {
+            let Some(&rect) = rects.get(&group.id) else { continue };
+            let selected = self.selected_groups.contains(&group.id);
             let color = group.color.map_or_else(theme::accent, |[r, g, b]| Color32::from_rgb(r, g, b));
             let strength = if group.enabled { 1.0 } else { 0.45 };
             painter.rect_filled(rect, 12.0, theme::with_alpha(color, 0.07 * strength));
-            painter.rect_stroke(
-                rect,
-                12.0,
-                Stroke::new(1.2, theme::with_alpha(color, 0.55 * strength)),
-                StrokeKind::Inside,
-            );
+            let outline = if selected {
+                Stroke::new(2.2, theme::accent_bright())
+            } else {
+                Stroke::new(1.2, theme::with_alpha(color, 0.55 * strength))
+            };
+            painter.rect_stroke(rect, 12.0, outline, StrokeKind::Inside);
             let header = Rect::from_min_size(rect.min, vec2(rect.width(), GROUP_HEADER));
             let id = scene.id().with(("group", group.id));
             let response = scene.interact(header, id, Sense::click_and_drag());
@@ -1876,14 +1935,28 @@ impl GraphView {
             }
 
             if response.dragged_by(PointerButton::Primary) {
-                changes.push(Change::Move(group.id, response.drag_delta()));
+                // A selected group moves with the rest of the selection.
+                let mut moving = if selected { self.selection.clone() } else { BTreeSet::new() };
+                let groups = if selected { self.selected_groups.clone() } else { BTreeSet::from([group.id]) };
+                for g in groups {
+                    moving.extend(project.graph.group_blocks(g));
+                }
+                changes.push(Change::Move(moving, response.drag_delta()));
             }
             if response.clicked() {
-                self.selection = group.nodes.clone();
+                if modifiers.shift || modifiers.command {
+                    if !self.selected_groups.remove(&group.id) {
+                        self.selected_groups.insert(group.id);
+                    }
+                } else {
+                    self.selection.clear();
+                    self.selected_groups = BTreeSet::from([group.id]);
+                }
             }
             if response.double_clicked() {
                 self.renaming = Some(group.id);
             }
+            let can_move_into = others_selected(group.id, self);
             response.context_menu(|ui| {
                 if ui.button(format!("{}  Rename", icon::PENCIL_SIMPLE)).clicked() {
                     self.renaming = Some(group.id);
@@ -1909,7 +1982,7 @@ impl GraphView {
                         if group.color == swatch {
                             ui.painter().circle_stroke(rect.center(), 8.5, Stroke::new(1.5, theme::text()));
                         }
-                        let hint = if swatch.is_none() { "Theme colour" } else { "Colour" };
+                        let hint = if swatch.is_none() { "Theme color" } else { "Color" };
                         if response.on_hover_text(hint).clicked() {
                             changes.push(Change::Color(group.id, swatch));
                         }
@@ -1920,11 +1993,24 @@ impl GraphView {
                     changes.push(Change::Toggle(group.id));
                     ui.close();
                 }
-                if ui.button(format!("{}  Select its blocks", icon::SELECTION)).clicked() {
-                    self.selection = group.nodes.clone();
+                if ui.button(format!("{}  Select everything in it", icon::SELECTION)).clicked() {
+                    changes.push(Change::SelectInside(group.id));
                     ui.close();
                 }
-                if ui.button(format!("{}  Ungroup", icon::BOUNDING_BOX)).on_hover_text("The blocks stay").clicked() {
+                if can_move_into
+                    && ui
+                        .button(format!("{}  Move the selection into “{}”", icon::SIGN_IN, group.name))
+                        .on_hover_text("The selected blocks and groups go inside this group")
+                        .clicked()
+                {
+                    changes.push(Change::MoveInto(group.id));
+                    ui.close();
+                }
+                if ui
+                    .button(format!("{}  Ungroup", icon::BOUNDING_BOX))
+                    .on_hover_text("The blocks stay; groups inside it move out one level")
+                    .clicked()
+                {
                     changes.push(Change::Ungroup(group.id));
                     ui.close();
                 }
@@ -1950,9 +2036,8 @@ impl GraphView {
         }
         for change in changes {
             match change {
-                Change::Move(id, delta) => {
-                    let members = project.graph.groups().iter().find(|g| g.id == id).map(|g| g.nodes.clone());
-                    for member in members.unwrap_or_default() {
+                Change::Move(blocks, delta) => {
+                    for member in blocks {
                         if let Some(node) = project.graph.node_mut(member) {
                             node.pos = [node.pos[0] + delta.x, node.pos[1] + delta.y];
                         }
@@ -1973,7 +2058,21 @@ impl GraphView {
                         group.color = color;
                     }
                 }
-                Change::Ungroup(id) => project.graph.remove_group(id),
+                Change::Ungroup(id) => {
+                    project.graph.remove_group(id);
+                    self.selected_groups.remove(&id);
+                }
+                Change::SelectInside(id) => {
+                    self.selection = project.graph.group_blocks(id);
+                    self.selected_groups = project.graph.group_and_inner(id).into_iter().filter(|g| *g != id).collect();
+                }
+                Change::MoveInto(id) => {
+                    let groups: BTreeSet<u64> = self.selected_groups.iter().copied().filter(|g| *g != id).collect();
+                    if project.graph.move_into_group(id, &self.selection, &groups) {
+                        self.selection.clear();
+                        self.selected_groups = BTreeSet::from([id]);
+                    }
+                }
             }
         }
     }
@@ -2067,13 +2166,12 @@ impl GraphView {
             });
         match go {
             Some(Found::Node(node)) => self.reveal(node),
-            Some(Found::Group(id)) => {
-                if let Some(group) = project.graph.groups().iter().find(|g| g.id == id) {
-                    self.selection = group.nodes.clone();
-                    self.center_on = Some(group.nodes.iter().copied().collect());
-                }
+            Some(Found::Group(id)) if project.graph.group(id).is_some() => {
+                self.selection.clear();
+                self.selected_groups = BTreeSet::from([id]);
+                self.center_on = Some(project.graph.group_blocks(id).into_iter().collect());
             }
-            None => {}
+            Some(Found::Group(_)) | None => {}
         }
         if close {
             self.find = None;

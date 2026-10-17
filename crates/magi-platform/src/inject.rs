@@ -150,7 +150,24 @@ fn key_event(enigo: &mut Enigo, key: Key, direction: Direction) -> Result<(), Ho
         let code = u16::try_from(code).map_err(|_| HostError::new("raw key code out of range"))?;
         return enigo.raw(code, direction).map_err(error);
     }
+    // Many games read the keyboard by scan code and ignore keys sent as
+    // virtual keys, so keys go out as scan codes – as a real keyboard sends
+    // them. Extended keys (arrows, the right-hand Ctrl and Alt…) keep the
+    // virtual-key path, which marks them correctly.
+    #[cfg(windows)]
+    if let Some(scan) = windows_scan_code(code) {
+        return enigo.raw(scan, direction).map_err(error);
+    }
     enigo.key(enigo::Key::Other(code), direction).map_err(error)
+}
+
+/// The scan code of a virtual key that is not an extended key, in the current layout.
+#[cfg(windows)]
+fn windows_scan_code(virtual_key: u32) -> Option<u16> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC_EX, MapVirtualKeyW};
+    // SAFETY: a plain lookup with no pointers.
+    let scan = unsafe { MapVirtualKeyW(virtual_key, MAPVK_VK_TO_VSC_EX) };
+    (scan != 0 && scan <= 0xFF).then_some(scan as u16)
 }
 
 fn mouse_button(button: MouseButton) -> enigo::Button {

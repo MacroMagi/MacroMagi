@@ -44,7 +44,7 @@ pub enum SnipMode {
     Region,
     /// A rectangle, returned together with the pixels inside it.
     Image,
-    /// The colour of a single pixel.
+    /// The color of a single pixel.
     Color,
 }
 

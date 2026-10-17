@@ -1,4 +1,4 @@
-//! Built-in example macros, offered under File → Examples.
+//! Built-in example macros, offered under File › Examples.
 //!
 //! They are built in code rather than shipped as files, so they can never go
 //! stale against the node definitions and the app stays a single file.

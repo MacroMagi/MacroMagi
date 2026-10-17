@@ -12,7 +12,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
   <img src="docs/images/recording.png" alt="A Play Recording block with its information card, and its timeline, Trim and Cut in the block settings" width="500">
 </p>
 
-> **Status: early development (0.1.2, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
+> **Status: early development (0.1.3, unreleased).** The features below work and are covered by tests, but things will change. Windows is the tested platform; see [Platform support](#platform-support).
 
 ## Contents
 
@@ -41,6 +41,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 - [Releases](#releases)
 - [Project layout](#project-layout)
 - [Roadmap](#roadmap)
+- [Credits](#credits)
 - [Contributing](#contributing)
 - [Using MacroMagi responsibly](#using-macromagi-responsibly)
 - [Terms](#terms)
@@ -62,13 +63,13 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 **Macro editor**
 
 - A node graph that reads like a flowchart: *flow goes down, values go across*.
-- 32 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Play Recording), the screen (Image and Color Detection), sound (Sound Detection and Recognition), AI (AI Watch, AI Model), windows, variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), Python Script and Comment. See the [block reference](docs/NODES.md).
+- 34 blocks for flow (Start, Wait, Repeat, Decision, Wait Until, Stop, Rate, Definition, Function, Log), input (Input, Auto Click, Auto Typer, Play Recording), the screen (Image and Color Detection, Text Scan), sound (Sound Detection and Recognition), AI (AI Watch, AI Model), windows, variables (Variable, Set Variable, Counter), logic (Logic, Random Chance, Math, Compare, Text), the system (Clipboard, Notification), Python Script and Comment. See the [block reference](docs/NODES.md).
 - **Variables** that any block setting can follow, a Variables panel with their live values, and Python scripts that read and change them. A variable can start fresh every run or keep its value from the last one.
 - **Functions**: build a piece of a macro once under a Definition block and run it from anywhere.
 - Any number of **Start** blocks, each with its own hotkey, running side by side.
-- **Comments** that fold and resize, and **groups** – named, coloured boxes that move together and can be turned off as a whole.
+- **Comments** that fold and resize, and **groups** – named, colored boxes that move together, can be turned off as a whole, and can hold other groups.
 - **Find** (`Ctrl+F`) searches block names, settings, groups, and the names of images and their groups. Every setting has a **reset button** once it differs from its default.
-- Blocks light up as they run; errors point at the block that caused them.
+- Blocks light up as they run; errors point at the block that caused them. **Lightweight mode** hides the editor and keeps only Run, Stop and the console.
 - Multi-select, copy and paste (images, recordings, sounds and AI models travel along), duplicate, disable, undo and redo, "run from here", block presets.
 - **View → Screen targets** shows every click position and search area on the real screen, numbered in run order, and lets you drag them into place.
 
@@ -81,7 +82,8 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Seeing and hearing**
 
-- **Image Detection** finds pictures on screen – one or many per block, in groups with search areas of their own – with an accuracy from 0% to 100% (default 80%), and less detail when speed matters more. **Color Detection** finds a colour, with a tolerance.
+- **Text Scan** reads the text in an area of the screen – what it says, whether a given word is there and where, and the first number – with the text recognition built into Windows.
+- **Image Detection** finds pictures on screen – one or many per block, in groups with search areas of their own – with an accuracy from 0% to 100% (default 80%), and less detail when speed matters more. **Color Detection** finds a color, with a tolerance.
 - **Sound Detection** reacts to sound that is loud enough, optionally within a pitch range. **Sound Recognition** reacts when it hears one of the sounds you uploaded – a notification, an alarm, a voice line – at any volume, and recognises long sounds while they play. Both listen to what the computer plays or to a microphone you choose.
 - All give true/false results for Decisions; the screen blocks also give a position you can wire straight into a click, and say which image or sound it was.
 
@@ -100,7 +102,7 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 **Look and feel**
 
-- Monochrome by default. Pick a **theme colour** and everything – icons, blocks, wires – follows it. Light, dark or follow the system.
+- Monochrome by default. Pick a **theme color** and everything – icons, blocks, wires – follows it. Light, dark or follow the system.
 - An optional **background picture or animated GIF/WebP**, from a file or a web address, with adjustable opacity, blur, darkness and panel opacity.
 - Panels you can size as you like, a resizable settings window, adjustable interface size, always-on-top, and a one-click switch to hide MacroMagi from screen captures.
 
@@ -112,16 +114,13 @@ MacroMagi is a small, portable desktop tool for automating keyboard, mouse and c
 
 ## Getting MacroMagi
 
-Download the package for your system from the [Releases](https://github.com/MacroMagi/MacroMagi/releases) page, unzip it anywhere and run `macromagi`. There is no installer. *Options → Create desktop shortcut* adds a shortcut if you want one. The Windows package has Python in a `python` folder beside the executable, for the Python engine; keep the two together.
+Download the package for your system from the [Releases](https://github.com/MagiGun/MacroMagi/releases) page, unzip it anywhere and run `macromagi`. There is no installer. *Options → Create desktop shortcut* adds a shortcut if you want one. The Windows package has Python in a `python` folder beside the executable, for the Python engine; keep the two together.
 
 | System | Package |
 | --- | --- |
 | Windows 10/11 (64-bit) | `MacroMagi-<version>-windows-x64.zip` |
-| Linux (64-bit, X11) | `MacroMagi-<version>-linux-x64.tar.gz` |
-| macOS (Apple silicon) | `MacroMagi-<version>-macos-arm64.tar.gz` |
-| macOS (Intel) | `MacroMagi-<version>-macos-x64.tar.gz` |
 
-Until the first version is tagged there are no packages yet – [build it from source](#building-from-source), which is one command once Rust is installed.
+Packages are built for Windows only for now; on Linux and macOS, [build it from source](#building-from-source). Until the first version is tagged there are no packages yet – [build it from source](#building-from-source), which is one command once Rust is installed.
 
 **Windows warns about it.** MacroMagi is not yet signed with a code-signing certificate, so Windows SmartScreen shows *"Windows protected your PC"* the first time you run it. Choose *More info → Run anyway*. Check the file against the SHA-256 checksum published with the release if you want to be sure it is the one we built.
 
@@ -165,7 +164,7 @@ Getting around the editor:
 | Edit a block | Select it (wide window) or double-click it (small window) |
 | Put back a setting | The ↺ button after it |
 | Find a block or group | `Ctrl+F`, or the magnifying glass; `Enter` goes to the next match |
-| Group blocks | Select them and press `Ctrl+G`. Drag the group's title to move it; its switch turns every block in it off or on; right-click it to rename, recolour or ungroup. |
+| Group blocks | Select them and press `Ctrl+G`. Grouping blocks of a group, or a group with other blocks, puts the new group inside. Click a group's title to select the group, drag it to move it; its switch turns every block in it off or on; right-click it to rename, recolor, select everything in it, move the selection into it or ungroup. *Take out of its group* (right-click a block) moves a block one level out. |
 | Add a note | Add a **Comment** block. Its arrow folds it, its corner resizes it. |
 | Copy, cut, paste, duplicate | `Ctrl+C`, `Ctrl+X`, `Ctrl+V`, `Ctrl+D` |
 | Delete | `Delete` or `Backspace` |
@@ -227,7 +226,7 @@ Add an **Image Detection** block, press *Capture from screen* and drag a box aro
 
 *Accuracy* sets how closely the screen must match: 100% means pixel-identical, 80% tolerates small rendering differences. Limiting the *search area* is faster and avoids matches elsewhere. Small, featureless images can match by accident – capture something distinctive.
 
-One block can look for **several images**. They are tried in list order and the first one found is reported – *Which image* and *Its group* say which. *Found when* can instead require every image to be there. Put images in **groups** to give several of them one search area, or give a single image its own; anything without an area uses the block's. **Detail** shrinks the screen and the images before comparing: *Half* is about four times faster, at some risk of missing small or fine images.
+One block can look for **several images**. They are tried in list order and the first one found is reported – *Which image* and *Its group* say which. *Found when* can instead require every image to be there. Put images in **groups** to give several of them one search area, or give a single image its own; anything without an area uses the block's. The groups and their images are one list: add a group with the folder button, then drag an image by its handle onto it. **Detail** shrinks the screen and the images before comparing: *Half* is about four times faster, at some risk of missing small or fine images.
 
 **View → Screen targets** shows every position the macro clicks and every area it searches over a picture of your screen, numbered in the order a run reaches them. Drag a point or an area to move it, or an area's corner to resize it. Double-click a target – on the screen or in the list – to show its block in the editor.
 
@@ -238,7 +237,7 @@ MacroMagi keeps its own window out of screen captures by default, so it can neit
 Both sound blocks listen to *what the computer plays* or to a *microphone* – the system's default, or one you choose – only while a macro is using them.
 
 - **Sound Detection** is true while the sound is louder than a level you set (in dB: 0 is the loudest possible, ordinary sound is around −30, quiet sound around −60) – and, if you want, while its pitch is within a range. It also gives the loudness and the pitch as numbers.
-- **Sound Recognition** listens for particular sounds. *Load sound file…* takes WAV, MP3, OGG or FLAC files (the first 10 seconds of each); they are stored inside the macro. *Found* becomes true when what is heard matches one at least as closely as the *accuracy* (75% by default), however loud it is played; *Which sound* says which. Each time a sound plays counts once. Sounds can be grouped, with an accuracy per group. For long sounds, *Recognise from the first* a second or two catches them while they are still playing. Short, distinctive sounds work best; lower the accuracy if one is missed, raise it if other sounds set it off.
+- **Sound Recognition** listens for particular sounds. *Load sound file…* takes WAV, MP3, OGG or FLAC files (the first 10 seconds of each); they are stored inside the macro. *Found* becomes true when what is heard matches one at least as closely as the *accuracy* (75% by default), however loud it is played; *Which sound* says which. Each time a sound plays counts once. Sounds can be grouped, with an accuracy per group – drag a sound by its handle onto a group. For long sounds, *Recognise from the first* a second or two catches them while they are still playing. Short, distinctive sounds work best; lower the accuracy if one is missed, raise it if other sounds set it off.
 
 Wire *Detected* or *Found* into a **Wait Until** to wait for a sound, or into a **Decision**.
 
@@ -251,11 +250,11 @@ Some things on screen are too varied for Image Detection – a gauge that is nev
 3. **Try it**: *Watch the screen* shows what the model sees and how sure it is of each answer, live. The key is only pressed when *Press the key when it acts* is on. *Picture…* tries a picture file.
 4. **Save** a `.magic` file, and/or press **Use in Macro**: the model goes into the open macro with a Start and an **AI Watch** block ready to run. Using it again after a change updates the model in the macro.
 
-**AI Watch** keeps looking and presses the model's key when one of the acting answers is sure enough – or only watches, so its *Times acted* and *Last answer* can feed other blocks. **AI Model** looks once and gives the answer, how sure the model is and whether to act. Each block's *Model settings* sliders change the model's adjustable settings for that block only; *Open in Magic* opens its model in the tab.
+**AI Watch** keeps looking and presses the model's key (or clicks its mouse button) when one of the acting answers is sure enough – or only watches. Each time it acts, the blocks under its *Acted* output run, with *Times acted* and *Last answer* up to date, and then it watches again; when its time is up it continues from *Done*. **AI Model** looks once and gives the answer, how sure the model is and whether to act. Each block's *Model settings* sliders change the model's adjustable settings for that block only; *Open in Magic* opens its model in the tab.
 
 Projects made for **DBD Auto Skill Check** – its repository or its packaged app, as a folder or ZIP – import with their ten answers, the five that press Space, their 51% confidence, the 5 ms delay of the frontier answer, and the three sliders that project offers, and run as they do there.
 
-**Where models run** (*Settings → AI*): *Automatic* measures the CPU and each graphics card on the model and keeps the fastest – for tiny models that is often the CPU – or choose one. MacroMagi runs models with a built-in engine; the optional downloads on the same page add **ONNX Runtime** (faster on the CPU) and **ONNX Runtime for graphics cards** (any DirectX 12 card, Windows). The page also downloads **Python** (Windows) and **PyTorch** (for training, later), detects copies already on your computer, and removes what it installed (also from *Options → Downloads…*).
+**Where models run** (*Settings → AI*): *Automatic* measures the CPU and each graphics card on the model and keeps the fastest – for tiny models that is often the CPU – or choose one. MacroMagi runs models with a built-in engine; the optional downloads on the same page add **ONNX Runtime** (faster on the CPU) and **ONNX Runtime for graphics cards** (any DirectX 12 card, Windows). The page also downloads **PyTorch** (for training, later) into the Python macros use, detects copies already on your computer, and uninstalls what it installed (also from *Options → Downloads…*).
 
 > A model keeps the licence of the project it came from; the Magic tab shows the licence an import found. Check it before you share a `.magic` file or a macro that contains a model.
 
@@ -308,7 +307,7 @@ Options can travel inside a `.magi` file (see [Files](#files-magi-mp-and-magic))
 *Settings → Appearance*:
 
 - **Theme**: System (default), Light or Dark.
-- **Theme colour**: monochrome by default; a swatch or any colour recolours the whole interface, including icons, block categories, wires and the logo.
+- **Theme color**: monochrome by default; a swatch or any color recolors the whole interface, including icons, block categories, wires and the logo.
 - **Background**: a PNG, JPEG, BMP, GIF or WebP – animated GIFs and WebPs play – chosen from a file or downloaded from a web address. Adjust how strongly it shows, its blur and darkness, and how opaque the panels over it are.
 - **Interface size** (in *General*): drag the slider or type a percentage; the size changes once you let go.
 
@@ -327,7 +326,7 @@ Macros can run on either of two engines. They do the same thing – the same tes
 
 The Python engine needs **no packages** – only the standard library. It decides what runs next and runs your scripts; the actual clicking, typing, listening and screen reading is done by MacroMagi itself, and variables are kept in one place, so both engines behave identically. An unused Python process is stopped after a few minutes and started again on the next run.
 
-MacroMagi looks for Python in this order: the interpreter chosen in Settings, a `python` folder next to the executable, one downloaded from *Settings → AI*, then `py -3` / `python` / `python3` on the system. *Settings → Engine* lists every Python it finds to choose from, and offers *Download Python* when there is none. Blocks that need Python show a warning sign while it is not available; click it to go to those settings.
+MacroMagi looks for Python in this order: the interpreter chosen in Settings, a `python` folder next to the executable, one downloaded from *Settings → Engine*, then `py -3` / `python` / `python3` on the system. *Settings → Engine* does nothing until you press *Check*, which lists every Python found (it is also done once, the first time a macro runs, and remembered). Choose one, or leave *(auto)*, which shows the Python it stands for. The same page downloads Python and uninstalls it again. Blocks that need Python show a warning sign while it is not available; click it to go to those settings.
 
 Inside a **Python Script** block you get a `magi` object:
 
@@ -392,9 +391,9 @@ MacroMagi connects to the network only to download a background picture from an 
 | **Linux (X11)** | Implemented, not yet tested | Wayland sessions cannot be listened to (hotkeys, recording) or injected into by the current backends. |
 | **macOS** | Implemented, not yet tested | Needs the *Accessibility* permission (input) and *Screen Recording* permission (image detection). |
 
-"Implemented, not yet tested" means the code paths exist and use cross-platform libraries, but nobody has run them yet – expect rough edges, and please [report what you find](https://github.com/MacroMagi/MacroMagi/issues).
+"Implemented, not yet tested" means the code paths exist and use cross-platform libraries, but nobody has run them yet – expect rough edges, and please [report what you find](https://github.com/MagiGun/MacroMagi/issues).
 
-Windows only, for now: **Switch to Window**, **program rules** (elsewhere the program in front cannot be determined, so input is always allowed), **smart recording** (elsewhere movement is recorded as screen positions), **AI models on a graphics card** (elsewhere they run on the CPU) and the bundled or downloadable **Python** (elsewhere the system's Python is used). Listening to *what the computer plays* works out of the box on Windows; on Linux and macOS it needs a loopback or monitor input device (the microphone works everywhere).
+Windows only, for now: **Switch to Window**, **program rules** (elsewhere the program in front cannot be determined, so input is always allowed), **smart recording** (elsewhere movement is recorded as screen positions), **AI models on a graphics card** (elsewhere they run on the CPU), **Text Scan** (it uses the text recognition built into Windows), and the bundled or downloadable **Python** (elsewhere the system's Python is used). Listening to *what the computer plays* works out of the box on Windows; on Linux and macOS it needs a loopback or monitor input device (the microphone works everywhere).
 
 Known limitations everywhere:
 
@@ -407,7 +406,7 @@ Known limitations everywhere:
 You need [Rust](https://rustup.rs). The repository pins the exact toolchain in `rust-toolchain.toml`; `rustup` installs it automatically on first build.
 
 ```bash
-git clone https://github.com/MacroMagi/MacroMagi.git
+git clone https://github.com/MagiGun/MacroMagi.git
 cd MacroMagi
 cargo build --release
 ```
@@ -448,14 +447,14 @@ git tag v0.1.2
 git push origin v0.1.2
 ```
 
-The workflow builds the packages for Windows, Linux and macOS (Apple silicon and Intel), and puts Python in the Windows package. Only when **every** build succeeds does it publish a GitHub release with the packages and their SHA-256 checksums; if one fails, nothing is published.
+The workflow builds the Windows package, with Python in it, and publishes a GitHub release with it and its SHA-256 checksum only when the build succeeds. Linux and macOS packages are not built for now.
 
 ## Project layout
 
 ```text
 crates/
   magi-core/      The data model: graphs, block definitions, variables, recordings, options, file formats. No OS or UI code.
-  magi-vision/    Image matching and colour search on raw pixels.
+  magi-vision/    Image matching and color search on raw pixels.
   magi-audio/     Loudness, pitch and sound recognition on raw samples; reading sound files.
   magi-ml/        AI models: preparing pictures for them and running them, on the CPU or a graphics card.
   magi-platform/  Everything that touches the OS: sending input, listening, gamepads, screen capture, sound, notifications, windows.
@@ -480,6 +479,10 @@ Not promises, but the direction:
 - **Recording**: window-relative coordinates, rescaling to another screen size, merging and splitting recordings.
 - **Code signing** for the Windows build, so SmartScreen stops warning.
 - Switch to Window, program rules and smart recording on Linux and macOS.
+
+## Credits
+
+MacroMagi is developed and created by [MagiGun](https://github.com/MagiGun) and [uvxszi](https://github.com/uvxszi). The app shows this too: click the logo at the top left, or see *Settings → General → About*.
 
 ## Contributing
 

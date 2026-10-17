@@ -5,7 +5,7 @@
 //! | --- | --- | --- |
 //! | ONNX Runtime | faster AI models on the CPU | Microsoft's GitHub releases |
 //! | ONNX Runtime for graphics cards | AI models on any DirectX 12 graphics card (Windows) | Microsoft's NuGet packages |
-//! | Python | the Python engine, without installing Python (Windows) | python.org |
+//! | Python | the Python engine, without installing Python (Windows; managed on the Engine page) | python.org |
 //! | PyTorch | training models (coming to the Magic tab) | pip, into a Python |
 //!
 //! Each part lives in its own folder under `data/components`. A part in use
@@ -32,9 +32,14 @@ pub enum Component {
     PyTorch,
 }
 
+/// How far an install has got: what it is doing, and the share done when known.
+pub type Report<'a> = &'a dyn Fn(&str, Option<f32>);
+
 impl Component {
     pub const ALL: [Component; 4] =
         [Component::OnnxRuntime, Component::OnnxRuntimeGpu, Component::Python, Component::PyTorch];
+    /// The parts listed on the AI settings page. Python is on the Engine page.
+    pub const AI: [Component; 3] = [Component::OnnxRuntime, Component::OnnxRuntimeGpu, Component::PyTorch];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -58,8 +63,8 @@ impl Component {
                 "Python for the Python engine and Python Script blocks, on computers that do not have it."
             }
             Component::PyTorch => {
-                "For training and fine-tuning models, coming to the Magic tab. Installed into the Python MacroMagi \
-                 uses."
+                "For training and fine-tuning models, coming to the Magic tab. Installed into the Python chosen \
+                 under Settings › Engine."
             }
         }
     }
@@ -136,8 +141,8 @@ fn folder_size(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Downloads a file, reporting progress in percent.
-fn download(url: &str, progress: &dyn Fn(String)) -> Result<Vec<u8>, String> {
+/// Downloads a file, reporting how much has arrived.
+fn download(url: &str, progress: Report<'_>) -> Result<Vec<u8>, String> {
     let mut response = ureq::get(url).call().map_err(|e| format!("could not download {url}: {e}"))?;
     let total: Option<u64> =
         response.headers().get("content-length").and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok());
@@ -154,10 +159,13 @@ fn download(url: &str, progress: &dyn Fn(String)) -> Result<Vec<u8>, String> {
         let megabytes = bytes.len() / (1024 * 1024);
         if megabytes != last {
             last = megabytes;
-            progress(match total {
-                Some(total) => format!("Downloading… {}%", bytes.len() as u64 * 100 / total.max(1)),
-                None => format!("Downloading… {megabytes} MB"),
-            });
+            match total {
+                Some(total) => {
+                    let share = bytes.len() as f32 / total.max(1) as f32;
+                    progress(&format!("Downloading… {}%", (share * 100.0) as u32), Some(share));
+                }
+                None => progress(&format!("Downloading… {megabytes} MB"), None),
+            }
         }
     }
     Ok(bytes)
@@ -335,12 +343,7 @@ impl Components {
     }
 
     /// Downloads and installs a part. Blocks: run it off the UI thread.
-    pub fn install(
-        &self,
-        component: Component,
-        python: Option<&Path>,
-        progress: &dyn Fn(String),
-    ) -> Result<String, String> {
+    pub fn install(&self, component: Component, python: Option<&Path>, progress: Report<'_>) -> Result<String, String> {
         if let Some(reason) = component.unavailable() {
             return Err(reason.to_owned());
         }
@@ -361,7 +364,7 @@ impl Components {
         component: Component,
         dir: &Path,
         python: Option<&Path>,
-        progress: &dyn Fn(String),
+        progress: Report<'_>,
     ) -> Result<String, String> {
         match component {
             Component::OnnxRuntime => {
@@ -369,7 +372,7 @@ impl Components {
                 #[cfg(windows)]
                 {
                     let archive = download(&format!("{base}/onnxruntime-win-x64-{ORT_VERSION}.zip"), progress)?;
-                    progress("Unpacking…".into());
+                    progress("Unpacking…", None);
                     let found =
                         unzip_files(&archive, &["lib/onnxruntime.dll", "lib/onnxruntime_providers_shared.dll"], dir)?;
                     if found == 0 {
@@ -379,13 +382,13 @@ impl Components {
                 #[cfg(target_os = "linux")]
                 {
                     let archive = download(&format!("{base}/onnxruntime-linux-x64-{ORT_VERSION}.tgz"), progress)?;
-                    progress("Unpacking…".into());
+                    progress("Unpacking…", None);
                     untar_library(&archive, "libonnxruntime.so.", &dir.join(Self::library_name()))?;
                 }
                 #[cfg(target_os = "macos")]
                 {
                     let archive = download(&format!("{base}/onnxruntime-osx-arm64-{ORT_VERSION}.tgz"), progress)?;
-                    progress("Unpacking…".into());
+                    progress("Unpacking…", None);
                     untar_library(&archive, "libonnxruntime.", &dir.join(Self::library_name()))?;
                 }
                 let _ = base;
@@ -399,7 +402,7 @@ impl Components {
                     ),
                     progress,
                 )?;
-                progress("Unpacking…".into());
+                progress("Unpacking…", None);
                 let found = unzip_files(
                     &ort,
                     &[
@@ -417,7 +420,7 @@ impl Components {
                     ),
                     progress,
                 )?;
-                progress("Unpacking DirectML…".into());
+                progress("Unpacking DirectML…", None);
                 if unzip_files(&directml, &["bin/x64-win/DirectML.dll"], dir)? == 0 {
                     return Err("the download did not contain DirectML".into());
                 }
@@ -430,7 +433,7 @@ impl Components {
                     ),
                     progress,
                 )?;
-                progress("Unpacking…".into());
+                progress("Unpacking…", None);
                 unzip_all(&archive, dir)?;
                 // Let the private Python find packages installed into it.
                 for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
@@ -447,14 +450,16 @@ impl Components {
                     }
                 }
                 Ok(format!(
-                    "Python {PYTHON_VERSION} installed. Choose it under Settings → Engine, or leave the choice on automatic."
+                    "Python {PYTHON_VERSION} installed. Choose it under Settings › Engine, or leave the choice on automatic."
                 ))
             }
             Component::PyTorch => {
-                let python = python.ok_or("no Python to install PyTorch into: download Python first")?;
+                let python = python.ok_or(
+                    "no Python was found to install PyTorch into. Choose or download one under Settings › Engine.",
+                )?;
                 // A private Python has no pip until it is given one.
                 if python_output(python, &["-m", "pip", "--version"]).is_err() {
-                    progress("Setting up pip…".into());
+                    progress("Setting up pip…", None);
                     let script = download("https://bootstrap.pypa.io/get-pip.py", progress)?;
                     let path = self.root.join("get-pip.py");
                     std::fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
@@ -463,7 +468,7 @@ impl Components {
                     let _ = std::fs::remove_file(&path);
                     result.map_err(|e| format!("could not set up pip: {e}"))?;
                 }
-                progress("Downloading and installing PyTorch (this takes a while)…".into());
+                progress("Downloading and installing PyTorch (this takes a while)…", None);
                 python_output(
                     python,
                     &[
@@ -504,24 +509,36 @@ impl Components {
     }
 }
 
-/// Every Python interpreter that can be found: MacroMagi's own, one next to
-/// it, and the ones installed on the system. Starts programs: call it off the
-/// UI thread.
+/// A command that opens no console window.
+fn quiet(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    command
+}
+
+/// Every Python interpreter that can be found, in the order the engine tries
+/// them: the one next to MacroMagi, the downloaded one, then the ones
+/// installed on the system. Starts programs: call it off the UI thread.
 pub fn find_pythons(components: &Components, app_dir: &Path) -> Vec<(PathBuf, String)> {
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(ours) = components.python() {
-        candidates.push(ours);
-    }
     let beside = if cfg!(windows) {
         app_dir.join("python").join("python.exe")
     } else {
         app_dir.join("python").join("bin").join("python3")
     };
     candidates.push(beside);
+    if let Some(ours) = components.python() {
+        candidates.push(ours);
+    }
     #[cfg(windows)]
     {
-        // The py launcher lists every installed Python.
-        if let Ok(output) = Command::new("py").arg("-0p").output() {
+        // The py launcher lists every installed Python, Microsoft Store ones included.
+        if let Ok(output) = quiet("py").arg("-0p").output() {
             for line in String::from_utf8_lossy(&output.stdout).lines() {
                 if let Some(path) = line.split_whitespace().last().filter(|p| p.to_lowercase().ends_with(".exe")) {
                     candidates.push(PathBuf::from(path));
@@ -531,7 +548,7 @@ pub fn find_pythons(components: &Components, app_dir: &Path) -> Vec<(PathBuf, St
     }
     let finder = if cfg!(windows) { "where" } else { "which" };
     for name in ["python", "python3"] {
-        let mut command = Command::new(finder);
+        let mut command = quiet(finder);
         if !cfg!(windows) {
             command.arg("-a");
         }
@@ -541,8 +558,9 @@ pub fn find_pythons(components: &Components, app_dir: &Path) -> Vec<(PathBuf, St
     }
     let mut found: Vec<(PathBuf, String)> = Vec::new();
     for path in candidates {
-        // The Windows Store placeholder only opens the Store.
-        if !path.is_file() || path.to_string_lossy().contains("WindowsApps") {
+        // Running it is the test: the Microsoft Store's stand-in for a missing
+        // Python fails to run with arguments, a real one answers.
+        if !path.is_file() {
             continue;
         }
         let key = path.canonicalize().unwrap_or_else(|_| path.clone());
@@ -573,7 +591,7 @@ mod tests {
     fn onnx_runtime_downloads_and_runs_models_on_the_cpu_and_a_graphics_card() {
         let dir = std::env::temp_dir().join(format!("magi-components-{}", std::process::id()));
         let components = Components::new(&dir, &dir);
-        let message = components.install(Component::OnnxRuntimeGpu, None, &|_| {}).unwrap();
+        let message = components.install(Component::OnnxRuntimeGpu, None, &|_, _| {}).unwrap();
         assert!(message.contains("installed"));
         let (library, gpu) = components.onnxruntime().unwrap();
         assert!(gpu);

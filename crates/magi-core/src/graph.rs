@@ -102,7 +102,7 @@ pub struct Wire {
     pub to: PortRef,
 }
 
-/// A named, coloured box around some blocks. Disabling a group disables
+/// A named, colored box around some blocks. Disabling a group disables
 /// every block in it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Group {
@@ -110,7 +110,12 @@ pub struct Group {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<[u8; 3]>,
+    /// The blocks directly in this group – not those of the groups inside it.
+    /// A block is directly in one group at most.
     pub nodes: BTreeSet<NodeId>,
+    /// The group this one is inside.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<u64>,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub enabled: bool,
 }
@@ -166,9 +171,11 @@ impl From<Fragment> for Graph {
                 g.nodes.retain(|id| nodes.contains_key(id));
                 g
             })
-            .filter(|g| !g.nodes.is_empty())
             .collect();
-        Graph { nodes, wires, groups, next_id }
+        let mut graph = Graph { nodes, wires, groups, next_id };
+        graph.nest_overlapping_groups();
+        graph.prune_groups();
+        graph
     }
 }
 
@@ -246,7 +253,7 @@ impl Graph {
         for group in &mut self.groups {
             group.nodes.remove(&id);
         }
-        self.groups.retain(|g| !g.nodes.is_empty());
+        self.prune_groups();
         Some(node)
     }
 
@@ -256,30 +263,175 @@ impl Graph {
         &self.groups
     }
 
+    pub fn group(&self, id: u64) -> Option<&Group> {
+        self.groups.iter().find(|g| g.id == id)
+    }
+
     pub fn group_mut(&mut self, id: u64) -> Option<&mut Group> {
         self.groups.iter_mut().find(|g| g.id == id)
     }
 
+    /// The group a block is directly in.
+    pub fn group_of(&self, node: NodeId) -> Option<u64> {
+        self.groups.iter().find(|g| g.nodes.contains(&node)).map(|g| g.id)
+    }
+
+    /// A group and every group inside it, at any depth.
+    pub fn group_and_inner(&self, id: u64) -> Vec<u64> {
+        let mut found = vec![id];
+        let mut index = 0;
+        while index < found.len() {
+            let current = found[index];
+            let inner: Vec<u64> = self
+                .groups
+                .iter()
+                .filter(|g| g.parent == Some(current) && !found.contains(&g.id))
+                .map(|g| g.id)
+                .collect();
+            found.extend(inner);
+            index += 1;
+        }
+        found
+    }
+
+    /// Every block in a group, those of the groups inside it included.
+    pub fn group_blocks(&self, id: u64) -> BTreeSet<NodeId> {
+        self.group_and_inner(id).iter().filter_map(|g| self.group(*g)).flat_map(|g| g.nodes.iter().copied()).collect()
+    }
+
+    /// How many groups a group is inside.
+    pub fn group_depth(&self, id: u64) -> usize {
+        let mut depth = 0;
+        let mut current = self.group(id).and_then(|g| g.parent);
+        while let Some(parent) = current {
+            depth += 1;
+            if depth > self.groups.len() {
+                break;
+            }
+            current = self.group(parent).and_then(|g| g.parent);
+        }
+        depth
+    }
+
     /// Puts the given blocks in a new group. Returns its id.
     pub fn add_group(&mut self, name: &str, nodes: &BTreeSet<NodeId>) -> Option<u64> {
-        let nodes: BTreeSet<NodeId> = nodes.iter().copied().filter(|id| self.nodes.contains_key(id)).collect();
-        if nodes.is_empty() {
+        self.add_group_around(name, nodes, &BTreeSet::new())
+    }
+
+    /// Puts blocks and groups in a new group, which takes their place: when
+    /// they were all in the same group, the new one is inside that group.
+    /// Returns its id.
+    pub fn add_group_around(&mut self, name: &str, nodes: &BTreeSet<NodeId>, groups: &BTreeSet<u64>) -> Option<u64> {
+        // A selected group's own contents move with it.
+        let groups: BTreeSet<u64> = groups
+            .iter()
+            .copied()
+            .filter(|g| self.group(*g).is_some())
+            .filter(|g| !groups.iter().any(|other| other != g && self.group_and_inner(*other).contains(g)))
+            .collect();
+        let inside: BTreeSet<NodeId> = groups.iter().flat_map(|g| self.group_blocks(*g)).collect();
+        let nodes: BTreeSet<NodeId> =
+            nodes.iter().copied().filter(|id| self.nodes.contains_key(id) && !inside.contains(id)).collect();
+        if nodes.is_empty() && groups.is_empty() {
             return None;
         }
+        let containers: BTreeSet<Option<u64>> = nodes
+            .iter()
+            .map(|n| self.group_of(*n))
+            .chain(groups.iter().map(|g| self.group(*g).and_then(|g| g.parent)))
+            .collect();
+        let parent = if containers.len() == 1 { containers.into_iter().next().flatten() } else { None };
         let id = self.groups.iter().map(|g| g.id + 1).max().unwrap_or(1);
-        self.groups.push(Group { id, name: name.to_owned(), color: None, nodes, enabled: true });
+        for group in &mut self.groups {
+            group.nodes.retain(|n| !nodes.contains(n));
+            if groups.contains(&group.id) {
+                group.parent = Some(id);
+            }
+        }
+        self.groups.push(Group { id, name: name.to_owned(), color: None, nodes, parent, enabled: true });
+        self.prune_groups();
         Some(id)
     }
 
-    /// Removes a group; its blocks stay.
+    /// Removes a group; its blocks and the groups inside it move out one level.
     pub fn remove_group(&mut self, id: u64) {
-        self.groups.retain(|g| g.id != id);
+        let Some(index) = self.groups.iter().position(|g| g.id == id) else { return };
+        let group = self.groups.remove(index);
+        if let Some(parent) = group.parent.and_then(|p| self.group_mut(p)) {
+            parent.nodes.extend(group.nodes);
+        }
+        for inner in self.groups.iter_mut().filter(|g| g.parent == Some(id)) {
+            inner.parent = group.parent;
+        }
+        self.prune_groups();
     }
 
-    /// Whether a block runs: it is enabled, and so is every group it is in.
+    /// Takes a block out of the group it is in, into the group around that
+    /// one, if there is one.
+    pub fn take_out_of_group(&mut self, node: NodeId) {
+        let Some(id) = self.group_of(node) else { return };
+        let parent = self.group(id).and_then(|g| g.parent);
+        if let Some(group) = self.group_mut(id) {
+            group.nodes.remove(&node);
+        }
+        if let Some(parent) = parent.and_then(|p| self.group_mut(p)) {
+            parent.nodes.insert(node);
+        }
+        self.prune_groups();
+    }
+
+    /// Moves blocks and groups into a group. A group cannot go inside itself
+    /// or a group inside it. Returns whether anything moved.
+    pub fn move_into_group(&mut self, target: u64, nodes: &BTreeSet<NodeId>, groups: &BTreeSet<u64>) -> bool {
+        if self.group(target).is_none() {
+            return false;
+        }
+        let mut moved = false;
+        for &node in nodes {
+            if !self.nodes.contains_key(&node) || self.group_of(node) == Some(target) {
+                continue;
+            }
+            for group in &mut self.groups {
+                group.nodes.remove(&node);
+            }
+            if let Some(group) = self.group_mut(target) {
+                group.nodes.insert(node);
+            }
+            moved = true;
+        }
+        for &id in groups {
+            if self.group_and_inner(id).contains(&target) {
+                continue;
+            }
+            if let Some(group) = self.group_mut(id)
+                && group.parent != Some(target)
+            {
+                group.parent = Some(target);
+                moved = true;
+            }
+        }
+        self.prune_groups();
+        moved
+    }
+
+    /// Whether a block runs: it is enabled, and so is every group around it.
     pub fn is_active(&self, id: NodeId) -> bool {
-        self.nodes.get(&id).is_some_and(|n| n.enabled)
-            && self.groups.iter().filter(|g| g.nodes.contains(&id)).all(|g| g.enabled)
+        if !self.nodes.get(&id).is_some_and(|n| n.enabled) {
+            return false;
+        }
+        let mut current = self.group_of(id);
+        let mut steps = 0;
+        while let Some(group) = current.and_then(|g| self.group(g)) {
+            if !group.enabled {
+                return false;
+            }
+            steps += 1;
+            if steps > self.groups.len() {
+                break;
+            }
+            current = group.parent;
+        }
+        true
     }
 
     /// A copy in which blocks of disabled groups are themselves disabled,
@@ -287,13 +439,87 @@ impl Graph {
     pub fn with_groups_applied(&self) -> Graph {
         let mut graph = self.clone();
         for group in self.groups.iter().filter(|g| !g.enabled) {
-            for id in &group.nodes {
-                if let Some(node) = graph.nodes.get_mut(id) {
+            for id in self.group_blocks(group.id) {
+                if let Some(node) = graph.nodes.get_mut(&id) {
                     node.enabled = false;
                 }
             }
         }
         graph
+    }
+
+    /// Keeps the groups a tree: parents that are missing (or would make a
+    /// loop) are dropped, and so are groups left with nothing in them.
+    fn prune_groups(&mut self) {
+        loop {
+            let ids: BTreeSet<u64> = self.groups.iter().map(|g| g.id).collect();
+            let parents: HashMap<u64, Option<u64>> = self.groups.iter().map(|g| (g.id, g.parent)).collect();
+            for group in &mut self.groups {
+                if group.parent.is_some_and(|p| !ids.contains(&p)) {
+                    group.parent = None;
+                }
+                // A chain that comes back to the group is cut here.
+                let mut current = group.parent;
+                for _ in 0..=ids.len() {
+                    match current {
+                        Some(p) if p == group.id => {
+                            group.parent = None;
+                            break;
+                        }
+                        Some(p) => current = parents.get(&p).copied().flatten(),
+                        None => break,
+                    }
+                }
+            }
+            let empty: Vec<u64> = self
+                .groups
+                .iter()
+                .filter(|g| g.nodes.is_empty() && !self.groups.iter().any(|other| other.parent == Some(g.id)))
+                .map(|g| g.id)
+                .collect();
+            if empty.is_empty() {
+                break;
+            }
+            self.groups.retain(|g| !empty.contains(&g.id));
+        }
+    }
+
+    /// Files from before groups could nest let a block be in several groups.
+    /// The block stays in the smallest of them only, and a group whose
+    /// blocks were all in a larger group goes inside it.
+    fn nest_overlapping_groups(&mut self) {
+        let mut counts: HashMap<NodeId, usize> = HashMap::new();
+        for group in &self.groups {
+            for node in &group.nodes {
+                *counts.entry(*node).or_default() += 1;
+            }
+        }
+        if counts.values().all(|&count| count <= 1) {
+            return;
+        }
+        let sets: Vec<(u64, BTreeSet<NodeId>)> = self.groups.iter().map(|g| (g.id, g.nodes.clone())).collect();
+        for group in self.groups.iter_mut().filter(|g| g.parent.is_none()) {
+            let mine = &group.nodes;
+            group.parent = sets
+                .iter()
+                .filter(|(id, set)| {
+                    *id != group.id
+                        && mine.is_subset(set)
+                        && (set.len() > mine.len() || (set.len() == mine.len() && *id < group.id))
+                })
+                .min_by_key(|(id, set)| (set.len(), std::cmp::Reverse(*id)))
+                .map(|(id, _)| *id);
+        }
+        for (node, _) in counts.into_iter().filter(|(_, count)| *count > 1) {
+            let keep = sets
+                .iter()
+                .filter(|(_, set)| set.contains(&node))
+                .min_by_key(|(id, set)| (set.len(), std::cmp::Reverse(*id)))
+                .map(|(id, _)| *id);
+            for group in self.groups.iter_mut().filter(|g| Some(g.id) != keep) {
+                group.nodes.remove(&node);
+            }
+        }
     }
 
     /// The input a flow output leads to.
@@ -409,8 +635,26 @@ impl Graph {
 
     /// Copies the given nodes and the wires between them.
     pub fn fragment(&self, ids: &BTreeSet<NodeId>) -> Fragment {
+        // The groups wholly inside the copy; one around them that is not stays behind.
+        let groups: Vec<Group> = self
+            .groups
+            .iter()
+            .filter(|g| {
+                let blocks = self.group_blocks(g.id);
+                !blocks.is_empty() && blocks.is_subset(ids)
+            })
+            .cloned()
+            .collect();
+        let kept: BTreeSet<u64> = groups.iter().map(|g| g.id).collect();
+        let groups = groups
+            .into_iter()
+            .map(|mut g| {
+                g.parent = g.parent.filter(|p| kept.contains(p));
+                g
+            })
+            .collect();
         Fragment {
-            groups: self.groups.iter().filter(|g| g.nodes.is_subset(ids)).cloned().collect(),
+            groups,
             nodes: ids.iter().filter_map(|id| self.node(*id).cloned()).collect(),
             wires: self
                 .wires
@@ -440,14 +684,23 @@ impl Graph {
                 });
             }
         }
+        // The fragment's groups get fresh ids, and keep their nesting.
+        let first = self.groups.iter().map(|g| g.id + 1).max().unwrap_or(1);
+        let group_ids: HashMap<u64, u64> =
+            fragment.groups.iter().enumerate().map(|(i, g)| (g.id, first + i as u64)).collect();
         for group in &fragment.groups {
             let nodes: BTreeSet<NodeId> = group.nodes.iter().filter_map(|id| remap.get(id).copied()).collect();
-            if let Some(id) = self.add_group(&group.name, &nodes)
-                && let Some(new) = self.group_mut(id)
-            {
-                (new.color, new.enabled) = (group.color, group.enabled);
+            for existing in &mut self.groups {
+                existing.nodes.retain(|n| !nodes.contains(n));
             }
+            self.groups.push(Group {
+                id: group_ids[&group.id],
+                nodes,
+                parent: group.parent.and_then(|p| group_ids.get(&p).copied()),
+                ..group.clone()
+            });
         }
+        self.prune_groups();
         // A Stop block that continues from a copied block continues from the copy.
         for &id in remap.values() {
             if let Some(node) = self.nodes.get_mut(&id)
@@ -480,6 +733,74 @@ mod tests {
 
     fn registry() -> Registry {
         Registry::builtin()
+    }
+
+    #[test]
+    fn groups_nest_and_blocks_leave_them_one_level_at_a_time() {
+        let r = registry();
+        let mut g = Graph::new();
+        let [a, b, c] = [0.0, 1.0, 2.0].map(|x| g.add(&r, ids::DELAY, [x * 200.0, 0.0]).unwrap());
+        let inner = g.add_group("inner", &BTreeSet::from([a, b])).unwrap();
+        // Grouping the inner group with another block puts it inside the new one.
+        let outer = g.add_group_around("outer", &BTreeSet::from([c]), &BTreeSet::from([inner])).unwrap();
+        assert_eq!(g.group(inner).unwrap().parent, Some(outer));
+        assert_eq!(g.group_of(a), Some(inner), "a block is directly in its innermost group only");
+        assert_eq!(g.group_blocks(outer), BTreeSet::from([a, b, c]));
+        assert_eq!(g.group_depth(inner), 1);
+
+        // A group that is off turns off the groups inside it.
+        g.group_mut(outer).unwrap().enabled = false;
+        assert!(!g.is_active(a) && !g.with_groups_applied().node(a).unwrap().enabled);
+        g.group_mut(outer).unwrap().enabled = true;
+
+        // Taking a block out moves it one level out, not out of everything.
+        g.take_out_of_group(a);
+        assert_eq!(g.group_of(a), Some(outer));
+        // Moving it back in.
+        assert!(g.move_into_group(inner, &BTreeSet::from([a]), &BTreeSet::new()));
+        assert_eq!(g.group_of(a), Some(inner));
+        // A group cannot go inside a group inside itself.
+        assert!(!g.move_into_group(inner, &BTreeSet::new(), &BTreeSet::from([outer])));
+
+        // Ungrouping the outer group keeps the inner one, now at the top.
+        g.remove_group(outer);
+        assert_eq!(g.group(inner).unwrap().parent, None);
+        assert_eq!(g.group_of(c), None);
+        // A group left with nothing in it goes away.
+        g.take_out_of_group(a);
+        g.take_out_of_group(b);
+        assert!(g.groups().is_empty());
+    }
+
+    #[test]
+    fn blocks_grouped_twice_in_old_files_become_nested_groups() {
+        let r = registry();
+        let mut g = Graph::new();
+        let [a, b, c] = [0.0, 1.0, 2.0].map(|x| g.add(&r, ids::DELAY, [x * 200.0, 0.0]).unwrap());
+        let mut file = Fragment::from(g);
+        let group = |id, nodes: &[NodeId]| Group {
+            id,
+            name: format!("g{id}"),
+            color: None,
+            nodes: nodes.iter().copied().collect(),
+            parent: None,
+            enabled: true,
+        };
+        // Grouped twice the same, and once with one more block.
+        file.groups = vec![group(1, &[a, b, c]), group(2, &[a, b]), group(3, &[a, b])];
+        let g = Graph::from(file);
+        let parent = |id| g.group(id).unwrap().parent;
+        assert_eq!((parent(1), parent(2), parent(3)), (None, Some(1), Some(2)));
+        assert_eq!(g.group_of(a), Some(3));
+        assert_eq!(g.group_of(c), Some(1));
+
+        // A copy of everything keeps the nesting, with fresh ids.
+        let copy = g.fragment(&BTreeSet::from([a, b, c]));
+        assert_eq!(copy.groups.len(), 3);
+        let mut other = Graph::new();
+        let ids = other.insert_fragment(&copy, [0.0, 0.0]);
+        let innermost = other.group_of(ids[0]).unwrap();
+        assert_eq!(other.group_depth(innermost), 2);
     }
 
     #[test]

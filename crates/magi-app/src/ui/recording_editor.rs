@@ -848,7 +848,7 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdi
             if !*here {
                 match end {
                     Some(end) => {
-                        ui.label(RichText::new("→").color(theme::text_faint()));
+                        ui.label(RichText::new("›").color(theme::text_faint()));
                         let (mut ex, mut ey) = (end.x, end.y);
                         if coord(ui, &mut ex, "Where the drag ends") | coord(ui, &mut ey, "Where the drag ends") {
                             edit = Some(RecordingEdit::End(index, Some(Point::new(ex, ey))));
@@ -873,14 +873,14 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdi
                 let (mut ax, mut ay, mut bx, mut by) = (a.1, a.2, b.1, b.2);
                 let mut changed =
                     coord(ui, &mut ax, "Where the movement starts") | coord(ui, &mut ay, "Where the movement starts");
-                ui.label(RichText::new("→").color(theme::text_faint()));
+                ui.label(RichText::new("›").color(theme::text_faint()));
                 changed |=
                     coord(ui, &mut bx, "Where the movement ends") | coord(ui, &mut by, "Where the movement ends");
                 if changed {
                     edit = Some(RecordingEdit::MoveEnds(index, Point::new(ax, ay), Point::new(bx, by)));
                 }
             }
-            if ui.small_button("→ Look").on_hover_text("Replay as relative motion (for game cameras)").clicked() {
+            if ui.small_button("› Look").on_hover_text("Replay as relative motion (for game cameras)").clicked() {
                 edit = Some(RecordingEdit::SwapMovement(index));
             }
         }
@@ -891,7 +891,7 @@ fn detail(ui: &mut Ui, index: usize, input: &StrokeInput) -> Option<RecordingEdi
             if changed {
                 edit = Some(RecordingEdit::LookTotal(index, tx, ty));
             }
-            if ui.small_button("→ Move").on_hover_text("Replay as movement between screen positions").clicked() {
+            if ui.small_button("› Move").on_hover_text("Replay as movement between screen positions").clicked() {
                 edit = Some(RecordingEdit::SwapMovement(index));
             }
         }

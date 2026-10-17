@@ -76,6 +76,8 @@ pub struct MacroEnv<'a> {
     pub dry_run: bool,
     pub show_console: &'a mut bool,
     pub show_variables: &'a mut bool,
+    /// Only Run, Stop and the console, without the editor.
+    pub lightweight: &'a mut bool,
     pub show_grid: bool,
     pub show_activity: bool,
     /// What Record records.
@@ -110,6 +112,10 @@ impl MacroTab {
 
     pub fn show(&mut self, ui: &mut Ui, doc: &mut Document, env: &mut MacroEnv<'_>) -> Vec<MacroEvent> {
         let mut events = Vec::new();
+        if *env.lightweight {
+            self.lightweight(ui, doc, env, &mut events);
+            return events;
+        }
         let total_width = ui.available_width();
 
         egui::Panel::top("macro-toolbar")
@@ -128,7 +134,13 @@ impl MacroTab {
                 .frame(egui::Frame::new().fill(theme::bg_panel()).inner_margin(egui::Margin::same(10)))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        events.extend(variables_panel(ui, &mut doc.project, env.registry, env.live));
+                        events.extend(variables_panel(
+                            ui,
+                            &mut doc.project,
+                            env.registry,
+                            env.live,
+                            env.show_variables,
+                        ));
                     });
                 });
         }
@@ -335,6 +347,57 @@ impl MacroTab {
         });
     }
 
+    /// The lightweight view: the macro's name, Run, Stop and the console, over
+    /// the background, with no editor.
+    fn lightweight(&mut self, ui: &mut Ui, doc: &Document, env: &mut MacroEnv<'_>, events: &mut Vec<MacroEvent>) {
+        egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(16)).show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.set_max_width(720.0);
+                ui.add_space(6.0);
+                ui.label(RichText::new(doc.title()).size(16.0).strong());
+                ui.add_space(8.0);
+                let running = !env.running.is_empty();
+                let size = vec2(120.0, 34.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(((ui.available_width() - 2.0 * size.x - 8.0) / 2.0).max(0.0));
+                    let run = with_hotkey(icon::PLAY, "Run", env.run_hotkey, false);
+                    ui.add_enabled_ui(!running, |ui| {
+                        if widgets::accent_button(ui, run, theme::accent(), size).clicked() {
+                            events.push(MacroEvent::Run);
+                        }
+                    });
+                    ui.add_enabled_ui(running, |ui| {
+                        if widgets::accent_button(ui, format!("{}  Stop", icon::STOP), theme::danger(), size).clicked()
+                        {
+                            events.push(MacroEvent::Stop);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+                let state = if running { "Running" } else { "Stopped" };
+                ui.label(RichText::new(state).size(11.5).color(if running {
+                    theme::success()
+                } else {
+                    theme::text_faint()
+                }));
+                ui.add_space(10.0);
+                egui::Frame::new()
+                    .fill(theme::bg_panel())
+                    .corner_radius(theme::RADIUS)
+                    .inner_margin(egui::Margin::symmetric(10, 6))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_height((ui.available_height() - 44.0).max(120.0));
+                        self.console(ui, env, events);
+                    });
+                ui.add_space(8.0);
+                if ui.button(format!("{}  Show the editor", icon::TREE_STRUCTURE)).clicked() {
+                    *env.lightweight = false;
+                }
+            });
+        });
+    }
+
     fn console(&mut self, ui: &mut Ui, env: &mut MacroEnv<'_>, events: &mut Vec<MacroEvent>) {
         ui.horizontal(|ui| {
             ui.label(RichText::new("CONSOLE").size(10.5).color(theme::text_faint()));
@@ -342,6 +405,9 @@ impl MacroTab {
                 ui.label(RichText::new("Dry run: no input is sent").size(11.0).color(theme::warning()));
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !*env.lightweight && widgets::icon_button(ui, icon::X, "Close the console").clicked() {
+                    *env.show_console = false;
+                }
                 let clear = egui::Button::new(RichText::new(format!("{}  Clear", icon::BROOM)).size(11.0)).small();
                 if ui.add_enabled(!env.logs.is_empty(), clear).on_hover_text("Empty the console").clicked() {
                     events.push(MacroEvent::ClearConsole);
@@ -437,11 +503,15 @@ fn variables_panel(
     project: &mut Project,
     registry: &Registry,
     live: &Map<String, Value>,
+    shown: &mut bool,
 ) -> Vec<MacroEvent> {
     let mut events = Vec::new();
     ui.horizontal(|ui| {
         ui.label(RichText::new("VARIABLES").size(10.5).color(theme::text_faint()));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if widgets::icon_button(ui, icon::X, "Close the variables").clicked() {
+                *shown = false;
+            }
             if widgets::icon_button(ui, icon::PLUS, "Add a variable").clicked() {
                 let taken = |name: &str| project.variables.iter().any(|v| v.name == name);
                 let name = (1..).map(|n| format!("variable {n}")).find(|n| !taken(n)).expect("unbounded");

@@ -14,16 +14,16 @@ use magi_core::action::{Action, PressMode};
 use magi_core::autoclicker::{ClickLimit, ClickTarget, ClickerSettings, DualMode, MULTI_CLICK_GAP_MS};
 use magi_core::geom::{Displays, Point, Rect};
 use magi_core::graph::NodeId;
-use magi_core::host::{Host, Notification, SoundSource, WindowInfo, WindowQuery};
+use magi_core::host::{Frame, Host, Notification, SoundSource, TextWord, WindowInfo, WindowQuery};
 use magi_core::input::{Button, InputEvent, Key};
 use magi_core::magic::Decision;
 use magi_core::nodes::ai::{AiParams, AiWatchParams};
 use magi_core::nodes::flow::RateParams;
-use magi_core::nodes::input::{ActionParams, PlayRecordingParams};
+use magi_core::nodes::input::{ActionParams, AutoTypeParams, NewLines, PlayRecordingParams};
 use magi_core::nodes::sound::{SoundLevelParams, SoundMatchParams};
 use magi_core::nodes::system::NotifyParams;
 use magi_core::nodes::variables::{CounterParams, SetVariableParams};
-use magi_core::nodes::vision::{FindColorParams, FindImageParams, FindMode};
+use magi_core::nodes::vision::{FindColorParams, FindImageParams, FindMode, ReadTextParams};
 use magi_core::nodes::window::{FocusWindowParams, ScreenKind};
 use magi_core::options::{ProcessRules, RuleAction, Verdict};
 use magi_core::text::parse_hex_color;
@@ -111,6 +111,76 @@ impl Sighting {
     }
 }
 
+/// The words where `find` is written, on one line. Spaces do not matter (text
+/// recognition does not always place them), and case only when `match_case`.
+fn find_words<'a>(words: &'a [TextWord], find: &str, match_case: bool) -> Option<Vec<&'a TextWord>> {
+    let fold = |c: char| if match_case { vec![c] } else { c.to_lowercase().collect() };
+    let needle: Vec<char> = find.chars().filter(|c| !c.is_whitespace()).flat_map(fold).collect();
+    if needle.is_empty() {
+        return None;
+    }
+    let lines = words.iter().map(|w| w.line).max().map_or(0, |last| last + 1);
+    for line in 0..lines {
+        let on_line: Vec<&TextWord> = words.iter().filter(|w| w.line == line).collect();
+        // The line's letters, each with the word it belongs to.
+        let mut letters: Vec<(char, usize)> = Vec::new();
+        for (index, word) in on_line.iter().enumerate() {
+            letters.extend(word.text.chars().filter(|c| !c.is_whitespace()).flat_map(fold).map(|c| (c, index)));
+        }
+        if let Some(start) =
+            letters.windows(needle.len()).position(|w| w.iter().map(|(c, _)| *c).eq(needle.iter().copied()))
+        {
+            let (first, last) = (letters[start].1, letters[start + needle.len() - 1].1);
+            return Some(on_line[first..=last].to_vec());
+        }
+    }
+    None
+}
+
+/// The first number in a text: `-12`, `3.5`, `3,5` or `1,234`.
+fn first_number(text: &str) -> Option<f64> {
+    let chars: Vec<char> = text.chars().collect();
+    let start = chars.iter().position(char::is_ascii_digit)?;
+    let mut end = start;
+    while end < chars.len()
+        && (chars[end].is_ascii_digit()
+            || (matches!(chars[end], '.' | ',') && chars.get(end + 1).is_some_and(char::is_ascii_digit)))
+    {
+        end += 1;
+    }
+    let token: String = chars[start..end].iter().collect();
+    let negative = start > 0 && matches!(chars[start - 1], '-' | '−');
+    let value = match token.rfind(['.', ',']) {
+        None => token.parse::<f64>().ok()?,
+        Some(at) => {
+            let separator = &token[at..=at];
+            let (whole, decimals) = (&token[..at], &token[at + 1..]);
+            let whole: String = whole.chars().filter(char::is_ascii_digit).collect();
+            // "1,234" and "1.234.567" group thousands; "3,5" and "3.25" have decimals.
+            let thousands = decimals.len() == 3
+                && (token.matches(separator).count() > 1 || (separator == "," && !token.contains('.')));
+            if thousands { format!("{whole}{decimals}") } else { format!("{whole}.{decimals}") }.parse::<f64>().ok()?
+        }
+    };
+    Some(if negative { -value } else { value })
+}
+
+/// An AI Watch block between the times it acts.
+struct WatchState {
+    started: Instant,
+    hits: u64,
+    last: String,
+}
+
+/// Where an AI Watch block got to: it acted (run the blocks under "Acted"),
+/// or its time is up.
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
+pub struct WatchStep {
+    pub acted: bool,
+    pub hits: u64,
+    pub label: String,
+}
+
 /// Everything one run needs to act on the world.
 pub struct RunCx {
     pub host: Arc<dyn Host>,
@@ -142,6 +212,8 @@ pub struct RunCx {
     /// The sound each Sound Recognition block recognised last, and its group:
     /// what its "Which sound" output says until it recognises another.
     last_heard: HashMap<NodeId, (String, String)>,
+    /// AI Watch blocks part-way through watching, between the times they act.
+    watches: HashMap<NodeId, WatchState>,
 }
 
 impl RunCx {
@@ -162,6 +234,7 @@ impl RunCx {
             streams: HashMap::new(),
             heard_until: HashMap::new(),
             last_heard: HashMap::new(),
+            watches: HashMap::new(),
             stop,
             stop_everything,
             held: Vec::new(),
@@ -729,10 +802,10 @@ impl RunCx {
         })
     }
 
-    /// Looks for a colour on screen (a **Color Detection** node).
+    /// Looks for a color on screen (a **Color Detection** node).
     pub fn find_color(&mut self, params: &FindColorParams) -> OpResult<Sighting> {
         let rgb = parse_hex_color(&params.color)
-            .ok_or_else(|| EngineError::new(format!("`{}` is not a colour like #FF8800", params.color)))?;
+            .ok_or_else(|| EngineError::new(format!("`{}` is not a color like #FF8800", params.color)))?;
         let area = self.search_area(params.region, params.display);
         let frame = self.host.capture(area).map_err(EngineError::from)?;
         let hit = magi_vision::find_color(ImageRef::new(frame.width, frame.height, &frame.rgba), rgb, params.tolerance);
@@ -747,7 +820,130 @@ impl RunCx {
     }
 }
 
+/// The longest side of a picture the system's text recognition accepts.
+const OCR_MAX_SIDE: u32 = 2600;
+
 impl RunCx {
+    // ---- text -----------------------------------------------------------------
+
+    /// Types text character by character (an **Auto Typer** block). `wired`
+    /// is a value wired into the block, typed instead of its own text.
+    /// Returns how many characters were typed.
+    pub fn autotype(&mut self, params: &AutoTypeParams, wired: Option<Value>, node: NodeId) -> OpResult<u64> {
+        let source = match wired {
+            Some(value) => as_text(&value),
+            None => params.text.clone(),
+        };
+        let chars = params.characters(&source);
+        if chars.is_empty() {
+            self.monitor.log(LogLevel::Info, Some(node), "Nothing to type".to_owned());
+        }
+        let pause = 1000.0 / params.speed.clamp(0.5, 2000.0);
+        let tap = |cx: &mut Self, key: Key| {
+            cx.perform_actions(&ActionParams { actions: vec![InputAction::tap(key)], hold_ms: 15.0 }, None)
+        };
+        let mut typed = 0u64;
+        for (index, &c) in chars.iter().enumerate() {
+            self.check_stop()?;
+            if index > 0 {
+                let swing = params.variation.clamp(0.0, 1.0) * (self.rng.f64() * 2.0 - 1.0);
+                let mut wait = pause * (1.0 + swing);
+                if params.punctuation_pause && matches!(chars[index - 1], '.' | ',' | '!' | '?' | ';' | ':') {
+                    wait += pause * 3.0;
+                }
+                self.sleep_ms(wait.max(0.0))?;
+            }
+            // Now and then a wrong letter, noticed and taken back.
+            if c.is_alphabetic() && params.typos > 0.0 && self.rng.f64() < params.typos.clamp(0.0, 1.0) {
+                let mut wrong = char::from(b'a' + self.rng.u8(0..26));
+                if wrong == c.to_ascii_lowercase() {
+                    wrong = if wrong == 'z' { 'a' } else { char::from(wrong as u8 + 1) };
+                }
+                let wrong = if c.is_uppercase() { wrong.to_ascii_uppercase() } else { wrong };
+                self.send(&InputEvent::Text { text: wrong.to_string() })?;
+                self.sleep_ms(pause * 2.0)?;
+                tap(self, Key::Backspace)?;
+                self.sleep_ms(pause)?;
+            }
+            match c {
+                '\n' => match params.new_lines {
+                    NewLines::Enter => tap(self, Key::Enter)?,
+                    NewLines::ShiftEnter => {
+                        self.send(&InputEvent::KeyDown { key: Key::ShiftLeft })?;
+                        tap(self, Key::Enter)?;
+                        self.send(&InputEvent::KeyUp { key: Key::ShiftLeft })?;
+                    }
+                    NewLines::Space => self.send(&InputEvent::Text { text: " ".into() })?,
+                    NewLines::Skip => continue,
+                },
+                '\t' => tap(self, Key::Tab)?,
+                c => self.send(&InputEvent::Text { text: c.to_string() })?,
+            }
+            typed += 1;
+        }
+        if params.enter_at_end {
+            if !chars.is_empty() {
+                self.sleep_ms(pause)?;
+            }
+            tap(self, Key::Enter)?;
+        }
+        Ok(typed)
+    }
+
+    /// Reads the text in an area of the screen (a **Text Scan** block).
+    pub fn read_text(&mut self, params: &ReadTextParams) -> OpResult<serde_json::Map<String, Value>> {
+        let area = self.search_area(params.region, params.display);
+        let frame = self.host.capture(area).map_err(EngineError::from)?;
+        let picture = ImageRef::new(frame.width, frame.height, &frame.rgba);
+        let longest = frame.width.max(frame.height).max(1);
+        // Enlarged as asked, but never past what text recognition accepts; a
+        // picture that is too large already is shrunk instead.
+        let mut factor = params.enlarge.factor();
+        while factor > 1 && longest * factor > OCR_MAX_SIDE {
+            factor -= 1;
+        }
+        let (prepared, scale) = if factor > 1 {
+            (magi_vision::enlarge(picture, factor), f64::from(factor))
+        } else if longest > OCR_MAX_SIDE {
+            let shrink = longest.div_ceil(OCR_MAX_SIDE);
+            (magi_vision::shrink(picture, shrink), 1.0 / f64::from(shrink))
+        } else {
+            (magi_vision::Bitmap { width: frame.width, height: frame.height, rgba: frame.rgba.clone() }, 1.0)
+        };
+        let words = self
+            .host
+            .read_text(&Frame::new(frame.origin, prepared.width, prepared.height, prepared.rgba), &params.language)
+            .map_err(EngineError::from)?;
+
+        let lines = words.iter().map(|w| w.line).max().map_or(0, |last| last + 1);
+        let text = (0..lines)
+            .map(|line| words.iter().filter(|w| w.line == line).map(|w| w.text.as_str()).collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let matched: Option<Vec<&TextWord>> = if params.find.trim().is_empty() {
+            (!words.is_empty()).then(|| words.iter().collect())
+        } else {
+            find_words(&words, &params.find, params.match_case)
+        };
+        // Where the words found are, on the desktop.
+        let position = matched.as_ref().and_then(|found| {
+            let (left, top) = found.iter().fold((i32::MAX, i32::MAX), |(l, t), w| (l.min(w.rect.x), t.min(w.rect.y)));
+            let (right, bottom) = found.iter().fold((i32::MIN, i32::MIN), |(r, b), w| {
+                (r.max(w.rect.x + w.rect.w as i32), b.max(w.rect.y + w.rect.h as i32))
+            });
+            (left <= right).then(|| {
+                let center = |a: i32, b: i32| (f64::from(a + b) / 2.0 / scale).round() as i32;
+                Point::new(frame.origin.x + center(left, right), frame.origin.y + center(top, bottom))
+            })
+        });
+        let mut outputs = serde_json::Map::new();
+        outputs.insert("found".into(), serde_json::json!(matched.is_some()));
+        outputs.insert("text".into(), serde_json::json!(text));
+        outputs.insert("position".into(), serde_json::json!(position));
+        outputs.insert("number".into(), serde_json::json!(first_number(&text)));
+        Ok(outputs)
+    }
+
     // ---- AI models ------------------------------------------------------------
 
     /// Shows the model's part of the screen to the model once.
@@ -788,22 +984,31 @@ impl RunCx {
 
     /// Keeps showing the screen to an AI model and acts on its answers (an
     /// **AI Watch** block). Returns how often it acted and its last answer.
-    pub fn ai_watch(&mut self, params: &AiWatchParams, node: NodeId) -> OpResult<(u64, String)> {
+    /// Watches until the model acts (`acted` is then true: the blocks under
+    /// "Acted" run, and the block is entered again with `returning`), or until
+    /// the time is up. Counts and the last answer carry over between entries.
+    pub fn ai_watch(&mut self, params: &AiWatchParams, node: NodeId, returning: bool) -> OpResult<WatchStep> {
         let loaded = self.program.model(&params.model)?;
         let config = loaded.spec.configured(&params.settings);
-        let engine = loaded.model.lock().unwrap_or_else(|p| p.into_inner()).engine();
-        self.monitor.log(
-            LogLevel::Info,
-            Some(node),
-            format!("“{}” is watching, on the {}", config.name, engine.label()),
-        );
-        let started = Instant::now();
+        if !returning || !self.watches.contains_key(&node) {
+            let engine = loaded.model.lock().unwrap_or_else(|p| p.into_inner()).engine();
+            self.monitor.log(
+                LogLevel::Info,
+                Some(node),
+                format!("“{}” is watching, on the {}", config.name, engine.label()),
+            );
+            self.watches.insert(node, WatchState { started: Instant::now(), hits: 0, last: String::new() });
+        } else {
+            // Back from the blocks under "Acted": let the event pass before looking again.
+            self.sleep_ms(config.action.cooldown_ms.max(0.0))?;
+        }
         let frame_time = (params.max_fps > 0.0).then(|| Duration::from_secs_f64(1.0 / params.max_fps));
-        let (mut hits, mut last) = (0u64, String::new());
         loop {
             self.check_stop()?;
-            if params.duration_ms > 0.0 && started.elapsed() >= millis(params.duration_ms) {
-                return Ok((hits, last));
+            let state = &self.watches[&node];
+            if params.duration_ms > 0.0 && state.started.elapsed() >= millis(params.duration_ms) {
+                let state = self.watches.remove(&node).expect("checked above");
+                return Ok(WatchStep { acted: false, hits: state.hits, label: state.last });
             }
             let look_started = Instant::now();
             let decision = self.ai_look(&loaded, &config, params.display)?;
@@ -813,19 +1018,27 @@ impl RunCx {
                 }
                 if params.press {
                     let press = ActionParams {
-                        actions: vec![InputAction::tap(config.action.key)],
+                        actions: vec![InputAction::press(config.action.key).ok_or_else(|| {
+                            EngineError::new("the model's button is a gamepad button, which cannot be sent")
+                        })?],
                         hold_ms: config.action.hold_ms,
                     };
                     self.perform_actions(&press, None)?;
                 }
-                hits += 1;
-                last = decision.label;
                 self.monitor.log(
                     LogLevel::Info,
                     Some(node),
-                    format!("Acted on “{last}” ({:.0}% sure)", decision.confidence * 100.0),
+                    format!(
+                        "{} “{}” ({:.0}% sure)",
+                        if params.press { "Pressed for" } else { "Saw" },
+                        decision.label,
+                        decision.confidence * 100.0
+                    ),
                 );
-                self.sleep_ms(config.action.cooldown_ms.max(0.0))?;
+                let state = self.watches.get_mut(&node).expect("set up above");
+                state.hits += 1;
+                state.last = decision.label;
+                return Ok(WatchStep { acted: true, hits: state.hits, label: state.last.clone() });
             } else if let Some(frame_time) = frame_time {
                 let spent = look_started.elapsed();
                 if spent < frame_time {

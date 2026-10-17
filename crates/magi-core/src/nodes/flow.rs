@@ -453,7 +453,7 @@ pub(super) fn register_structure(registry: &mut Registry) {
             let p: DefineParams = node.params_or_default();
             let mut lines = vec![format!("“{}”", p.name)];
             if !p.input_variable.is_empty() {
-                lines.push(format!("Input → {}", p.input_variable));
+                lines.push(format!("Input › {}", p.input_variable));
             }
             lines
         }),

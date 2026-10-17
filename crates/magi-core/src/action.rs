@@ -92,6 +92,15 @@ impl Action {
         Action::Key { key, mode: PressMode::Tap }
     }
 
+    /// A tap of a key or a click of a mouse button. Gamepad buttons cannot be sent.
+    pub fn press(button: crate::input::Button) -> Option<Self> {
+        match button {
+            crate::input::Button::Key(key) => Some(Action::tap(key)),
+            crate::input::Button::Mouse(button) => Some(Action::click(button)),
+            crate::input::Button::Pad(_) => None,
+        }
+    }
+
     /// A fresh action of the given kind, used by the "add input" menu.
     pub fn default_of(kind: &str) -> Option<Self> {
         Some(match kind {

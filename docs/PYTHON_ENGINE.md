@@ -16,10 +16,10 @@ With the engine setting on *Automatic* (the default), MacroMagi uses Python when
 
 1. the interpreter chosen under *Settings → Engine*;
 2. a `python` folder next to the MacroMagi executable (`python/python.exe` on Windows, `python/bin/python3` elsewhere);
-3. a Python downloaded from *Settings → AI → Downloads* (Windows);
+3. a Python downloaded from *Settings → Engine* (Windows);
 4. `py -3`, `python`, `python3` on Windows; `python3`, `python` elsewhere.
 
-*Settings → Engine* lists every Python it finds, with its version, in a drop-down: leave it on *Found automatically* or choose one, or pick another file. The refresh button looks again, and *Check* starts the chosen Python and tells you whether it works. When no Python is found at all, the page offers *Download Python*.
+*Settings → Engine* starts nothing when it opens. *Check* looks for every Python on the computer and starts the one macros use, to show whether it works; this is also done once, the first time a macro runs, and the result is remembered. The drop-down lists what was found: leave it on *(auto)*, which names the Python "automatic" stands for, choose one, or pick another file. Under *Download Python* the page installs a Python for MacroMagi (Windows) and uninstalls it again.
 
 ### Your own Python
 
@@ -107,7 +107,7 @@ Buttons: `"left"`, `"right"`, `"middle"`, `"back"`, `"forward"`.
 | Call | Does |
 | --- | --- |
 | `magi.find_image(image, region=None, threshold=0.8)` | Looks for one of the macro's images, by name. |
-| `magi.find_color(color, tolerance=16, region=None)` | Looks for a colour such as `"#FF8800"`. |
+| `magi.find_color(color, tolerance=16, region=None)` | Looks for a color such as `"#FF8800"`. |
 
 `region` is `(x, y, width, height)`; `None` searches the whole primary screen.
 
@@ -147,8 +147,9 @@ Messages are JSON, one per line, on standard input and output. They are listed a
 
 | Kind | Operations |
 | --- | --- |
-| Time and input | `sleep`, `actions`, `send`, `move`, `cursor`, `play_recording`, `autoclick`, `rate` |
+| Time and input | `sleep`, `actions`, `send`, `move`, `cursor`, `play_recording`, `autoclick`, `autotype`, `rate` |
 | The screen | `find_image`, `find_color`, `focus_window` |
+| Reading text | `read_text` |
 | Sound | `sound_level`, `sound_match` |
 | AI models | `ai_classify`, `ai_watch` |
 | Variables and values | `resolve`, `var_get`, `var_set`, `vars`, `set_variable`, `counter`, `math`, `compare`, `text` |

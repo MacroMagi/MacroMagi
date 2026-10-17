@@ -119,7 +119,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_plain_colour_stays_that_colour_at_any_size() {
+    fn a_plain_color_stays_that_color_at_any_size() {
         let rgba: Vec<u8> = (0..40 * 30).flat_map(|_| [200u8, 100, 50, 255]).collect();
         for (w, h) in [(10, 10), (80, 60), (40, 30)] {
             let out = resize_rgb(&rgba, 40, 30, w, h);

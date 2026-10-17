@@ -2,7 +2,7 @@
 //!
 //! The Auto Clicker tab is a front end, not a separate engine. Its settings
 //! ([`ClickerSettings`]) are the parameters of one block, **Auto Click**, and
-//! [`AutoClickerConfig::to_graph`] builds the macro `Start → Auto Click` that
+//! [`AutoClickerConfig::to_graph`] builds the macro `Start › Auto Click` that
 //! the tab runs. "Open as macro" hands that same graph to the editor, where
 //! the block can be combined with anything else.
 //!
@@ -417,7 +417,7 @@ pub struct AutoClickParams {
 }
 
 impl AutoClickerConfig {
-    /// The macro the Auto Clicker runs: `Start → Auto Click`.
+    /// The macro the Auto Clicker runs: `Start › Auto Click`.
     pub fn to_graph(&self, registry: &Registry) -> Graph {
         let mut graph = Graph::new();
         let start = graph.add(registry, ids::START, [0.0, 0.0]).expect("Start is built in");

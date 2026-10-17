@@ -1,12 +1,12 @@
 //! MacroMagi's look.
 //!
-//! Every colour in the UI comes from one [`Palette`], built from three
-//! choices: light or dark, a theme colour, and how see-through panels are
-//! (for background images). The default theme colour is none at all –
-//! monochrome, mostly black – and picking one recolours everything, node
+//! Every color in the UI comes from one [`Palette`], built from three
+//! choices: light or dark, a theme color, and how see-through panels are
+//! (for background images). The default theme color is none at all –
+//! monochrome, mostly black – and picking one recolors everything, node
 //! categories and value types included, as variations around it.
 //!
-//! Widgets read colours through the functions here (`theme::text()`,
+//! Widgets read colors through the functions here (`theme::text()`,
 //! `theme::accent()`, …) so that a theme change takes effect everywhere at once.
 
 use std::cell::Cell;
@@ -58,7 +58,7 @@ pub struct Palette {
     pub text_faint: Color32,
     pub accent: Color32,
     pub accent_bright: Color32,
-    /// Text drawn on top of the accent colour.
+    /// Text drawn on top of the accent color.
     pub on_accent: Color32,
     pub success: Color32,
     pub danger: Color32,
@@ -86,7 +86,7 @@ fn hex(rgb: u32) -> Color32 {
     Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
 
-/// HSV (all `0..=1`) to a colour.
+/// HSV (all `0..=1`) to a color.
 fn from_hsv(h: f32, s: f32, v: f32) -> Color32 {
     let h = h.rem_euclid(1.0) * 6.0;
     let c = v * s;
@@ -104,7 +104,7 @@ fn from_hsv(h: f32, s: f32, v: f32) -> Color32 {
     Color32::from_rgb(to_u8(r), to_u8(g), to_u8(b))
 }
 
-/// A colour's hue, saturation and value, all `0..=1`.
+/// A color's hue, saturation and value, all `0..=1`.
 fn to_hsv(color: Color32) -> (f32, f32, f32) {
     let [r, g, b] = [color.r(), color.g(), color.b()].map(|c| f32::from(c) / 255.0);
     let max = r.max(g).max(b);
@@ -127,7 +127,7 @@ fn luminance(color: Color32) -> f32 {
 }
 
 impl Palette {
-    /// `accent`: the theme colour, or `None` for monochrome.
+    /// `accent`: the theme color, or `None` for monochrome.
     /// `panel_alpha`: how opaque panels are (below 1 to show a background image).
     pub fn build(dark: bool, accent: Option<Color32>, panel_alpha: f32) -> Self {
         let panel_alpha = panel_alpha.clamp(0.0, 1.0);
@@ -241,7 +241,7 @@ impl Palette {
             ];
             palette.data =
                 [around(0.95), around(0.5), around(0.14), around(0.75), mix(around(0.0), palette.text_dim, 0.6)];
-            // A hint of the theme colour in the greys keeps the whole UI in one key.
+            // A hint of the theme color in the greys keeps the whole UI in one key.
             let tint = |color: Color32, amount: f32| mix(color, accent, amount);
             palette.bg_app = tint(palette.bg_app, 0.03);
             palette.bg_panel = tint(palette.bg_panel, 0.035);
@@ -338,7 +338,7 @@ pub fn text_on(background: Color32) -> Color32 {
     }
 }
 
-/// The theme colour as stored in the settings.
+/// The theme color as stored in the settings.
 pub fn accent_from(rgb: Option<[u8; 3]>) -> Option<Color32> {
     rgb.map(|[r, g, b]| Color32::from_rgb(r, g, b))
 }
@@ -467,7 +467,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn colours_survive_the_hsv_round_trip() {
+    fn colors_survive_the_hsv_round_trip() {
         for color in [hex(0x9B_6D_FF), hex(0x2D_D4_A7), hex(0xFF_B5_4A), gray(0x80)] {
             let (h, s, v) = to_hsv(color);
             let back = from_hsv(h, s, v);
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn monochrome_is_grey_and_a_theme_colour_tints_everything() {
+    fn monochrome_is_grey_and_a_theme_color_tints_everything() {
         let mono = Palette::build(true, None, 1.0);
         assert!(mono.categories.iter().all(|c| c.r() == c.g() && c.g() == c.b()));
         let violet = Palette::build(true, Some(hex(0x9B_6D_FF)), 1.0);

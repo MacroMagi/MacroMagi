@@ -4,12 +4,56 @@ Notable changes to MacroMagi. The format follows [Keep a Changelog](https://keep
 
 File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) for the compatibility rules.
 
-## 0.1.2 – Unreleased
+## 0.1.3 – Unreleased
+
+### Added
+
+- **Auto Typer** block: types text character by character – its own text, a linked variable, or a value wired in – at a speed in characters per second with random variation, longer pauses after punctuation, optional typos corrected with Backspace, trimming, skipping the first characters, a limit, a choice of what line breaks do, and Enter at the end. Outputs how many characters it typed.
+- **Text Scan** block: reads the text in an area of the screen with the text recognition built into Windows (nothing to download). Outputs the text, whether a given text is there, where it is (to click it), and the first number in it. Can enlarge small text and read a chosen language.
+- **Nested groups**: grouping blocks that are already in a group puts the new group inside it, drawn inside its box. Clicking a group's title selects the group itself; right-click it for *Select everything in it* and *Move the selection into* it. *Take out of its group* moves a block one level out.
+- **AI Watch** has an *Acted* output: the blocks under it run each time the model acts, with *Times acted* and *Last answer* up to date, and AI Watch then goes on watching. *Done* follows when its time is up (or a Stop leaves the loop).
+- **Lightweight mode** (the feather at the top right on the Macro tab): only Run, Stop and the console, over the theme and background, without the editor.
+- **Key pickers** can be searched and have *Press a key…*, which takes the next key pressed. In the Input block and for a model's key in the Magic tab they also offer mouse buttons, so a model can click instead of pressing a key.
+- **Close buttons** on the console and the Variables panel.
+- **About**: click the logo at the top left, or see *Settings › General › About*. MacroMagi is developed and created by [MagiGun](https://github.com/MagiGun) and [uvxszi](https://github.com/uvxszi).
+- Download progress shows as a small bar.
+- The bin next to an image (Image Detection) or a sound (Sound Recognition) also deletes it from the macro when no other block uses it. Files on your computer are never touched: loaded files are copied into the macro.
+
+### Changed
+
+- **Image Detection and Sound Recognition**: groups and items are one list. Each group shows its images or sounds, the ones in no group come last, and an item is dragged by its handle onto a group to put it in. The group drop-downs are gone.
+- **Settings › Engine** no longer starts anything when opened. *Check* looks for Pythons and tries the one macros use; Python is also looked for once, the first time a macro runs, and what was found is remembered. The drop-down shows what *(auto)* stands for, with its version and file. Python is downloaded – and uninstalled – here.
+- **Settings › AI** lists ONNX Runtime, its graphics card build and PyTorch, with *Check again* at the top and *Uninstall* instead of *Remove*. PyTorch goes into the Python macros use.
+- On Windows, keys are sent as scan codes, as a keyboard sends them, so games that ignore other key input receive them.
+- The Comment block's color has a color picker.
+- Rows of buttons continue on the next line in a narrow window instead of being cut off.
+- The interface size has the usual reset arrow instead of a *100%* button; the theme color swatches no longer touch the edge.
+- "Colour" is spelled "color" everywhere.
+- Releases are built for Windows only, for now.
+
+### Fixed
+
+- AI Watch's *Times acted* and *Last answer* reached other blocks only after it stopped watching – by default never.
+- Installing PyTorch asked for Python to be downloaded even when macros were running on an installed one; a Python from the Microsoft Store was not found.
+- Opening Settings › Engine or › AI flashed command windows.
+- The "→" in some messages showed as a box.
+- Links (the credits, "Get Python from python.org") did not open the browser.
+
+### File format
+
+All additions are optional; earlier files load unchanged. Groups may have a `parent` (a group inside another); in files where a block was in several groups, it stays in the smallest and the groups nest. New blocks `input.autotype` and `vision.read_text`. AI Watch has the flow output `acted`. A model's key in `.magic` files may be a mouse button (`"Mouse:Left"`). See [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md).
+
+### Known limitations
+
+- Text Scan uses the text recognition built into Windows; it reads only the languages Windows has text recognition for (usually the display language), and does not work on Linux or macOS yet.
+- Linux and macOS packages are not built for now; building from source still works.
+
+## 0.1.2
 
 ### Added
 
 - **Magic tab**, beside Auto Clicker and Macro, for small vision AI models that macros use.
-  - **Import** an ONNX model, or a project folder or ZIP that contains one. The importer reads the project's files – it never runs them – for the class names, which classes call for action, the colour normalisation, the screen area, the key and the adjustable settings, and lists what it found and what it guessed.
+  - **Import** an ONNX model, or a project folder or ZIP that contains one. The importer reads the project's files – it never runs them – for the class names, which classes call for action, the color normalisation, the screen area, the key and the adjustable settings, and lists what it found and what it guessed.
   - **Configure** the name and description; the screen area (a square in the middle of a display that scales with it, or a fixed area picked on screen); each answer's name, whether it acts, how sure the model must be and how long to wait; the key, how long it is held and the cooldown; adjustable settings that move several values at once; how pictures are prepared; and the pictures to keep for training and fine-tuning.
   - **Try it**: watch the screen live and see what the model sees and how sure it is of each answer, with or without pressing the key, or try it on a picture file.
   - **Save** `.magic` files: the model, its setup, ready-made blocks and its pictures, each optional.
@@ -32,7 +76,7 @@ File-format changes are called out explicitly; see [docs/FILE_FORMAT.md](docs/FI
 - The screen picker's display bar can be dragged, opens under the pointer, and stays inside the display.
 - *Strict hotkey modifiers* and *Stop on task switch* are under *Behaviours* in the Options menu.
 - The Log block's message is empty by default, so it logs the value wired into it.
-- The banner logo takes the theme colour, like the buttons.
+- The banner logo takes the theme color, like the buttons.
 - Sound recognition is cheaper on long sounds: what has been heard is analysed once, not on every look.
 
 ### Fixed
@@ -62,8 +106,8 @@ All additions are optional; files from 0.1.0 and 0.1.1 load unchanged. New `.mag
 - **Stop** can now end only the current round of a loop, leave the loop, or continue from another chosen block.
 - **Clipboard** block (the text on the clipboard) and **Notification** block (a sound and a desktop notification). *Options → Notify when a macro finishes* does the same whenever a macro ends by itself.
 - **Sound Detection** (loud enough, optionally within a pitch range) and **Sound Recognition** (an uploaded WAV, MP3, OGG or FLAC sound, recognised with an adjustable accuracy at any volume), listening to what the computer plays or to the microphone.
-- **Comments**: notes on the canvas that fold up and resize by their corner, in any colour.
-- **Groups**: put blocks in a named, coloured box (Ctrl+G); drag the box to move them together, and turn the whole group off to skip every block in it.
+- **Comments**: notes on the canvas that fold up and resize by their corner, in any color.
+- **Groups**: put blocks in a named, colored box (Ctrl+G); drag the box to move them together, and turn the whole group off to skip every block in it.
 - **Find** (Ctrl+F): search blocks by name, custom name, type or settings, and groups by name.
 - **Several displays**: every click position and search area remembers the display it is on, chosen in its settings; Image and Color Detection search a chosen display; the screen picker and Screen targets open on the display MacroMagi is on and switch between displays; recordings note when the pointer moves to another display.
 - **Recording Editor** window: drag rows by their grip to reorder them, **Cut** (remove the part between the handles and close the gap) beside **Trim**, and rows for key down/up, button down/up and display changes. Recordings use *down* and *up* rows only when other inputs happen while a key or button is held; otherwise one row with its hold time.
@@ -111,11 +155,11 @@ The first version. Everything is new.
 - **View → Screen targets**: every click position and search area shown over a frozen screenshot, numbered in run order, draggable and resizable.
 - **Recording** of keyboard, mouse buttons, mouse movement, scroll wheel and gamepad input, stored as press time plus hold duration per input. **Smart recording** detects games that lock the pointer and records relative motion; Play Recording can replay movement as recorded, as screen positions or as relative motion; older recordings convert from the block's context menu.
 - **Recording editor**: a spreadsheet of every input with every field editable for every kind of input, changeable row types, add/duplicate/delete, a timeline with trim handles, speed changes, and a pop-out window.
-- **Image Detection** by colour-aware template matching with a coarse-to-fine search, an adjustable accuracy threshold (default 80%), an optional search area, and a screen picker for capturing images, areas, points and colours.
+- **Image Detection** by color-aware template matching with a coarse-to-fine search, an adjustable accuracy threshold (default 80%), an optional search area, and a screen picker for capturing images, areas, points and colors.
 - **Two engines** with identical behaviour: Python (standard library only, auto-detected, with Python Script blocks and a `magi` scripting API) and native Rust.
 - **Hotkeys** from any keyboard key (Escape and function keys included), mouse button or gamepad button, alone or combined; Auto Clicker, Run, Record, stop-everything and any number of extra stop hotkeys; all listed in Settings with conflict warnings and a reset button. Run and Record show their hotkeys and ask before starting when theirs has been removed.
 - **Options** menu: strict hotkey modifiers, stop on task switch (Alt+Tab, Win+Tab), auto-stop hotkeys, program rules (whitelist or blacklist with search and per-program stop or pause), stopping the Auto Clicker while a hotkey is edited, dry run, and creating a desktop shortcut.
-- **Appearance**: monochrome by default; a theme colour that recolours the whole interface; Light, Dark or System theme (System by default); a background picture or animated GIF/WebP from a file or web address, with opacity, blur, darkness and panel opacity.
+- **Appearance**: monochrome by default; a theme color that recolors the whole interface; Light, Dark or System theme (System by default); a background picture or animated GIF/WebP from a file or web address, with opacity, blur, darkness and panel opacity.
 - **Settings window**: movable and resizable, in pages (General, Appearance, Hotkeys, Recording, Engine), with "Reset all hotkeys" and "Reset all settings".
 - **Export** dialog: choose to include presets, Options and Auto Clicker settings in a `.magi` file; files that carry them offer to apply them on opening.
 - **Safety**: keys and buttons held by a macro are released when it stops; dry-run mode; on Windows, input sent by MacroMagi never triggers its own hotkeys or ends up in its own recordings.

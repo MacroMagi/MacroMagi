@@ -66,6 +66,9 @@ fn summary(node: &Node, assets: &AssetStore) -> Vec<String> {
     lines
 }
 
+/// AI Watch's flow output taken each time it acts.
+pub const ACTED: &str = "acted";
+
 fn model_param() -> ParamDef {
     ParamDef::new("model", "Model", ParamKind::Model)
         .help("A model prepared in the Magic tab. Use “Use in Macro” there, or load a .magic file.")
@@ -88,19 +91,22 @@ pub(super) fn register(registry: &mut Registry) {
             "AI Watch",
             Category::Ai,
             "Keeps showing part of the screen to an AI model and does what the model is set up to do – for \
-             example press a key the moment it sees the right thing. Runs until the macro stops, or for as \
-             long as set.",
+             example press a key the moment it sees the right thing. Each time it acts, the blocks under \
+             “Acted” run (with “Times acted” and “Last answer” up to date), then it watches again. Runs until \
+             the macro stops, or for as long as set; then it continues from “Done”.",
         )
         .keywords(&["ai", "model", "magic", "vision", "watch", "neural", "onnx", "skill check", "detect"])
         .flow_in()
-        .flow_out(ports::OUT, "")
+        .flow_out(ACTED, "Acted")
+        .flow_out(ports::OUT, "Done")
         .data_out("hits", "Times acted", DataType::Number)
         .data_out("label", "Last answer", DataType::Text)
         .param(model_param())
         .param(settings_param())
         .param(display_param())
         .param(ParamDef::new("press", "Press the model's key", ParamKind::Bool).help(
-            "Off: the model only watches – try it safely, and wire “Times acted” or “Last answer” into other blocks.",
+            "Off: the model only watches and runs the blocks under “Acted” – try it safely, or do something \
+             else than pressing the key.",
         ))
         .param(
             ParamDef::new("duration_ms", "Stop after", ParamKind::Duration)

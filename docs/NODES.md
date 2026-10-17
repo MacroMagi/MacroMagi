@@ -184,6 +184,30 @@ Clicks (or presses keys) over and over at a steady speed, with everything the Au
 | --- | --- | --- | --- |
 | Clicking | Auto Clicker settings | left click, 10 per second, until stopped |  |
 
+### Auto Typer
+
+`input.autotype`
+
+Types text, character by character, at a speed that can vary like a person's. The text is its own setting, a variable it is linked to, or whatever is wired into “Text”.
+
+- Flow in: yes
+- Flow out: yes
+- Value inputs: **Text** (text)
+- Value outputs: **Characters typed** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Text | text | empty | What to type. A value wired into “Text” is typed instead. |
+| Characters per second | number | 12 per second | A person types about 5 per second (60 words a minute). |
+| Speed variation | percentage | 30% | How much each pause between characters may differ, so the rhythm is not mechanical. |
+| Pause after punctuation | on/off | on | A longer pause after . , ! ? ; and :, as people make. |
+| Typos | percentage | 0% | The chance of mistyping a letter and correcting it with Backspace. 0% types it right. |
+| Trim spaces at the ends | on/off | off |  |
+| Skip the first | whole number | 0 characters |  |
+| Type at most | whole number | 0 characters | 0 types everything. |
+| Line breaks | choice | Press Enter | Options: Press Enter; Press Shift+Enter – a new line in a chat box; Type a space; Leave them out. |
+| Press Enter at the end | on/off | off |  |
+
 ### Play Recording
 
 `input.recording`
@@ -208,13 +232,13 @@ Looking at the screen. These are value blocks: they have no place in the order o
 
 `vision.find_color`
 
-Looks for a colour on screen. “Found” is true when at least one pixel in the search area matches; “Position” is the first matching pixel.
+Looks for a color on screen. “Found” is true when at least one pixel in the search area matches; “Position” is the first matching pixel.
 
 - Value outputs: **Found** (true/false), **Position** (screen position)
 
 | Setting | Kind | Default | Notes |
 | --- | --- | --- | --- |
-| Color | colour | #FF3B30 |  |
+| Color | color | #FF3B30 |  |
 | Tolerance | whole number | 16 | How far red, green and blue may each be off and still count as a match. |
 | Search area | screen area | whole screen |  |
 | Display | display | 1 (primary) | The display searched when there is no search area. |
@@ -235,6 +259,23 @@ Looks for an image on screen. “Found” is true when a match at least as simil
 | Display | display | 1 (primary) | The display searched when there is no search area. |
 | Accuracy | percentage | 80% | How closely the screen must match the image. 100% demands a pixel-perfect match. |
 | Detail | choice | Full | Shrinks the screen and the images before comparing them. Less detail is much faster but can miss small or fine images. Options: Full – most accurate; Half – about 4× faster; A third – about 9× faster; A quarter – fastest. |
+
+### Text Scan
+
+`vision.read_text`
+
+Reads the text in an area of the screen (optical character recognition). “Text” is what it reads, line by line. With text to look for, “Found” says whether it is there and “Position” is where; “Number” is the first number in the text. Uses the text recognition built into Windows.
+
+- Value outputs: **Found** (true/false), **Text** (text), **Position** (screen position), **Number** (number)
+
+| Setting | Kind | Default | Notes |
+| --- | --- | --- | --- |
+| Area | screen area | whole screen | The area to read. A small area around the text is faster and reads more reliably. |
+| Display | display | 1 (primary) | The display read when there is no area. |
+| Look for | text | empty | Text that makes “Found” true. Empty: any text does. |
+| Match upper and lower case | on/off | off |  |
+| Enlarge | choice | No | Text recognition needs letters at least about 10 pixels tall. Options: No – the text is a normal size; Twice – small text; Three times – tiny text. |
+| Language | text | empty | A language tag such as en-US or de-DE. Empty: the languages of your Windows. |
 
 ## Sound
 
@@ -297,10 +338,10 @@ Shows part of the screen to an AI model once and gives its answer: the likeliest
 
 `ai.watch`
 
-Keeps showing part of the screen to an AI model and does what the model is set up to do – for example press a key the moment it sees the right thing. Runs until the macro stops, or for as long as set.
+Keeps showing part of the screen to an AI model and does what the model is set up to do – for example press a key the moment it sees the right thing. Each time it acts, the blocks under “Acted” run (with “Times acted” and “Last answer” up to date), then it watches again. Runs until the macro stops, or for as long as set; then it continues from “Done”.
 
 - Flow in: yes
-- Flow out: yes
+- Flow out: **Acted**, **Done**
 - Value outputs: **Times acted** (number), **Last answer** (text)
 
 | Setting | Kind | Default | Notes |
@@ -308,7 +349,7 @@ Keeps showing part of the screen to an AI model and does what the model is set u
 | Model | AI model | none | A model prepared in the Magic tab. Use “Use in Macro” there, or load a .magic file. |
 | Model settings | model settings | the model's own | The model's own adjustable settings, changed for this block only. |
 | Display | display | 1 (primary) | For models that look at the middle of the screen: which display. |
-| Press the model's key | on/off | on | Off: the model only watches – try it safely, and wire “Times acted” or “Last answer” into other blocks. |
+| Press the model's key | on/off | on | Off: the model only watches and runs the blocks under “Acted” – try it safely, or do something else than pressing the key. |
 | Stop after | duration | 0 ms | 0 keeps watching until the macro is stopped. |
 | Looks per second | number | 0 | 0 looks as often as the computer can. A limit saves power. |
 
@@ -522,4 +563,4 @@ A note on the canvas. It does nothing when the macro runs. Resize it by its corn
 | Width | number | 240 |  |
 | Height | number | 120 |  |
 | Folded | on/off | off |  |
-| Colour | text | empty | #RRGGBB, or empty |
+| Color | color |  | Pick a color or type #RRGGBB. Empty (the reset button) uses the theme color. |
